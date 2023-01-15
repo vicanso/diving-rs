@@ -3,10 +3,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 
-static REGISTRY: &str = "https://index.docker.io/v2";
-static AUTH: &str = "https://auth.docker.io";
-static SERVICE: &str = "registry.docker.io";
-
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("Build request {} fail: {}", url, source))]
@@ -17,9 +13,15 @@ pub enum Error {
     Json { source: reqwest::Error, url: String },
     #[snafu(display("Get {} bytes fail: {}", url, source))]
     Bytes { source: reqwest::Error, url: String },
+    #[snafu(display("Serde json fail: {}", source))]
+    SerdeJson { source: serde_json::Error },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+static REGISTRY: &str = "https://index.docker.io/v2";
+static AUTH: &str = "https://auth.docker.io";
+static SERVICE: &str = "registry.docker.io";
 
 #[derive(Debug, Clone, Default)]
 pub struct DockerClient {
@@ -59,6 +61,36 @@ pub struct DockerManifestLayer {
     pub media_type: String,
     pub digest: String,
     pub size: i64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerImageConfig {
+    pub architecture: String,
+    pub created: String,
+    pub history: Vec<DockerImageHistory>,
+    pub os: String,
+    pub rootfs: DockerImageRootfs,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerImageHistory {
+    pub created: String,
+    #[serde(rename = "created_by")]
+    pub created_by: String,
+    #[serde(rename = "empty_layer")]
+    pub empty_layer: Option<bool>,
+    pub comment: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerImageRootfs {
+    #[serde(rename = "type")]
+    pub type_field: String,
+    #[serde(rename = "diff_ids")]
+    pub diff_ids: Vec<String>,
 }
 
 impl DockerClient {
@@ -111,7 +143,20 @@ impl DockerClient {
             .context(JsonSnafu { url })?;
         Ok(resp)
     }
-    pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Bytes> {
+    pub async fn get_image_config(
+        &self,
+        user: &str,
+        img: &str,
+        tag: &str,
+    ) -> Result<DockerImageConfig> {
+        let image_config = self.get_manifest(user, img, tag).await?;
+        let data = self
+            .get_blob(user, img, image_config.config.digest.as_str())
+            .await?;
+        let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
+        Ok(result)
+    }
+    pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Vec<u8>> {
         let token = self.get_pull_token(user, img).await?;
         let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
         let resp = Client::builder()
@@ -126,6 +171,6 @@ impl DockerClient {
             .await
             .context(BytesSnafu { url: url.clone() })?;
 
-        Ok(resp)
+        Ok(resp.to_vec())
     }
 }
