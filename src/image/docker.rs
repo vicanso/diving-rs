@@ -65,6 +65,31 @@ pub struct DockerManifestLayer {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DockerManifestList {
+    pub media_type: String,
+    pub schema_version: i64,
+    pub manifests: Vec<DockerManifestListManifest>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerManifestListManifest {
+    pub media_type: String,
+    pub digest: String,
+    pub size: i64,
+    pub platform: DockerManifestListPlatform,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerManifestListPlatform {
+    pub architecture: String,
+    pub os: String,
+}
+
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockerImageConfig {
     pub architecture: String,
     pub created: String,
@@ -101,6 +126,14 @@ impl DockerClient {
             service: SERVICE.to_string(),
         }
     }
+    pub fn new_custom(register: &str, auth: &str, service: &str) -> Self {
+        DockerClient {
+            registry: register.to_string(),
+            auth: auth.to_string(),
+            service: service.to_string(),
+        }
+    }
+    // 获取docker的token
     async fn get_token(&self, scope: &String) -> Result<DockerTokenInfo> {
         let url = format!(
             "{}/token?service={}&scope={}",
@@ -115,12 +148,37 @@ impl DockerClient {
             .context(JsonSnafu { url })?;
         Ok(resp)
     }
+    // 获取pull时使用的token
     async fn get_pull_token(&self, user: &str, img: &str) -> Result<DockerTokenInfo> {
         let scope = format!("repository:{}/{}:pull", user, img);
         let token = self.get_token(&scope).await?;
         Ok(token)
     }
+    // 获取所有的manifest
+    pub async fn list_manifest(&self, user: &str, img: &str, tag: &str) -> Result<DockerManifestList> {
+        let token = self.get_pull_token(user, img).await?;
 
+        let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
+
+        let resp = Client::builder()
+            .build()
+            .context(BuildSnafu { url: url.clone() })?
+            .get(url.clone())
+            .header("Authorization", format!("Bearer {}", token.token))
+            .header(
+                "Accept",
+                "application/vnd.docker.distribution.manifest.list.v2+json",
+            )
+            .send()
+            .await
+            .context(RequestSnafu { url: url.clone() })?
+            .json::<DockerManifestList>()
+            .await
+            .context(JsonSnafu { url })?;
+            
+        Ok(resp)
+    }
+    // 获取manifest
     pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<DockerManifest> {
         let token = self.get_pull_token(user, img).await?;
 
@@ -143,6 +201,7 @@ impl DockerClient {
             .context(JsonSnafu { url })?;
         Ok(resp)
     }
+    // 获取镜像的信息
     pub async fn get_image_config(
         &self,
         user: &str,
@@ -156,6 +215,7 @@ impl DockerClient {
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
+    // 获取镜像分层的blo
     pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Vec<u8>> {
         let token = self.get_pull_token(user, img).await?;
         let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
