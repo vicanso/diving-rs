@@ -39,7 +39,7 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
     Ok(Bytes::copy_from_slice(&decode_data).to_vec())
 }
 
-// 从分层数据中读取文件 
+// 从分层数据中读取文件
 pub async fn get_file_content_from_layer(
     data: &[u8],
     is_gzip: bool,

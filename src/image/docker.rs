@@ -1,7 +1,15 @@
-use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use lru::LruCache;
+use once_cell::sync::OnceCell;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
+use std::{num::NonZeroUsize, str::FromStr, sync::Mutex};
+
+use super::{
+    get_files_from_layer,
+    layer::{self, FileInfo},
+};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -15,6 +23,8 @@ pub enum Error {
     Bytes { source: reqwest::Error, url: String },
     #[snafu(display("Serde json fail: {}", source))]
     SerdeJson { source: serde_json::Error },
+    #[snafu(display("Layer handle fail: {}", source))]
+    Layer { source: super::layer::Error },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -36,6 +46,51 @@ pub struct DockerTokenInfo {
     access_token: String,
     expires_in: i32,
     issued_at: String,
+}
+
+impl DockerTokenInfo {
+    fn expired(&self) -> bool {
+        if let Ok(value) = DateTime::<Utc>::from_str(self.issued_at.as_str()) {
+            // 因为后续需要使用token获取数据
+            // 因此提交10秒认为过期，避免请求时失效
+            let offset = (self.expires_in - 10) as i64;
+            let now = Utc::now().timestamp();
+            return value.timestamp() + offset <= now;
+        }
+        false
+    }
+}
+
+fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>> {
+    static DOCKER_TOKEN_CACHE: OnceCell<Mutex<LruCache<String, DockerTokenInfo>>> = OnceCell::new();
+    DOCKER_TOKEN_CACHE.get_or_init(|| {
+        let c = LruCache::new(NonZeroUsize::new(100).unwrap());
+        Mutex::new(c)
+    })
+}
+
+async fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
+    if let Ok(mut cache) = get_docker_token_cache().lock() {
+        if let Some(info) = cache.get(key) {
+            return Some(info.clone());
+        }
+    }
+    Option::None
+}
+
+async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
+    // 失败忽略
+    if let Ok(mut cache) = get_docker_token_cache().lock() {
+        cache.put(key.to_string(), info);
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerAnalysisResult {
+    manifest: DockerManifest,
+    config: DockerImageConfig,
+    layer_files: Vec<Vec<FileInfo>>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,7 +141,6 @@ pub struct DockerManifestListPlatform {
     pub architecture: String,
     pub os: String,
 }
-
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +193,12 @@ impl DockerClient {
             "{}/token?service={}&scope={}",
             self.auth, self.service, scope
         );
+        let key = &url.clone();
+        if let Some(info) = get_docker_token_from_cache(&url).await {
+            if !info.expired() {
+                return Ok(info);
+            }
+        }
         // TODO HTTP请求响应4xx,5xx的处理
         let resp = reqwest::get(url.clone())
             .await
@@ -146,6 +206,8 @@ impl DockerClient {
             .json::<DockerTokenInfo>()
             .await
             .context(JsonSnafu { url })?;
+        // 将token缓存，方便后续使用
+        set_docker_token_to_cache(key, resp.clone()).await;
         Ok(resp)
     }
     // 获取pull时使用的token
@@ -155,7 +217,12 @@ impl DockerClient {
         Ok(token)
     }
     // 获取所有的manifest
-    pub async fn list_manifest(&self, user: &str, img: &str, tag: &str) -> Result<DockerManifestList> {
+    pub async fn list_manifest(
+        &self,
+        user: &str,
+        img: &str,
+        tag: &str,
+    ) -> Result<DockerManifestList> {
         let token = self.get_pull_token(user, img).await?;
 
         let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
@@ -175,7 +242,7 @@ impl DockerClient {
             .json::<DockerManifestList>()
             .await
             .context(JsonSnafu { url })?;
-            
+
         Ok(resp)
     }
     // 获取manifest
@@ -183,7 +250,6 @@ impl DockerClient {
         let token = self.get_pull_token(user, img).await?;
 
         let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
-
         let resp = Client::builder()
             .build()
             .context(BuildSnafu { url: url.clone() })?
@@ -232,5 +298,25 @@ impl DockerClient {
             .context(BytesSnafu { url: url.clone() })?;
 
         Ok(resp.to_vec())
+    }
+    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalysisResult> {
+        let manifest = self.get_manifest(user, img, tag).await?;
+        let config = self.get_image_config(user, img, tag).await?;
+        let mut layer_files = vec![];
+        for layer in manifest.layers.clone() {
+            // 判断是否压缩
+            let buf = self.get_blob(user, img, &layer.digest).await?;
+
+            let is_gzip = layer.media_type.contains("gzip");
+            let files = get_files_from_layer(&buf, is_gzip)
+                .await
+                .context(LayerSnafu {})?;
+            layer_files.push(files);
+        }
+        Ok(DockerAnalysisResult {
+            manifest,
+            config,
+            layer_files,
+        })
     }
 }
