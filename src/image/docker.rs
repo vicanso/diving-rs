@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::{num::NonZeroUsize, str::FromStr, sync::Mutex};
 
-use super::{
-    get_files_from_layer,
-    layer::{self, FileInfo},
-};
+use super::{get_files_from_layer, layer::FileInfo};
+use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -49,6 +47,7 @@ pub struct DockerTokenInfo {
 }
 
 impl DockerTokenInfo {
+    // 判断docker token是否已过期
     fn expired(&self) -> bool {
         if let Ok(value) = DateTime::<Utc>::from_str(self.issued_at.as_str()) {
             // 因为后续需要使用token获取数据
@@ -61,6 +60,7 @@ impl DockerTokenInfo {
     }
 }
 
+// 获取docker token的缓存实例
 fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>> {
     static DOCKER_TOKEN_CACHE: OnceCell<Mutex<LruCache<String, DockerTokenInfo>>> = OnceCell::new();
     DOCKER_TOKEN_CACHE.get_or_init(|| {
@@ -69,6 +69,7 @@ fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>>
     })
 }
 
+// 从缓存中获取docker token
 async fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         if let Some(info) = cache.get(key) {
@@ -78,6 +79,7 @@ async fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
     Option::None
 }
 
+// 将docker token写入缓存
 async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
     // 失败忽略
     if let Ok(mut cache) = get_docker_token_cache().lock() {
@@ -86,11 +88,17 @@ async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockerLayerFiles {
+    digest: String,
+    files: Vec<FileInfo>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerAnalysisResult {
     manifest: DockerManifest,
     config: DockerImageConfig,
-    layer_files: Vec<Vec<FileInfo>>,
+    layer_files: Vec<DockerLayerFiles>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +292,11 @@ impl DockerClient {
     // 获取镜像分层的blo
     pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Vec<u8>> {
         let token = self.get_pull_token(user, img).await?;
+        // 是否需要加锁避免同时读写
+        // 忽略出错，如果出错直接从网络加载
+        if let Ok(data) = get_blob_from_file(digest).await {
+            return Ok(data);
+        }
         let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
         let resp = Client::builder()
             .build()
@@ -297,8 +310,12 @@ impl DockerClient {
             .await
             .context(BytesSnafu { url: url.clone() })?;
 
+        // 出错忽略
+        // 写入数据失败不影响后续
+        let _ = save_blob_to_file(digest, &resp).await;
         Ok(resp.to_vec())
     }
+    // 分析镜像
     pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalysisResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
@@ -311,7 +328,10 @@ impl DockerClient {
             let files = get_files_from_layer(&buf, is_gzip)
                 .await
                 .context(LayerSnafu {})?;
-            layer_files.push(files);
+            layer_files.push(DockerLayerFiles {
+                digest: layer.digest,
+                files,
+            });
         }
         Ok(DockerAnalysisResult {
             manifest,
