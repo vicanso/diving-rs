@@ -1,5 +1,4 @@
 mod docker;
-mod fs;
 mod layer;
 
 pub use docker::DockerClient;
