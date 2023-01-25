@@ -88,17 +88,21 @@ async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DockerLayerFiles {
-    digest: String,
-    files: Vec<FileInfo>,
+pub struct DockerLayerInfos {
+    pub created: String,
+    pub digest: String,
+    pub cmd: String,
+    pub size: i64,
+    pub files: Vec<FileInfo>,
+    pub empty: bool,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerAnalysisResult {
-    manifest: DockerManifest,
-    config: DockerImageConfig,
-    layer_files: Vec<DockerLayerFiles>,
+    pub created: String,
+    pub architecture: String,
+    pub layers: Vec<DockerLayerInfos>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,24 +323,44 @@ impl DockerClient {
     pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalysisResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
-        let mut layer_files = vec![];
-        for layer in manifest.layers.clone() {
-            // 判断是否压缩
-            let buf = self.get_blob(user, img, &layer.digest).await?;
+        let mut layers = vec![];
+        let mut index = 0;
+        for history in &config.history {
+            let empty = history.empty_layer.unwrap_or_default();
+            let mut digest = "".to_string();
+            let mut files = vec![];
+            let mut size = 0;
+            // 只有空的layer需要获取files
+            if !empty {
+                if let Some(value) = manifest.layers.get(index) {
+                    size = value.size;
+                    digest = value.digest.clone();
+                    // 判断是否压缩
+                    let buf = self.get_blob(user, img, &digest).await?;
 
-            let is_gzip = layer.media_type.contains("gzip");
-            let files = get_files_from_layer(&buf, is_gzip)
-                .await
-                .context(LayerSnafu {})?;
-            layer_files.push(DockerLayerFiles {
-                digest: layer.digest,
+                    let is_gzip = value.media_type.contains("gzip");
+                    files = get_files_from_layer(&buf, is_gzip)
+                        .await
+                        .context(LayerSnafu {})?;
+                }
+                index += 1;
+            }
+
+            layers.push(DockerLayerInfos {
+                created: history.created.clone(),
+                cmd: history.created_by.clone(),
+                empty,
+                digest,
                 files,
+                size,
             });
         }
+
+    
         Ok(DockerAnalysisResult {
-            manifest,
-            config,
-            layer_files,
+            created: config.created,
+            architecture: config.architecture,
+            layers,
         })
     }
 }
