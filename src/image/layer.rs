@@ -1,9 +1,10 @@
 use bytes::Bytes;
 use libflate::gzip::Decoder;
-use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::io::Read;
 use tar::Archive;
+
+use super::FileInfo;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -17,17 +18,6 @@ pub enum Error {
     Tar { source: std::io::Error },
 }
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileInfo {
-    pub path: String,
-    pub link: String,
-    pub size: u64,
-    pub mode: u32,
-    pub uid: u64,
-    pub gid: u64,
-}
 
 // 解压gzip
 fn gunzip(data: &[u8]) -> Result<Vec<u8>> {

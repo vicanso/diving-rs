@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::{num::NonZeroUsize, str::FromStr, sync::Mutex};
 
-use super::{get_files_from_layer, layer::FileInfo};
+use super::{get_files_from_layer, AnalysisResult, LayerInfos};
 use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
@@ -85,24 +85,6 @@ async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         cache.put(key.to_string(), info);
     }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DockerLayerInfos {
-    pub created: String,
-    pub digest: String,
-    pub cmd: String,
-    pub size: i64,
-    pub files: Vec<FileInfo>,
-    pub empty: bool,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerAnalysisResult {
-    pub created: String,
-    pub architecture: String,
-    pub layers: Vec<DockerLayerInfos>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -320,7 +302,7 @@ impl DockerClient {
         Ok(resp.to_vec())
     }
     // 分析镜像
-    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalysisResult> {
+    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<AnalysisResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
         let mut layers = vec![];
@@ -346,7 +328,7 @@ impl DockerClient {
                 index += 1;
             }
 
-            layers.push(DockerLayerInfos {
+            layers.push(LayerInfos {
                 created: history.created.clone(),
                 cmd: history.created_by.clone(),
                 empty,
@@ -356,8 +338,7 @@ impl DockerClient {
             });
         }
 
-    
-        Ok(DockerAnalysisResult {
+        Ok(AnalysisResult {
             created: config.created,
             architecture: config.architecture,
             layers,
