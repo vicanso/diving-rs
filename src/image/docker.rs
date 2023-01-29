@@ -2,11 +2,13 @@ use chrono::{DateTime, Utc};
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::{num::NonZeroUsize, str::FromStr, sync::Mutex};
+use std::{collections::HashMap, convert::From, num::NonZeroUsize, str::FromStr, sync::Mutex};
+use tracing::info;
 
-use super::{get_files_from_layer, AnalysisResult, LayerInfos};
+use super::{get_files_from_layer, AnalysisResult, ImageIndex, Layer, Manifest};
 use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
@@ -23,6 +25,12 @@ pub enum Error {
     SerdeJson { source: serde_json::Error },
     #[snafu(display("Layer handle fail: {}", source))]
     Layer { source: super::layer::Error },
+    #[snafu(display("Request {} code: {} fail: {}", url, code, message))]
+    Docker {
+        message: String,
+        code: String,
+        url: String,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -96,6 +104,27 @@ pub struct DockerManifest {
     pub layers: Vec<DockerManifestLayer>,
 }
 
+impl From<DockerManifest> for ImageIndex {
+    fn from(item: DockerManifest) -> Self {
+        let mut manifests = vec![];
+        for layer in item.layers {
+            manifests.push(Manifest {
+                media_type: layer.media_type,
+                digest: layer.digest,
+                size: layer.size,
+                // TODO 处理platform
+                ..Default::default()
+            })
+        }
+
+        ImageIndex {
+            media_type: item.media_type,
+            schema_version: item.schema_version,
+            manifests,
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerManifestConfig {
@@ -166,6 +195,31 @@ pub struct DockerImageRootfs {
     pub diff_ids: Vec<String>,
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerRequestErrorResp {
+    pub errors: Vec<DockerRequestError>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerRequestError {
+    pub code: String,
+    pub message: String,
+}
+
+fn get_value_from_json(v: &[u8], key: &str) -> Result<String> {
+    let mut root: Value = serde_json::from_slice(v).context(SerdeJsonSnafu {})?;
+    for k in key.split(".") {
+        let value = root.get(k);
+        if value.is_none() {
+            return Ok("".to_string());
+        }
+        root = value.unwrap().to_owned();
+    }
+    Ok(root.as_str().unwrap_or_else(|| "").to_string())
+}
+
 impl DockerClient {
     pub fn new() -> Self {
         DockerClient {
@@ -173,6 +227,46 @@ impl DockerClient {
             auth: AUTH.to_string(),
             service: SERVICE.to_string(),
         }
+    }
+    async fn get_bytes(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+    ) -> Result<bytes::Bytes> {
+        let mut builder = Client::builder()
+            .build()
+            .context(BuildSnafu { url: url.clone() })?
+            .get(url.clone());
+        for (key, value) in headers {
+            builder = builder.header(key, value);
+        }
+        let resp = builder
+            .send()
+            .await
+            .context(RequestSnafu { url: url.clone() })?;
+        if resp.status().as_u16() >= 400 {
+            let err = resp
+                .json::<DockerRequestErrorResp>()
+                .await
+                .context(JsonSnafu { url: url.clone() })?;
+            return Err(Error::Docker {
+                message: err.errors[0].message.clone(),
+                code: err.errors[0].code.clone(),
+                url: url.clone(),
+            });
+        }
+
+        let result = resp.bytes().await.context(JsonSnafu { url: url.clone() })?;
+        Ok(result)
+    }
+    async fn get<T: DeserializeOwned>(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+    ) -> Result<T> {
+        let data = self.get_bytes(url.clone(), headers).await?;
+        let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {})?;
+        Ok(result)
     }
     pub fn new_custom(register: &str, auth: &str, service: &str) -> Self {
         DockerClient {
@@ -193,15 +287,17 @@ impl DockerClient {
                 return Ok(info);
             }
         }
+        info!(url = url, "Getting token");
         // TODO HTTP请求响应4xx,5xx的处理
         let resp = reqwest::get(url.clone())
             .await
             .context(RequestSnafu { url: url.clone() })?
             .json::<DockerTokenInfo>()
             .await
-            .context(JsonSnafu { url })?;
+            .context(JsonSnafu { url: url.clone() })?;
         // 将token缓存，方便后续使用
         set_docker_token_to_cache(key, resp.clone()).await;
+        info!(url = url, "Got token");
         Ok(resp)
     }
     // 获取pull时使用的token
@@ -240,25 +336,30 @@ impl DockerClient {
         Ok(resp)
     }
     // 获取manifest
-    pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<DockerManifest> {
+    pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<ImageIndex> {
         let token = self.get_pull_token(user, img).await?;
 
         let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
-        let resp = Client::builder()
-            .build()
-            .context(BuildSnafu { url: url.clone() })?
-            .get(url.clone())
-            .header("Authorization", format!("Bearer {}", token.token))
-            .header(
-                "Accept",
-                "application/vnd.docker.distribution.manifest.v2+json",
-            )
-            .send()
-            .await
-            .context(RequestSnafu { url: url.clone() })?
-            .json::<DockerManifest>()
-            .await
-            .context(JsonSnafu { url })?;
+        info!(url = url, "Getting manifest");
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", token.token),
+        );
+        headers.insert(
+            "Accept".to_string(),
+            "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json".to_string(),
+        );
+        let data = self.get_bytes(url.clone(), headers).await?;
+        let media_type = get_value_from_json(&data, "mediaType")?;
+        let resp = if media_type.contains("docker") {
+            let result: DockerManifest =
+                serde_json::from_slice(&data).context(SerdeJsonSnafu {})?;
+            result.into()
+        } else {
+            serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
+        };
+        info!(url = url, "Got manifest");
         Ok(resp)
     }
     // 获取镜像的信息
@@ -275,7 +376,7 @@ impl DockerClient {
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
-    // 获取镜像分层的blo
+    // 获取镜像分层的blob
     pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Vec<u8>> {
         let token = self.get_pull_token(user, img).await?;
         // 是否需要加锁避免同时读写
@@ -284,6 +385,7 @@ impl DockerClient {
             return Ok(data);
         }
         let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
+        info!(url = url, "Getting blob");
         let resp = Client::builder()
             .build()
             .context(BuildSnafu { url: url.clone() })?
@@ -299,6 +401,7 @@ impl DockerClient {
         // 出错忽略
         // 写入数据失败不影响后续
         let _ = save_blob_to_file(digest, &resp).await;
+        info!(url = url, "Got blob");
         Ok(resp.to_vec())
     }
     // 分析镜像
@@ -307,6 +410,7 @@ impl DockerClient {
         let config = self.get_image_config(user, img, tag).await?;
         let mut layers = vec![];
         let mut index = 0;
+        info!(user = user, img = img, tag = tag, "analyzing image",);
         for history in &config.history {
             let empty = history.empty_layer.unwrap_or_default();
             let mut digest = "".to_string();
@@ -328,7 +432,7 @@ impl DockerClient {
                 index += 1;
             }
 
-            layers.push(LayerInfos {
+            layers.push(Layer {
                 created: history.created.clone(),
                 cmd: history.created_by.clone(),
                 empty,
@@ -337,6 +441,7 @@ impl DockerClient {
                 size,
             });
         }
+        info!(user = user, img = img, tag = tag, "analyze image done",);
 
         Ok(AnalysisResult {
             created: config.created,
