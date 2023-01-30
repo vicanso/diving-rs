@@ -8,7 +8,7 @@ use snafu::{ResultExt, Snafu};
 use std::{collections::HashMap, convert::From, num::NonZeroUsize, str::FromStr, sync::Mutex};
 use tracing::info;
 
-use super::{get_files_from_layer, AnalysisResult, ImageIndex, Layer, Manifest};
+use super::{get_files_from_layer, AnalysisResult, ImageIndex, Layer, Manifest, Platform};
 use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
@@ -107,15 +107,27 @@ pub struct DockerManifest {
 impl From<DockerManifest> for ImageIndex {
     fn from(item: DockerManifest) -> Self {
         let mut manifests = vec![];
-        for layer in item.layers {
-            manifests.push(Manifest {
-                media_type: layer.media_type,
-                digest: layer.digest,
-                size: layer.size,
-                // TODO 处理platform
+        manifests.push(Manifest {
+            media_type: item.config.media_type,
+            digest: item.config.digest,
+            size: item.config.size,
+            // TODO 处理platform
+            platform: Platform {
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
                 ..Default::default()
-            })
-        }
+            },
+            ..Default::default()
+        });
+        // for layer in item.layers {
+        //     manifests.push(Manifest {
+        //         media_type: layer.media_type,
+        //         digest: layer.digest,
+        //         size: layer.size,
+        //         // TODO 处理platform
+        //         ..Default::default()
+        //     })
+        // }
 
         ImageIndex {
             media_type: item.media_type,
@@ -351,6 +363,7 @@ impl DockerClient {
             "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json".to_string(),
         );
         let data = self.get_bytes(url.clone(), headers).await?;
+        println!("{:?}", data);
         let media_type = get_value_from_json(&data, "mediaType")?;
         let resp = if media_type.contains("docker") {
             let result: DockerManifest =
@@ -369,10 +382,14 @@ impl DockerClient {
         img: &str,
         tag: &str,
     ) -> Result<DockerImageConfig> {
-        let image_config = self.get_manifest(user, img, tag).await?;
+        let manifest = self.get_manifest(user, img, tag).await?;
+        // 暂时只获取amd64, linux
         let data = self
-            .get_blob(user, img, image_config.config.digest.as_str())
+            .get_blob(user, img, &manifest.get_config_digest("amd64", "linux"))
             .await?;
+        println!("{}", &manifest.get_config_digest("amd64", "linux"));
+        println!(">>>>>>>>>>>>>>config");
+        println!("{:?}", std::string::String::from_utf8_lossy(&data));
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
@@ -386,17 +403,20 @@ impl DockerClient {
         }
         let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
         info!(url = url, "Getting blob");
-        let resp = Client::builder()
-            .build()
-            .context(BuildSnafu { url: url.clone() })?
-            .get(url.clone())
-            .header("Authorization", format!("Bearer {}", token.token))
-            .send()
-            .await
-            .context(RequestSnafu { url: url.clone() })?
-            .bytes()
-            .await
-            .context(BytesSnafu { url: url.clone() })?;
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token.token));
+        let resp = self.get_bytes(url.clone(), headers).await?;
+        // let resp = Client::builder()
+        //     .build()
+        //     .context(BuildSnafu { url: url.clone() })?
+        //     .get(url.clone())
+        //     .header("Authorization", format!("Bearer {}", token.token))
+        //     .send()
+        //     .await
+        //     .context(RequestSnafu { url: url.clone() })?
+        //     .bytes()
+        //     .await
+        //     .context(BytesSnafu { url: url.clone() })?;
 
         // 出错忽略
         // 写入数据失败不影响后续
@@ -418,18 +438,18 @@ impl DockerClient {
             let mut size = 0;
             // 只有空的layer需要获取files
             if !empty {
-                if let Some(value) = manifest.layers.get(index) {
-                    size = value.size;
-                    digest = value.digest.clone();
-                    // 判断是否压缩
-                    let buf = self.get_blob(user, img, &digest).await?;
+                // if let Some(value) = manifest.layers.get(index) {
+                //     size = value.size;
+                //     digest = value.digest.clone();
+                //     // 判断是否压缩
+                //     let buf = self.get_blob(user, img, &digest).await?;
 
-                    let is_gzip = value.media_type.contains("gzip");
-                    files = get_files_from_layer(&buf, is_gzip)
-                        .await
-                        .context(LayerSnafu {})?;
-                }
-                index += 1;
+                //     let is_gzip = value.media_type.contains("gzip");
+                //     files = get_files_from_layer(&buf, is_gzip)
+                //         .await
+                //         .context(LayerSnafu {})?;
+                // }
+                // index += 1;
             }
 
             layers.push(Layer {

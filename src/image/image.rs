@@ -36,6 +36,19 @@ pub struct ImageIndex {
     pub manifests: Vec<Manifest>,
 }
 
+impl ImageIndex {
+    pub fn get_config_digest(&self, arch: &str, os: &str) -> String {
+        // TODO 如果判断manifests中哪一个是config
+        for item in &self.manifests {
+            if item.platform.architecture == arch &&
+                item.platform.os == os {
+                    return item.digest.clone()
+                }
+        }
+        "".to_string()
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
