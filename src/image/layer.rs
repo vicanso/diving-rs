@@ -4,7 +4,7 @@ use snafu::{ResultExt, Snafu};
 use std::io::Read;
 use tar::Archive;
 
-use super::FileInfo;
+use super::ImageFileInfo;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -14,6 +14,8 @@ pub enum Error {
     Read { source: std::io::Error },
     #[snafu(display("Gzip decode fail: {}", source))]
     GzipDecode { source: std::io::Error },
+    #[snafu(display("Zstd decode fail: {}", source))]
+    ZstdDecode { source: std::io::Error },
     #[snafu(display("Tar fail: {}", source))]
     Tar { source: std::io::Error },
 }
@@ -29,15 +31,25 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
     Ok(Bytes::copy_from_slice(&decode_data).to_vec())
 }
 
+// zstd解压
+pub fn zstd_decode(data: &[u8]) -> Result<Vec<u8>> {
+    let mut buf = vec![];
+    zstd::stream::copy_decode(data, &mut buf).context(ZstdDecodeSnafu {})?;
+    Ok(buf)
+}
+
 // 从分层数据中读取文件
 pub async fn get_file_content_from_layer(
     data: &[u8],
-    is_gzip: bool,
+    media_type: &str,
     filename: &str,
 ) -> Result<Vec<u8>> {
     let buf;
-    let mut a = if is_gzip {
+    let mut a = if media_type.contains("gzip") {
         buf = gunzip(data)?;
+        Archive::new(&buf[..])
+    } else if media_type.contains("zstd") {
+        buf = zstd_decode(data)?;
         Archive::new(&buf[..])
     } else {
         Archive::new(data)
@@ -62,10 +74,16 @@ pub async fn get_file_content_from_layer(
 }
 
 // 从分层数据中读取所有文件信息
-pub async fn get_files_from_layer(data: &[u8], is_gzip: bool) -> Result<Vec<FileInfo>> {
+// "application/vnd.oci.image.layer.v1.tar+gzip",
+
+pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Vec<ImageFileInfo>> {
     let buf;
-    let mut a = if is_gzip {
+    // TODO 支持gzip zstd等
+    let mut a = if media_type.contains("gzip") {
         buf = gunzip(data)?;
+        Archive::new(&buf[..])
+    } else if media_type.contains("zstd") {
+        buf = zstd_decode(data)?;
         Archive::new(&buf[..])
     } else {
         Archive::new(data)

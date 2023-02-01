@@ -5,10 +5,13 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::{collections::HashMap, convert::From, num::NonZeroUsize, str::FromStr, sync::Mutex};
+use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex};
 use tracing::info;
 
-use super::{get_files_from_layer, AnalysisResult, ImageIndex, Layer, Manifest, Platform};
+use super::{
+    get_files_from_layer, AnalysisResult, ImageConfig, ImageIndex, ImageLayer, ImageManifest,
+    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
+};
 use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
@@ -97,118 +100,6 @@ async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DockerManifest {
-    pub media_type: String,
-    pub schema_version: i64,
-    pub config: DockerManifestConfig,
-    pub layers: Vec<DockerManifestLayer>,
-}
-
-impl From<DockerManifest> for ImageIndex {
-    fn from(item: DockerManifest) -> Self {
-        let mut manifests = vec![];
-        manifests.push(Manifest {
-            media_type: item.config.media_type,
-            digest: item.config.digest,
-            size: item.config.size,
-            // TODO 处理platform
-            platform: Platform {
-                architecture: "amd64".to_string(),
-                os: "linux".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        // for layer in item.layers {
-        //     manifests.push(Manifest {
-        //         media_type: layer.media_type,
-        //         digest: layer.digest,
-        //         size: layer.size,
-        //         // TODO 处理platform
-        //         ..Default::default()
-        //     })
-        // }
-
-        ImageIndex {
-            media_type: item.media_type,
-            schema_version: item.schema_version,
-            manifests,
-        }
-    }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerManifestConfig {
-    pub media_type: String,
-    pub digest: String,
-    pub size: i64,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerManifestLayer {
-    pub media_type: String,
-    pub digest: String,
-    pub size: i64,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerManifestList {
-    pub media_type: String,
-    pub schema_version: i64,
-    pub manifests: Vec<DockerManifestListManifest>,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerManifestListManifest {
-    pub media_type: String,
-    pub digest: String,
-    pub size: i64,
-    pub platform: DockerManifestListPlatform,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerManifestListPlatform {
-    pub architecture: String,
-    pub os: String,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerImageConfig {
-    pub architecture: String,
-    pub created: String,
-    pub history: Vec<DockerImageHistory>,
-    pub os: String,
-    pub rootfs: DockerImageRootfs,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerImageHistory {
-    pub created: String,
-    #[serde(rename = "created_by")]
-    pub created_by: String,
-    #[serde(rename = "empty_layer")]
-    pub empty_layer: Option<bool>,
-    pub comment: Option<String>,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerImageRootfs {
-    #[serde(rename = "type")]
-    pub type_field: String,
-    #[serde(rename = "diff_ids")]
-    pub diff_ids: Vec<String>,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct DockerRequestErrorResp {
     pub errors: Vec<DockerRequestError>,
 }
@@ -222,14 +113,14 @@ struct DockerRequestError {
 
 fn get_value_from_json(v: &[u8], key: &str) -> Result<String> {
     let mut root: Value = serde_json::from_slice(v).context(SerdeJsonSnafu {})?;
-    for k in key.split(".") {
+    for k in key.split('.') {
         let value = root.get(k);
         if value.is_none() {
             return Ok("".to_string());
         }
         root = value.unwrap().to_owned();
     }
-    Ok(root.as_str().unwrap_or_else(|| "").to_string())
+    Ok(root.as_str().unwrap_or("").to_string())
 }
 
 impl DockerClient {
@@ -289,10 +180,7 @@ impl DockerClient {
     }
     // 获取docker的token
     async fn get_token(&self, scope: &String) -> Result<DockerTokenInfo> {
-        let url = format!(
-            "{}/token?service={}&scope={}",
-            self.auth, self.service, scope
-        );
+        let url = format!("{}/token?service={}&scope={scope}", self.auth, self.service);
         let key = &url.clone();
         if let Some(info) = get_docker_token_from_cache(&url).await {
             if !info.expired() {
@@ -314,82 +202,62 @@ impl DockerClient {
     }
     // 获取pull时使用的token
     async fn get_pull_token(&self, user: &str, img: &str) -> Result<DockerTokenInfo> {
-        let scope = format!("repository:{}/{}:pull", user, img);
+        let scope = format!("repository:{user}/{img}:pull");
         let token = self.get_token(&scope).await?;
         Ok(token)
     }
-    // 获取所有的manifest
-    pub async fn list_manifest(
-        &self,
-        user: &str,
-        img: &str,
-        tag: &str,
-    ) -> Result<DockerManifestList> {
-        let token = self.get_pull_token(user, img).await?;
-
-        let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
-
-        let resp = Client::builder()
-            .build()
-            .context(BuildSnafu { url: url.clone() })?
-            .get(url.clone())
-            .header("Authorization", format!("Bearer {}", token.token))
-            .header(
-                "Accept",
-                "application/vnd.docker.distribution.manifest.list.v2+json",
-            )
-            .send()
-            .await
-            .context(RequestSnafu { url: url.clone() })?
-            .json::<DockerManifestList>()
-            .await
-            .context(JsonSnafu { url })?;
-
-        Ok(resp)
-    }
     // 获取manifest
-    pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<ImageIndex> {
+    pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<ImageManifest> {
+        // TODO 如果tag非latest，是否可以缓存
+        // 需要注意以命令行或以web server执行的程序生命周期的差别
         let token = self.get_pull_token(user, img).await?;
 
-        let url = format!("{}/{}/{}/manifests/{}", self.registry, user, img, tag);
+        // 根据tag获取manifest
+        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         info!(url = url, "Getting manifest");
         let mut headers = HashMap::new();
         headers.insert(
             "Authorization".to_string(),
             format!("Bearer {}", token.token),
         );
-        headers.insert(
-            "Accept".to_string(),
-            "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json".to_string(),
-        );
+        // 支持的类型
+        let accepts = vec![MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST];
+
+        headers.insert("Accept".to_string(), accepts.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
-        println!("{:?}", data);
         let media_type = get_value_from_json(&data, "mediaType")?;
-        let resp = if media_type.contains("docker") {
-            let result: DockerManifest =
-                serde_json::from_slice(&data).context(SerdeJsonSnafu {})?;
-            result.into()
+        let resp = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
+            // docker的版本则可直接返回
+            serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         } else {
+            // TODO 后续是否可根据系统或客户自动选择
+            // 暂使用第一个
+            let manifest = serde_json::from_slice::<ImageIndex>(&data)
+                .context(SerdeJsonSnafu {})?
+                .manifests[0]
+                .clone();
+            let mut headers = HashMap::new();
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {}", token.token),
+            );
+            headers.insert("Accept".to_string(), manifest.media_type);
+            // 根据digest再次获取
+            let url = format!(
+                "{}/{user}/{img}/manifests/{}",
+                self.registry, manifest.digest
+            );
+            let data = self.get_bytes(url.clone(), headers).await?;
             serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         };
         info!(url = url, "Got manifest");
         Ok(resp)
     }
     // 获取镜像的信息
-    pub async fn get_image_config(
-        &self,
-        user: &str,
-        img: &str,
-        tag: &str,
-    ) -> Result<DockerImageConfig> {
+    pub async fn get_image_config(&self, user: &str, img: &str, tag: &str) -> Result<ImageConfig> {
         let manifest = self.get_manifest(user, img, tag).await?;
         // 暂时只获取amd64, linux
-        let data = self
-            .get_blob(user, img, &manifest.get_config_digest("amd64", "linux"))
-            .await?;
-        println!("{}", &manifest.get_config_digest("amd64", "linux"));
-        println!(">>>>>>>>>>>>>>config");
-        println!("{:?}", std::string::String::from_utf8_lossy(&data));
+        let data = self.get_blob(user, img, &manifest.config.digest).await?;
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
@@ -401,22 +269,14 @@ impl DockerClient {
         if let Ok(data) = get_blob_from_file(digest).await {
             return Ok(data);
         }
-        let url = format!("{}/{}/{}/blobs/{}", self.registry, user, img, digest);
+        let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
         info!(url = url, "Getting blob");
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {}", token.token));
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", token.token),
+        );
         let resp = self.get_bytes(url.clone(), headers).await?;
-        // let resp = Client::builder()
-        //     .build()
-        //     .context(BuildSnafu { url: url.clone() })?
-        //     .get(url.clone())
-        //     .header("Authorization", format!("Bearer {}", token.token))
-        //     .send()
-        //     .await
-        //     .context(RequestSnafu { url: url.clone() })?
-        //     .bytes()
-        //     .await
-        //     .context(BytesSnafu { url: url.clone() })?;
 
         // 出错忽略
         // 写入数据失败不影响后续
@@ -438,21 +298,20 @@ impl DockerClient {
             let mut size = 0;
             // 只有空的layer需要获取files
             if !empty {
-                // if let Some(value) = manifest.layers.get(index) {
-                //     size = value.size;
-                //     digest = value.digest.clone();
-                //     // 判断是否压缩
-                //     let buf = self.get_blob(user, img, &digest).await?;
+                if let Some(value) = manifest.layers.get(index) {
+                    size = value.size;
+                    digest = value.digest.clone();
+                    // 判断是否压缩
+                    let buf = self.get_blob(user, img, &digest).await?;
 
-                //     let is_gzip = value.media_type.contains("gzip");
-                //     files = get_files_from_layer(&buf, is_gzip)
-                //         .await
-                //         .context(LayerSnafu {})?;
-                // }
-                // index += 1;
+                    files = get_files_from_layer(&buf, &value.media_type)
+                        .await
+                        .context(LayerSnafu {})?;
+                }
+                index += 1;
             }
 
-            layers.push(Layer {
+            layers.push(ImageLayer {
                 created: history.created.clone(),
                 cmd: history.created_by.clone(),
                 empty,
