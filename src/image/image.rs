@@ -21,14 +21,14 @@ pub struct ImageLayer {
     pub created: String,
     pub digest: String,
     pub cmd: String,
-    pub size: i64,
+    pub size: u64,
     pub files: Vec<ImageFileInfo>,
     pub empty: bool,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AnalysisResult {
+pub struct ImageAnalysisResult {
     pub created: String,
     pub architecture: String,
     pub layers: Vec<ImageLayer>,
@@ -43,16 +43,14 @@ pub struct ImageIndex {
 }
 
 impl ImageIndex {
-    pub fn get_manifest(&self, arch: &str, os: &str) -> ImageIndexManifest {
-        // TODO 如果判断manifests中哪一个是config
+    // 返回匹配manifest，如果无则返回第一个
+    pub fn guess_manifest(&self, arch: &str, os: &str) -> ImageIndexManifest {
         for item in &self.manifests {
             if item.platform.architecture == arch && item.platform.os == os {
                 return item.clone();
             }
         }
-        ImageIndexManifest {
-            ..Default::default()
-        }
+        self.manifests[0].clone()
     }
 }
 
@@ -105,7 +103,7 @@ pub struct ImageManifestConfig {
 pub struct ImageManifestLayer {
     pub media_type: String,
     pub digest: String,
-    pub size: i64,
+    pub size: u64,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

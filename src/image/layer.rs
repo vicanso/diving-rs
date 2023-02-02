@@ -103,7 +103,7 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Vec<I
             link = value.to_string_lossy().to_string()
         }
 
-        let info = FileInfo {
+        let info = ImageFileInfo {
             path: file
                 .path()
                 .context(TarSnafu {})?

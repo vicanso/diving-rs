@@ -9,7 +9,7 @@ use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex};
 use tracing::info;
 
 use super::{
-    get_files_from_layer, AnalysisResult, ImageConfig, ImageIndex, ImageLayer, ImageManifest,
+    get_files_from_layer, ImageAnalysisResult, ImageConfig, ImageIndex, ImageLayer, ImageManifest,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
 };
 use crate::store::{get_blob_from_file, save_blob_to_file};
@@ -230,12 +230,10 @@ impl DockerClient {
             // docker的版本则可直接返回
             serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         } else {
-            // TODO 后续是否可根据系统或客户自动选择
-            // 暂使用第一个
             let manifest = serde_json::from_slice::<ImageIndex>(&data)
                 .context(SerdeJsonSnafu {})?
-                .manifests[0]
-                .clone();
+                // TODO 后续是否可根据系统或客户自动选择
+                .guess_manifest("amd64", "linux");
             let mut headers = HashMap::new();
             headers.insert(
                 "Authorization".to_string(),
@@ -285,7 +283,7 @@ impl DockerClient {
         Ok(resp.to_vec())
     }
     // 分析镜像
-    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<AnalysisResult> {
+    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<ImageAnalysisResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
         let mut layers = vec![];
@@ -322,7 +320,7 @@ impl DockerClient {
         }
         info!(user = user, img = img, tag = tag, "analyze image done",);
 
-        Ok(AnalysisResult {
+        Ok(ImageAnalysisResult {
             created: config.created,
             architecture: config.architecture,
             layers,
