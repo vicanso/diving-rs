@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use super::layer::ImageLayerInfo;
 
@@ -31,9 +32,49 @@ pub struct ImageLayer {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnalysisResult {
+    pub name: String,
     pub created: String,
     pub architecture: String,
     pub layers: Vec<ImageLayer>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFileSummary {
+    pub layer_index: usize,
+    pub category: String,
+    pub info: ImageFileInfo,
+}
+
+impl ImageAnalysisResult {
+    // 获取镜像压缩保存的汇总大小
+    pub fn get_image_size(&self) -> u64 {
+        self.layers.iter().map(|item| item.size).sum()
+    }
+    // 获取镜像解压后所有文件的汇总大小
+    pub fn get_image_total_size(&self) -> u64 {
+        self.layers.iter().map(|item| item.info.size).sum()
+    }
+    pub fn get_layer_file_summary(&self) -> Vec<ImageFileSummary> {
+        let mut exists_files = HashSet::new();
+        let mut summary_list = vec![];
+        for (index, layer) in self.layers.iter().enumerate() {
+            for file in &layer.info.files {
+                if index == 0 || !exists_files.contains(&file.path) {
+                    // 新增
+                    exists_files.insert(&file.path);
+                    continue;
+                }
+                // 以前已存在，本次覆盖
+                summary_list.push(ImageFileSummary {
+                    layer_index: index,
+                    category: "modified".to_string(),
+                    info: file.clone(),
+                })
+            }
+        }
+        summary_list
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

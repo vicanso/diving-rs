@@ -3,20 +3,11 @@ use tui::{
     text::Span,
     widgets::{Block, Borders},
 };
+use unicode_width::UnicodeWidthStr;
 
 // 计算字符宽度
 pub fn get_width(str: &str) -> u16 {
-    // TODO 判断处理宽字符
-    let mut count = 0;
-    for ch in str.chars() {
-        if ch.is_alphabetic() {
-            count += 1;
-        } else {
-            count += 2;
-        }
-    }
-
-    count
+    UnicodeWidthStr::width(str) as u16
 }
 
 // 创建block

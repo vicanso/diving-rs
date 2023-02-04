@@ -14,6 +14,7 @@ use tui::{
 use crate::image::ImageAnalysisResult;
 
 mod files;
+mod image_detail;
 mod layer_detail;
 mod layers;
 mod util;
@@ -149,6 +150,9 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, result: &ImageAnalysisResult, stat
         .split(chunks[0]);
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);
+
+    let image_detail_widget = image_detail::new_image_detail_widget(result);
+    f.render_widget(image_detail_widget.widget, left_chunks[2]);
 
     let files_widget = files::new_files_widget(result);
     f.render_widget(files_widget.widget, chunks[1]);

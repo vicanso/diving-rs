@@ -326,6 +326,7 @@ impl DockerClient {
         info!(user = user, img = img, tag = tag, "analyze image done",);
 
         Ok(ImageAnalysisResult {
+            name: format!("{user}/{img}/{tag}"),
             created: config.created,
             architecture: config.architecture,
             layers,
