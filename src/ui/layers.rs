@@ -4,13 +4,13 @@ use pad::PadStr;
 
 use tui::{
     layout::Constraint,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Spans,
     widgets::{Cell, Row, Table},
 };
 
 use super::util;
-use crate::image::ImageAnalysisResult;
+use crate::image::ImageLayer;
 
 pub struct LayersWidget<'a> {
     // 组件高度
@@ -20,13 +20,14 @@ pub struct LayersWidget<'a> {
 }
 pub struct LayersWidgetOption {
     pub is_active: bool,
+    pub selected_layer: usize,
 }
 // 创建layer列表的widget
-pub fn new_layers_widget(result: &ImageAnalysisResult, opt: LayersWidgetOption) -> LayersWidget {
+pub fn new_layers_widget(layers: &[ImageLayer], opt: LayersWidgetOption) -> LayersWidget {
     let mut row_max_counts = vec![0, 0, 0];
     let mut row_data_list = vec![];
     // 生成表格数据，并计算每列最大宽度
-    for (index, item) in result.layers.iter().enumerate() {
+    for (index, item) in layers.iter().enumerate() {
         let no = format!("{index}");
         let arr = vec![no, ByteSize(item.size).to_string(), item.cmd.clone()];
         for (i, value) in arr.iter().enumerate() {
@@ -38,7 +39,7 @@ pub fn new_layers_widget(result: &ImageAnalysisResult, opt: LayersWidgetOption) 
     }
 
     let mut rows = vec![];
-    for arr in row_data_list {
+    for (index, arr) in row_data_list.into_iter().enumerate() {
         let mut cells = vec![];
         // 前两列填充空格
         for (i, value) in arr.into_iter().enumerate() {
@@ -51,7 +52,12 @@ pub fn new_layers_widget(result: &ImageAnalysisResult, opt: LayersWidgetOption) 
                 cells.push(Cell::from(Spans::from(value)));
             }
         }
-        rows.push(Row::new(cells).height(1))
+        let mut style = Style::default();
+        if index == opt.selected_layer {
+            style = style.bg(Color::White).fg(Color::Black);
+        }
+
+        rows.push(Row::new(cells).style(style).height(1))
     }
 
     let headers = ["Index", "Size", "Command"]

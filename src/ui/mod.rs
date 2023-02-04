@@ -29,12 +29,31 @@ mod util;
 #[derive(Default, Debug, Clone)]
 struct WidgetState {
     // 选中的区域
-    active: u8,
+    active: usize,
+    // 被选中的层
+    selected_layer: usize,
 }
 
 impl WidgetState {
     fn next_widget(&mut self) {
         self.active += 1;
+    }
+    // layers widget是否活动状态
+    fn is_layers_widget_active(&self) -> bool {
+        self.active == 0
+    }
+    fn select_next(&mut self) {
+        // TODO 设置最大值
+        if self.is_layers_widget_active() {
+            self.selected_layer += 1;
+        }
+    }
+    fn select_prev(&mut self) {
+        if self.is_layers_widget_active() {
+            if self.selected_layer > 0 {
+                self.selected_layer -= 1;
+            }
+        }
     }
 }
 
@@ -64,6 +83,8 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
                 // 退出
                 KeyCode::Char('q') => break,
                 KeyCode::Tab => state.next_widget(),
+                KeyCode::Down => state.select_next(),
+                KeyCode::Up => state.select_prev(),
                 _ => continue,
             }
         }
@@ -88,13 +109,18 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, result: &ImageAnalysisResult, stat
         .split(f.size());
 
     let layers_widget = layers::new_layers_widget(
-        result,
+        &result.layers,
         layers::LayersWidgetOption {
-            is_active: state.active == 0,
+            is_active: state.is_layers_widget_active(),
+            selected_layer: state.selected_layer,
         },
     );
+    let layer = result
+        .layers
+        .get(state.selected_layer)
+        .unwrap_or_else(|| &result.layers[0]);
     let detail_widget = layer_detail::new_layer_detail_widget(
-        &result.layers[3],
+        layer,
         layer_detail::DetailWidgetOption {
             width: chunks[0].width,
         },
