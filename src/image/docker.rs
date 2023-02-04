@@ -12,7 +12,10 @@ use super::{
     get_files_from_layer, ImageAnalysisResult, ImageConfig, ImageIndex, ImageLayer, ImageManifest,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
 };
-use crate::store::{get_blob_from_file, save_blob_to_file};
+use crate::{
+    image::layer::ImageLayerInfo,
+    store::{get_blob_from_file, save_blob_to_file},
+};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -292,7 +295,9 @@ impl DockerClient {
         for history in &config.history {
             let empty = history.empty_layer.unwrap_or_default();
             let mut digest = "".to_string();
-            let mut files = vec![];
+            let mut info = ImageLayerInfo {
+                ..Default::default()
+            };
             let mut size = 0;
             // 只有空的layer需要获取files
             if !empty {
@@ -302,7 +307,7 @@ impl DockerClient {
                     // 判断是否压缩
                     let buf = self.get_blob(user, img, &digest).await?;
 
-                    files = get_files_from_layer(&buf, &value.media_type)
+                    info = get_files_from_layer(&buf, &value.media_type)
                         .await
                         .context(LayerSnafu {})?;
                 }
@@ -314,7 +319,7 @@ impl DockerClient {
                 cmd: history.created_by.clone(),
                 empty,
                 digest,
-                files,
+                info,
                 size,
             });
         }

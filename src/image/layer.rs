@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use libflate::gzip::Decoder;
+use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::io::Read;
 use tar::Archive;
@@ -76,14 +77,27 @@ pub async fn get_file_content_from_layer(
 // 从分层数据中读取所有文件信息
 // "application/vnd.oci.image.layer.v1.tar+gzip",
 
-pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Vec<ImageFileInfo>> {
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageLayerInfo {
+    // 原始大小
+    pub original_size: u64,
+    // 解压后的大小
+    pub size: u64,
+    // 文件列表
+    pub files: Vec<ImageFileInfo>,
+}
+pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<ImageLayerInfo> {
     let buf;
+    let original_size = data.len() as u64;
+    let mut size = original_size;
     // TODO 支持gzip zstd等
     let mut a = if media_type.contains("gzip") {
         buf = gunzip(data)?;
+        size = buf.len() as u64;
         Archive::new(&buf[..])
     } else if media_type.contains("zstd") {
         buf = zstd_decode(data)?;
+        size = buf.len() as u64;
         Archive::new(&buf[..])
     } else {
         Archive::new(data)
@@ -117,5 +131,9 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Vec<I
         };
         files.push(info);
     }
-    Ok(files)
+    Ok(ImageLayerInfo {
+        files,
+        original_size,
+        size,
+    })
 }

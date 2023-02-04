@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::layer::ImageLayerInfo;
+
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
 pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
@@ -22,7 +24,7 @@ pub struct ImageLayer {
     pub digest: String,
     pub cmd: String,
     pub size: u64,
-    pub files: Vec<ImageFileInfo>,
+    pub info: ImageLayerInfo,
     pub empty: bool,
 }
 

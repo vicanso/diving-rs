@@ -29,7 +29,8 @@ pub fn new_layers_widget(layers: &[ImageLayer], opt: LayersWidgetOption) -> Laye
     // 生成表格数据，并计算每列最大宽度
     for (index, item) in layers.iter().enumerate() {
         let no = format!("{index}");
-        let arr = vec![no, ByteSize(item.size).to_string(), item.cmd.clone()];
+        // TODO 是否调整为1024
+        let arr = vec![no, ByteSize(item.info.size).to_string(), item.cmd.clone()];
         for (i, value) in arr.iter().enumerate() {
             if row_max_counts[i] < value.len() {
                 row_max_counts[i] = value.len()
