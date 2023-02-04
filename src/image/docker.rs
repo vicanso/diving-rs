@@ -233,7 +233,7 @@ impl DockerClient {
             let manifest = serde_json::from_slice::<ImageIndex>(&data)
                 .context(SerdeJsonSnafu {})?
                 // TODO 后续是否可根据系统或客户自动选择
-                .guess_manifest("amd64", "linux");
+                .guess_manifest();
             let mut headers = HashMap::new();
             headers.insert(
                 "Authorization".to_string(),

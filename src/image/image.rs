@@ -44,11 +44,26 @@ pub struct ImageIndex {
 
 impl ImageIndex {
     // 返回匹配manifest，如果无则返回第一个
-    pub fn guess_manifest(&self, arch: &str, os: &str) -> ImageIndexManifest {
+    pub fn guess_manifest(&self) -> ImageIndexManifest {
+        let os = "linux";
+        let mut os_match_manifests = vec![];
+        let mut architecture = "amd64";
+        let arch = std::env::consts::ARCH;
+        if arch.contains("arm") || arch.contains("aarch64") {
+            architecture = "arm64"
+        }
         for item in &self.manifests {
-            if item.platform.architecture == arch && item.platform.os == os {
+            if item.platform.os != os {
+                continue;
+            }
+            if item.platform.architecture == architecture {
                 return item.clone();
             }
+            os_match_manifests.push(item)
+        }
+        // 如果有匹配os的，则返回对应os的
+        if !os_match_manifests.is_empty() {
+            return os_match_manifests[0].clone();
         }
         self.manifests[0].clone()
     }
