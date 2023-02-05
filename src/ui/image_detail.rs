@@ -18,24 +18,14 @@ pub struct ImageDetailWidget<'a> {
 }
 
 pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidget {
-    let total_size = result.get_image_total_size();
-    let size = result.get_image_size();
+    let total_size = result.total_size;
+    let size = result.size;
 
-    let mut wasted_size = 0;
-    let mut count_map = HashMap::new();
-    let mut size_map = HashMap::new();
-    let file_summary_list = result.get_layer_file_summary();
-    for item in file_summary_list.iter() {
-        wasted_size += item.info.size;
-        let key = &item.info.path;
-        let size = size_map.get(key).unwrap_or(&0);
-        if let Some(value) = count_map.get(key) {
-            count_map.insert(key, *value + 1);
-        } else {
-            count_map.insert(key, 1);
-        }
-        size_map.insert(key, *size + item.info.size);
-    }
+    let wasted_size = result
+        .layer_file_wasted_summary_list
+        .iter()
+        .map(|item| item.total_size)
+        .sum();
 
     let mut score = 100 - wasted_size * 100 / total_size;
     // 有浪费空间，则分数-1
@@ -44,6 +34,7 @@ pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidge
     }
 
     // 生成浪费空间的文件列表
+    let space_span = Span::from("   ");
     let headers = vec!["Count", "Total Space", "Path"];
     let mut spans_list = vec![
         Spans::from(vec![
@@ -58,11 +49,7 @@ pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidge
                 "Total Image size: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::from(format!(
-                "{} / {}",
-                ByteSize(total_size).to_string(),
-                ByteSize(size).to_string()
-            )),
+            Span::from(format!("{} / {}", ByteSize(total_size), ByteSize(size),)),
         ]),
         Spans::from(vec![
             Span::styled(
@@ -76,25 +63,33 @@ pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidge
                 "Image efficiency score: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::from(format!("{} %", score)),
+            Span::from(format!("{score} %")),
         ]),
         Spans::from(vec![]),
         Spans::from(vec![
             Span::styled(headers[0], Style::default().add_modifier(Modifier::BOLD)),
+            space_span.clone(),
             Span::styled(headers[1], Style::default().add_modifier(Modifier::BOLD)),
+            space_span.clone(),
             Span::styled(headers[2], Style::default().add_modifier(Modifier::BOLD)),
         ]),
     ];
 
-    // 减少4个空格
+    let count_pad_width = headers[0].len();
     let size_pad_width = headers[1].len();
-    for (key, value) in count_map {
-        let size = size_map.get(key).unwrap_or(&0);
-        let size_str = ByteSize(*size).to_string();
+
+    for wasted in result.layer_file_wasted_summary_list.iter() {
+        let count_str = format!("{}", wasted.count)
+            .pad_to_width_with_alignment(count_pad_width, pad::Alignment::Right);
+        let size_str = ByteSize(wasted.total_size)
+            .to_string()
+            .pad_to_width_with_alignment(size_pad_width, pad::Alignment::Right);
         spans_list.push(Spans::from(vec![
-            Span::from(format!("{}", value)),
-            Span::from(size_str.pad_to_width_with_alignment(size_pad_width, pad::Alignment::Right)),
-            Span::from(key.clone()),
+            Span::from(count_str),
+            space_span.clone(),
+            Span::from(size_str),
+            space_span.clone(),
+            Span::from(format!("/{}", wasted.path)),
         ]))
     }
 

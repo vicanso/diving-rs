@@ -36,6 +36,10 @@ pub struct ImageAnalysisResult {
     pub created: String,
     pub architecture: String,
     pub layers: Vec<ImageLayer>,
+    pub size: u64,
+    pub total_size: u64,
+    pub layer_file_summary_list: Vec<ImageFileSummary>,
+    pub layer_file_wasted_summary_list: Vec<ImageFileWastedSummary>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,18 +50,36 @@ pub struct ImageFileSummary {
     pub info: ImageFileInfo,
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFileWastedSummary {
+    pub path: String,
+    pub total_size: u64,
+    pub count: u32,
+}
+
 impl ImageAnalysisResult {
+    pub fn auto_fill(&mut self) {
+        self.size = self.get_image_size();
+        self.total_size = self.get_image_total_size();
+        let (layer_file_summary_list, layer_file_wasted_summary_list) =
+            self.get_layer_file_summary();
+        self.layer_file_summary_list = layer_file_summary_list;
+        self.layer_file_wasted_summary_list = layer_file_wasted_summary_list;
+    }
     // 获取镜像压缩保存的汇总大小
-    pub fn get_image_size(&self) -> u64 {
+    fn get_image_size(&self) -> u64 {
         self.layers.iter().map(|item| item.size).sum()
     }
     // 获取镜像解压后所有文件的汇总大小
-    pub fn get_image_total_size(&self) -> u64 {
+    fn get_image_total_size(&self) -> u64 {
         self.layers.iter().map(|item| item.info.size).sum()
     }
-    pub fn get_layer_file_summary(&self) -> Vec<ImageFileSummary> {
+    // 汇总layer的文件信息
+    fn get_layer_file_summary(&self) -> (Vec<ImageFileSummary>, Vec<ImageFileWastedSummary>) {
         let mut exists_files = HashSet::new();
         let mut summary_list = vec![];
+        let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
         for (index, layer) in self.layers.iter().enumerate() {
             for file in &layer.info.files {
                 if index == 0 || !exists_files.contains(&file.path) {
@@ -70,10 +92,26 @@ impl ImageAnalysisResult {
                     layer_index: index,
                     category: "modified".to_string(),
                     info: file.clone(),
-                })
+                });
+                let mut found = false;
+                for wasted in wasted_list.iter_mut() {
+                    if wasted.path == file.path {
+                        found = true;
+                        wasted.count += 1;
+                        wasted.total_size += file.size;
+                    }
+                }
+                if !found {
+                    wasted_list.push(ImageFileWastedSummary {
+                        path: file.path.clone(),
+                        count: 1,
+                        total_size: file.size,
+                    })
+                }
             }
         }
-        summary_list
+        wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        (summary_list, wasted_list)
     }
 }
 

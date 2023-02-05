@@ -324,12 +324,14 @@ impl DockerClient {
             });
         }
         info!(user = user, img = img, tag = tag, "analyze image done",);
-
-        Ok(ImageAnalysisResult {
+        let mut result = ImageAnalysisResult {
             name: format!("{user}/{img}/{tag}"),
             created: config.created,
             architecture: config.architecture,
             layers,
-        })
+            ..Default::default()
+        };
+        result.auto_fill();
+        Ok(result)
     }
 }
