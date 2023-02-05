@@ -14,7 +14,7 @@ pub struct ImageFileInfo {
     pub path: String,
     pub link: String,
     pub size: u64,
-    pub mode: u32,
+    pub mode: String,
     pub uid: u64,
     pub gid: u64,
     pub is_whiteout: Option<bool>,

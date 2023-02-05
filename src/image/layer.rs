@@ -133,12 +133,12 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Image
                 is_whiteout = Some(true);
             }
         }
-
+        let mode = header.mode().context(TarSnafu {})?;
         let info = ImageFileInfo {
             path,
             link,
             size: file.size(),
-            mode: header.mode().context(TarSnafu {})?,
+            mode: unix_mode::to_string(mode),
             uid: header.uid().context(TarSnafu {})?,
             gid: header.gid().context(TarSnafu {})?,
             is_whiteout,

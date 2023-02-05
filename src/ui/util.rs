@@ -17,8 +17,3 @@ pub fn create_block(title: &str) -> Block {
         Style::default().add_modifier(Modifier::BOLD),
     ))
 }
-
-// 标题设置为活动状态
-pub fn wrap_active(title: &str) -> String {
-    format!(" ●{title}")
-}

@@ -8,6 +8,8 @@ use tui::{
     backend::Backend,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
+    text::{Span, Spans},
+    widgets::{ListState, Paragraph},
     Frame, Terminal,
 };
 
@@ -28,7 +30,12 @@ struct WidgetState {
     selected_layer: usize,
     // 层级数
     layer_count: usize,
+    // 文件列表的状态
+    files_state: ListState,
 }
+
+static LAYERS_WIDGET: &str = "layers";
+static FILES_WIDGET: &str = "files";
 
 impl WidgetState {
     fn next_widget(&mut self) {
@@ -42,13 +49,37 @@ impl WidgetState {
         } else {
             self.active = self.active_list[found + 1].clone();
         }
+        if self.is_files_widget_active() {
+            self.select_file(0);
+        } else {
+            self.files_state.select(None);
+        }
     }
     // layers widget是否活动状态
     fn is_layers_widget_active(&self) -> bool {
-        self.active == "layers"
+        self.active == LAYERS_WIDGET
+    }
+    fn is_files_widget_active(&self) -> bool {
+        self.active == FILES_WIDGET
+    }
+    fn select_file(&mut self, offset: i64) {
+        let mut value = 0;
+        if let Some(v) = self.files_state.selected() {
+            value = v as i64;
+        }
+        value += offset;
+        // 如果offset为0，选择第一个文件
+        if value < 0 || offset == 0 {
+            value = 0
+        }
+        self.files_state.select(Some(value as usize));
     }
     fn select_next(&mut self) {
-        // TODO 设置最大值
+        if self.is_files_widget_active() {
+            self.select_file(1);
+            return;
+        }
+
         if self.is_layers_widget_active() {
             if self.selected_layer < self.layer_count - 1 {
                 self.selected_layer += 1;
@@ -56,6 +87,10 @@ impl WidgetState {
         }
     }
     fn select_prev(&mut self) {
+        if self.is_files_widget_active() {
+            self.select_file(-1);
+            return;
+        }
         if self.is_layers_widget_active() {
             if self.selected_layer > 0 {
                 self.selected_layer -= 1;
@@ -76,12 +111,12 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
     let mut state = WidgetState {
         layer_count: result.layers.len(),
         // 可以选中的widget列表顺序
-        active_list: vec!["layers".to_string(), "files".to_string()],
-        active: "layers".to_string(),
+        active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
+        active: LAYERS_WIDGET.to_string(),
         ..Default::default()
     };
     loop {
-        terminal.draw(|f| draw_widgets(f, &result, &state))?;
+        terminal.draw(|f| draw_widgets(f, &result, &mut state))?;
 
         if let Event::Key(key) = event::read()? {
             match key.code {
@@ -113,7 +148,11 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn draw_widgets<B: Backend>(f: &mut Frame<B>, result: &ImageAnalysisResult, state: &WidgetState) {
+fn draw_widgets<B: Backend>(
+    f: &mut Frame<B>,
+    result: &ImageAnalysisResult,
+    state: &mut WidgetState,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
@@ -154,6 +193,20 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, result: &ImageAnalysisResult, stat
     let image_detail_widget = image_detail::new_image_detail_widget(result);
     f.render_widget(image_detail_widget.widget, left_chunks[2]);
 
-    let files_widget = files::new_files_widget(result);
-    f.render_widget(files_widget.widget, chunks[1]);
+    // 文件列表
+    let files_widget = files::new_files_widget(
+        result,
+        files::FilesWidgetOption {
+            is_active: state.is_files_widget_active(),
+            selected_layer: state.selected_layer,
+            area: chunks[1],
+        },
+    );
+    f.render_widget(files_widget.block, files_widget.block_area);
+    f.render_widget(files_widget.content, files_widget.content_area);
+    f.render_stateful_widget(
+        files_widget.files,
+        files_widget.files_area,
+        &mut state.files_state,
+    );
 }
