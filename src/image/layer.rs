@@ -2,7 +2,7 @@ use bytes::Bytes;
 use libflate::gzip::Decoder;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-use std::io::Read;
+use std::{io::Read, path::Path};
 use tar::Archive;
 
 use super::ImageFileInfo;
@@ -116,18 +116,32 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Image
         if let Some(value) = file.link_name().context(TarSnafu {})? {
             link = value.to_string_lossy().to_string()
         }
+        let mut path = file
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .to_string();
+        let mut is_whiteout = None;
+        // 为了实现这样的删除操作，AuFS 会在可读写层创建一个 whiteout 文件，把只读层里的文件“遮挡”起来。
+        // .wh.
+        // usr/local/bin/.wh.static
+        if let Some(filename) = Path::new(&path).file_name() {
+            let name = filename.to_string_lossy();
+            let prefix = ".wh.";
+            if name.starts_with(prefix) {
+                path = path.replace(name.to_string().as_str(), &name.replace(prefix, ""));
+                is_whiteout = Some(true);
+            }
+        }
 
         let info = ImageFileInfo {
-            path: file
-                .path()
-                .context(TarSnafu {})?
-                .to_string_lossy()
-                .to_string(),
+            path,
             link,
             size: file.size(),
             mode: header.mode().context(TarSnafu {})?,
             uid: header.uid().context(TarSnafu {})?,
             gid: header.gid().context(TarSnafu {})?,
+            is_whiteout,
         };
         files.push(info);
     }

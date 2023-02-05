@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use super::layer::ImageLayerInfo;
 
@@ -17,6 +17,7 @@ pub struct ImageFileInfo {
     pub mode: u32,
     pub uid: u64,
     pub gid: u64,
+    pub is_whiteout: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,37 +78,49 @@ impl ImageAnalysisResult {
     }
     // 汇总layer的文件信息
     fn get_layer_file_summary(&self) -> (Vec<ImageFileSummary>, Vec<ImageFileWastedSummary>) {
-        let mut exists_files = HashSet::new();
+        let mut exists_files = HashMap::new();
         let mut summary_list = vec![];
         let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
         for (index, layer) in self.layers.iter().enumerate() {
             for file in &layer.info.files {
-                if index == 0 || !exists_files.contains(&file.path) {
+                let key = &file.path;
+                if index == 0 || !exists_files.contains_key(key) {
                     // 新增
-                    exists_files.insert(&file.path);
+                    exists_files.insert(key, file.clone());
                     continue;
                 }
+                let mut category = "modified".to_string();
+                if let Some(is_whiteout) = file.is_whiteout {
+                    if is_whiteout {
+                        category = "removed".to_string();
+                    }
+                }
+                let mut info = file.clone();
                 // 以前已存在，本次覆盖
-                summary_list.push(ImageFileSummary {
-                    layer_index: index,
-                    category: "modified".to_string(),
-                    info: file.clone(),
-                });
+                // 文件大小使用已存在文件大小
+                if let Some(exists_file) = exists_files.get(key) {
+                    info.size = exists_file.size;
+                }
                 let mut found = false;
                 for wasted in wasted_list.iter_mut() {
-                    if wasted.path == file.path {
+                    if wasted.path == info.path {
                         found = true;
                         wasted.count += 1;
-                        wasted.total_size += file.size;
+                        wasted.total_size += info.size;
                     }
                 }
                 if !found {
                     wasted_list.push(ImageFileWastedSummary {
-                        path: file.path.clone(),
+                        path: info.path.clone(),
                         count: 1,
-                        total_size: file.size,
+                        total_size: info.size,
                     })
                 }
+                summary_list.push(ImageFileSummary {
+                    layer_index: index,
+                    category,
+                    info,
+                });
             }
         }
         wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
