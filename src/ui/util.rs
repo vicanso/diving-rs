@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 // 计算字符宽度
 pub fn get_width(str: &str) -> u16 {
-    UnicodeWidthStr::width(str) as u16
+    UnicodeWidthStr::width_cjk(str) as u16
 }
 
 // 创建block

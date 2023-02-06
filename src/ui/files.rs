@@ -83,22 +83,38 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
             .to_string()
             .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
     };
+    // TODO 是否last child
+    // └──
+    let add_name_padding = |name: &str, level: usize| -> String {
+        let arr = vec![
+            "│  ".repeat(level),
+            "├──".to_string(),
+            " ".to_string(),
+            name.to_string(),
+        ];
+        arr.join("")
+    };
     if let Some(layer) = result.layers.get(opt.selected_layer) {
         let mut file_tree_items = vec![];
         let mut dir_size_map = HashMap::new();
+        // 获取index+1与当前对比，判断是否最后一个子目录
         for file in &layer.info.files {
             let arr: Vec<&str> = file.path.split('/').collect();
             for i in 0..arr.len() {
                 // 名称
-                let name = arr[i].to_string();
+                let mut name = arr[i].to_string();
                 // 文件
                 if i == arr.len() - 1 {
+                    // 如果文件链接至其它文件
+                    if !file.link.is_empty() {
+                        name = format!("{name} → {}", file.link);
+                    }
                     // 文件信息
                     file_tree_items.push(FileTreeItem {
                         permission: file.mode.clone(),
                         uid_gid: format!("{}:{}", file.uid, file.gid),
                         size: file.size,
-                        name: name.clone(),
+                        name: add_name_padding(&name, arr.len() - 1),
                         ..Default::default()
                     })
                 } else {
@@ -113,7 +129,7 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
                         file_tree_items.push(FileTreeItem {
                             uid_gid: "0:0".to_string(),
                             size: 0,
-                            name: name.clone(),
+                            name: add_name_padding(&name, i),
                             dir: dir.clone(),
                             ..Default::default()
                         });
