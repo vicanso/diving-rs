@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex};
+use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 use tracing::info;
 
 use super::{
@@ -143,6 +143,7 @@ impl DockerClient {
             .build()
             .context(BuildSnafu { url: url.clone() })?
             .get(url.clone());
+        builder = builder.timeout(Duration::from_secs(5 * 60));
         for (key, value) in headers {
             builder = builder.header(key, value);
         }
@@ -191,13 +192,9 @@ impl DockerClient {
             }
         }
         info!(url = url, "Getting token");
-        // TODO HTTP请求响应4xx,5xx的处理
-        let resp = reqwest::get(url.clone())
-            .await
-            .context(RequestSnafu { url: url.clone() })?
-            .json::<DockerTokenInfo>()
-            .await
-            .context(JsonSnafu { url: url.clone() })?;
+        let resp = self
+            .get::<DockerTokenInfo>(url.clone(), HashMap::new())
+            .await?;
         // 将token缓存，方便后续使用
         set_docker_token_to_cache(key, resp.clone()).await;
         info!(url = url, "Got token");

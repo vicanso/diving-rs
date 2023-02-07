@@ -8,6 +8,8 @@ pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+js
 pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
 
+pub static CATEGORY_REMOVED: &str = "removed";
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageFileInfo {
@@ -41,6 +43,17 @@ pub struct ImageAnalysisResult {
     pub total_size: u64,
     pub layer_file_summary_list: Vec<ImageFileSummary>,
     pub layer_file_wasted_summary_list: Vec<ImageFileWastedSummary>,
+}
+
+impl ImageAnalysisResult {
+    pub fn get_category(&self, path: &str, layer_index: usize) -> Option<String> {
+        for item in self.layer_file_summary_list.iter() {
+            if item.layer_index == layer_index && item.info.path == path {
+                return Some(item.category.clone());
+            }
+        }
+        None
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +94,8 @@ impl ImageAnalysisResult {
         let mut exists_files = HashMap::new();
         let mut summary_list = vec![];
         let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
+        // TODO 反转查询layer，则可获取后面删除文件
+        // 对应的前置文件的大小
         for (index, layer) in self.layers.iter().enumerate() {
             for file in &layer.info.files {
                 let key = &file.path;
@@ -92,7 +107,7 @@ impl ImageAnalysisResult {
                 let mut category = "modified".to_string();
                 if let Some(is_whiteout) = file.is_whiteout {
                     if is_whiteout {
-                        category = "removed".to_string();
+                        category = CATEGORY_REMOVED.to_string();
                     }
                 }
                 let mut info = file.clone();

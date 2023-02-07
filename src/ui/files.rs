@@ -3,15 +3,13 @@ use std::collections::HashMap;
 use bytesize::ByteSize;
 use pad::PadStr;
 use tui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Corner, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame, Terminal,
+    widgets::{Block, List, ListItem, Paragraph},
 };
 
-use crate::image::ImageAnalysisResult;
+use crate::image::{ImageAnalysisResult, CATEGORY_REMOVED};
 
 use super::util;
 
@@ -37,7 +35,10 @@ struct FileTreeItem {
     pub uid_gid: String,
     pub size: u64,
     pub name: String,
-    pub dir: String,
+    // 类型：removed, modified
+    pub category: Option<String>,
+    // 目录树的填充(├ │等)
+    pub padding: String,
 }
 
 pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) -> FilesWidget {
@@ -71,7 +72,6 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
     let permission_width = name_list[0].len();
     let id_width = name_list[1].len();
     let size_width = name_list[2].len();
-    // let mut path_map: HashMap<String, PathInfo> = HashMap::new();
 
     let get_file_mode_str = |mode: &str| -> String {
         mode.pad_to_width_with_alignment(permission_width, pad::Alignment::Middle)
@@ -83,25 +83,25 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
             .to_string()
             .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
     };
-    // TODO 是否last child
-    // └──
-    let add_name_padding = |name: &str, level: usize| -> String {
-        let arr = vec![
-            "│  ".repeat(level),
-            "├──".to_string(),
-            " ".to_string(),
-            name.to_string(),
-        ];
+    let get_padding_str = |level: usize, is_last: bool| -> String {
+        let mut arr = vec!["│   ".repeat(level)];
+        if is_last {
+            arr.push("└── ".to_string());
+        } else {
+            arr.push("├── ".to_string());
+        }
         arr.join("")
     };
+    // TODO for each生成map，map每次获取数据来调整更新
     if let Some(layer) = result.layers.get(opt.selected_layer) {
-        let mut file_tree_items = vec![];
-        let mut dir_size_map = HashMap::new();
-        // 获取index+1与当前对比，判断是否最后一个子目录
-        for file in &layer.info.files {
+        let files = &layer.info.files;
+
+        let mut path_index_map: HashMap<String, usize> = HashMap::with_capacity(files.len() / 10);
+        let mut file_tree_items = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
             let arr: Vec<&str> = file.path.split('/').collect();
+            let parent_dir = arr[0..arr.len() - 1].join("/");
             for i in 0..arr.len() {
-                // 名称
                 let mut name = arr[i].to_string();
                 // 文件
                 if i == arr.len() - 1 {
@@ -109,50 +109,66 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
                     if !file.link.is_empty() {
                         name = format!("{name} → {}", file.link);
                     }
-                    // 文件信息
+                    let mut is_last = false;
+                    // 如果有下一个文件并且不同路径，是当前目录最后一个文件
+                    if let Some(next_file) = layer.info.files.get(index + 1) {
+                        if !next_file.path.starts_with(&parent_dir) {
+                            is_last = true;
+                        }
+                    } else {
+                        // 如果已无下一下，则是当前目录最后一个文件
+                        is_last = true;
+                    }
+                    // 如果每次计算大小较慢
+                    // 后续考虑单独记录
                     file_tree_items.push(FileTreeItem {
                         permission: file.mode.clone(),
                         uid_gid: format!("{}:{}", file.uid, file.gid),
                         size: file.size,
-                        name: add_name_padding(&name, arr.len() - 1),
-                        ..Default::default()
-                    })
+                        name,
+                        padding: get_padding_str(arr.len() - 1, is_last),
+                        category: result.get_category(&file.path, opt.selected_layer),
+                    });
                 } else {
+                    // 目录的相关处理
+
                     // 目录完整路径
                     let dir = arr[0..i + 1].join("/");
-                    if let Some(size) = dir_size_map.get(&dir) {
-                        // 增加该目录下的文件大小
-                        dir_size_map.insert(dir, size + file.size);
+                    // 如果已存，则目录空间增加
+                    if let Some(path_index) = path_index_map.get(&dir) {
+                        if let Some(item) = file_tree_items.get_mut(path_index.to_owned()) {
+                            item.size += file.size;
+                        }
                     } else {
-                        // 如果目录不存在
-                        // 记录目录信息
+                        path_index_map.insert(dir.clone(), file_tree_items.len());
                         file_tree_items.push(FileTreeItem {
                             uid_gid: "0:0".to_string(),
-                            size: 0,
-                            name: add_name_padding(&name, i),
-                            dir: dir.clone(),
+                            size: file.size,
+                            name,
+                            padding: get_padding_str(i, false),
+                            // name: add_name_padding(&name, i, false),
                             ..Default::default()
                         });
-                        // 记录目录下的文件大小
-                        dir_size_map.insert(dir, file.size);
                     }
                 }
             }
         }
 
+        let empty_str = &"".to_string();
         for item in file_tree_items.iter() {
-            let mut size = item.size;
-            if !item.dir.is_empty() {
-                size = *dir_size_map.get(&item.dir).unwrap_or(&0);
+            let mut style = Style::default();
+            if item.category.as_ref().unwrap_or(empty_str) == CATEGORY_REMOVED {
+                style = style.fg(Color::Red);
             }
             list.push(ListItem::new(Spans::from(vec![
-                Span::from(get_file_mode_str(&item.permission)),
+                Span::styled(get_file_mode_str(&item.permission), style),
                 space_span.clone(),
-                Span::from(get_id_str(&item.uid_gid)),
+                Span::styled(get_id_str(&item.uid_gid), style),
                 space_span.clone(),
-                Span::from(get_size_str(size)),
+                Span::styled(get_size_str(item.size), style),
                 space_span.clone(),
-                Span::from(item.name.clone()),
+                Span::from(item.padding.clone()),
+                Span::styled(item.name.clone(), style),
             ])));
         }
     }

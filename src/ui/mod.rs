@@ -80,10 +80,8 @@ impl WidgetState {
             return;
         }
 
-        if self.is_layers_widget_active() {
-            if self.selected_layer < self.layer_count - 1 {
-                self.selected_layer += 1;
-            }
+        if self.is_layers_widget_active() && self.selected_layer < self.layer_count - 1 {
+            self.selected_layer += 1;
         }
     }
     fn select_prev(&mut self) {
@@ -91,10 +89,8 @@ impl WidgetState {
             self.select_file(-1);
             return;
         }
-        if self.is_layers_widget_active() {
-            if self.selected_layer > 0 {
-                self.selected_layer -= 1;
-            }
+        if self.is_layers_widget_active() && self.selected_layer > 0 {
+            self.selected_layer -= 1;
         }
     }
 }
@@ -129,6 +125,10 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
                 // 退出
                 KeyCode::Char('q') => break,
                 KeyCode::Tab => state.next_widget(),
+                // 左右均下一组件，因为只有两个组件
+                KeyCode::Right => state.next_widget(),
+                KeyCode::Left => state.next_widget(),
+                // 组件中的上下移动
                 KeyCode::Down => state.select_next(),
                 KeyCode::Up => state.select_prev(),
                 _ => continue,
