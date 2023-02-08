@@ -9,6 +9,8 @@ pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
 
 pub static CATEGORY_REMOVED: &str = "removed";
+pub static CATEGORY_MODIFIED: &str = "modified";
+pub static CATEGORY_ADDED: &str = "added";
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,33 +48,6 @@ pub struct ImageAnalysisResult {
 }
 
 impl ImageAnalysisResult {
-    pub fn get_category(&self, path: &str, layer_index: usize) -> Option<String> {
-        for item in self.layer_file_summary_list.iter() {
-            if item.layer_index == layer_index && item.info.path == path {
-                return Some(item.category.clone());
-            }
-        }
-        None
-    }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageFileSummary {
-    pub layer_index: usize,
-    pub category: String,
-    pub info: ImageFileInfo,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageFileWastedSummary {
-    pub path: String,
-    pub total_size: u64,
-    pub count: u32,
-}
-
-impl ImageAnalysisResult {
     pub fn auto_fill(&mut self) {
         self.size = self.get_image_size();
         self.total_size = self.get_image_total_size();
@@ -94,17 +69,15 @@ impl ImageAnalysisResult {
         let mut exists_files = HashMap::new();
         let mut summary_list = vec![];
         let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
-        // TODO 反转查询layer，则可获取后面删除文件
-        // 对应的前置文件的大小
         for (index, layer) in self.layers.iter().enumerate() {
             for file in &layer.info.files {
                 let key = &file.path;
                 if index == 0 || !exists_files.contains_key(key) {
                     // 新增
-                    exists_files.insert(key, file.clone());
+                    exists_files.insert(key, file.size);
                     continue;
                 }
-                let mut category = "modified".to_string();
+                let mut category = CATEGORY_MODIFIED.to_string();
                 if let Some(is_whiteout) = file.is_whiteout {
                     if is_whiteout {
                         category = CATEGORY_REMOVED.to_string();
@@ -113,8 +86,8 @@ impl ImageAnalysisResult {
                 let mut info = file.clone();
                 // 以前已存在，本次覆盖
                 // 文件大小使用已存在文件大小
-                if let Some(exists_file) = exists_files.get(key) {
-                    info.size = exists_file.size;
+                if let Some(value) = exists_files.get(key) {
+                    info.size = *value;
                 }
                 let mut found = false;
                 for wasted in wasted_list.iter_mut() {
@@ -141,6 +114,49 @@ impl ImageAnalysisResult {
         wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
         (summary_list, wasted_list)
     }
+    pub fn get_category(&self, path: &str, layer_index: usize) -> Option<String> {
+        for item in self.layer_file_summary_list.iter() {
+            if item.layer_index == layer_index && item.info.path == path {
+                return Some(item.category.clone());
+            }
+        }
+        if layer_index == 0 {
+            return None;
+        }
+        // 如果非第一层，而且有对应的文件，则是新增
+        if let Some(layer) = self.layers.get(layer_index) {
+            for item in layer.info.files.iter() {
+                if item.path == path {
+                    return Some(CATEGORY_ADDED.to_string());
+                }
+            }
+        }
+        None
+    }
+    pub fn get_removed_file_size(&self, path: &str) -> u64 {
+        for item in self.layer_file_wasted_summary_list.iter() {
+            if item.path == path {
+                return item.total_size / item.count as u64;
+            }
+        }
+        0
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFileSummary {
+    pub layer_index: usize,
+    pub category: String,
+    pub info: ImageFileInfo,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFileWastedSummary {
+    pub path: String,
+    pub total_size: u64,
+    pub count: u32,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

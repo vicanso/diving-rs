@@ -9,7 +9,7 @@ use tui::{
     widgets::{Block, List, ListItem, Paragraph},
 };
 
-use crate::image::{ImageAnalysisResult, CATEGORY_REMOVED};
+use crate::image::{ImageAnalysisResult, CATEGORY_ADDED, CATEGORY_MODIFIED, CATEGORY_REMOVED};
 
 use super::util;
 
@@ -20,12 +20,17 @@ pub struct FilesWidgetOption {
 }
 
 pub struct FilesWidget<'a> {
+    // 文件总数
+    pub file_count: usize,
     // 组件
     pub files: List<'a>,
+    // 文件列表展示区域
     pub files_area: Rect,
     pub block: Block<'a>,
+    // block 展示区域
     pub block_area: Rect,
     pub content: Paragraph<'a>,
+    // 内容展示区域
     pub content_area: Rect,
 }
 
@@ -92,6 +97,7 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
         }
         arr.join("")
     };
+    let mut file_count: usize = 0;
     // TODO for each生成map，map每次获取数据来调整更新
     if let Some(layer) = result.layers.get(opt.selected_layer) {
         let files = &layer.info.files;
@@ -121,13 +127,18 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
                     }
                     // 如果每次计算大小较慢
                     // 后续考虑单独记录
+                    let mut size = file.size;
+                    let category = result.get_category(&file.path, opt.selected_layer);
+                    if category.is_some() && category.clone().unwrap() == CATEGORY_REMOVED {
+                        size = result.get_removed_file_size(&file.path);
+                    }
                     file_tree_items.push(FileTreeItem {
                         permission: file.mode.clone(),
                         uid_gid: format!("{}:{}", file.uid, file.gid),
-                        size: file.size,
+                        size,
                         name,
                         padding: get_padding_str(arr.len() - 1, is_last),
-                        category: result.get_category(&file.path, opt.selected_layer),
+                        category,
                     });
                 } else {
                     // 目录的相关处理
@@ -146,19 +157,26 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
                             size: file.size,
                             name,
                             padding: get_padding_str(i, false),
-                            // name: add_name_padding(&name, i, false),
                             ..Default::default()
                         });
                     }
                 }
             }
         }
-
         let empty_str = &"".to_string();
+        file_count = file_tree_items.len();
         for item in file_tree_items.iter() {
             let mut style = Style::default();
-            if item.category.as_ref().unwrap_or(empty_str) == CATEGORY_REMOVED {
+            let category = item.category.as_ref().unwrap_or(empty_str);
+            // let mut size = item.size;
+            if category == CATEGORY_REMOVED {
+                // TODO 删除文件获取原文件大小
                 style = style.fg(Color::Red);
+                // size = result.get_removed_file_size(item.p)
+            } else if category == CATEGORY_MODIFIED {
+                style = style.fg(Color::Yellow);
+            } else if category == CATEGORY_ADDED {
+                style = style.fg(Color::Green);
             }
             list.push(ListItem::new(Spans::from(vec![
                 Span::styled(get_file_mode_str(&item.permission), style),
@@ -174,6 +192,7 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
     }
     let files = List::new(list).highlight_style(Style::default().bg(Color::White).fg(Color::Black));
     FilesWidget {
+        file_count,
         files,
         files_area: chunks[1],
         block: util::create_block(title),

@@ -7,7 +7,7 @@ use std::{error::Error, io};
 use tui::{
     backend::Backend,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Span, Spans},
     widgets::{ListState, Paragraph},
     Frame, Terminal,
@@ -32,6 +32,8 @@ struct WidgetState {
     layer_count: usize,
     // 文件列表的状态
     files_state: ListState,
+    // 文件总数
+    file_count: usize,
 }
 
 static LAYERS_WIDGET: &str = "layers";
@@ -68,6 +70,9 @@ impl WidgetState {
             value = v as i64;
         }
         value += offset;
+        if value >= self.file_count as i64 {
+            return;
+        }
         // 如果offset为0，选择第一个文件
         if value < 0 || offset == 0 {
             value = 0
@@ -99,7 +104,7 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -138,11 +143,7 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
 
     // restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     Ok(())
@@ -202,6 +203,9 @@ fn draw_widgets<B: Backend>(
             area: chunks[1],
         },
     );
+    if state.file_count != files_widget.file_count {
+        state.file_count = files_widget.file_count;
+    }
     f.render_widget(files_widget.block, files_widget.block_area);
     f.render_widget(files_widget.content, files_widget.content_area);
     f.render_stateful_widget(
