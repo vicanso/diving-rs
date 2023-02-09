@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bytesize::ByteSize;
 use pad::PadStr;
 use tui::{
@@ -9,7 +7,7 @@ use tui::{
     widgets::{Block, List, ListItem, Paragraph},
 };
 
-use crate::image::{ImageAnalysisResult, CATEGORY_ADDED, CATEGORY_MODIFIED, CATEGORY_REMOVED};
+use crate::image::{FileTreeItem, ImageAnalysisResult};
 
 use super::util;
 
@@ -34,16 +32,75 @@ pub struct FilesWidget<'a> {
     pub content_area: Rect,
 }
 
-#[derive(Default, Debug, Clone)]
-struct FileTreeItem {
-    pub permission: String,
-    pub uid_gid: String,
-    pub size: u64,
-    pub name: String,
-    // 类型：removed, modified
-    pub category: Option<String>,
-    // 目录树的填充(├ │等)
-    pub padding: String,
+struct FileTreeView {
+    items: Vec<FileTreeItem>,
+    width_list: Vec<usize>,
+}
+
+impl FileTreeView {
+    fn new(items: Vec<FileTreeItem>, width_list: Vec<usize>) -> Self {
+        FileTreeView { items, width_list }
+    }
+    fn add_to_file_tree_view(
+        &self,
+        list: &mut Vec<ListItem>,
+        items: &Vec<FileTreeItem>,
+        level: usize,
+    ) {
+        let space_span = Span::from("   ");
+        let permission_width = self.width_list[0];
+        let id_width = self.width_list[1];
+        let size_width = self.width_list[2];
+
+        let get_file_mode_str = |mode: &str| -> String {
+            mode.pad_to_width_with_alignment(permission_width, pad::Alignment::Middle)
+        };
+        let get_id_str = |id: &str| -> String {
+            id.pad_to_width_with_alignment(id_width, pad::Alignment::Right)
+        };
+        let get_size_str = |size: u64| -> String {
+            ByteSize(size)
+                .to_string()
+                .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
+        };
+        let get_padding_str = |level: usize, is_last: bool| -> String {
+            let mut arr = vec!["│   ".repeat(level)];
+            if is_last {
+                arr.push("└── ".to_string());
+            } else {
+                arr.push("├── ".to_string());
+            }
+            arr.join("")
+        };
+
+        let max = items.len();
+        for (index, item) in items.iter().enumerate() {
+            let style = Style::default();
+            let id = format!("{}:{}", item.uid, item.gid);
+            let padding = get_padding_str(level, index == max - 1);
+            let mut name = item.name.clone();
+            if !item.link.is_empty() {
+                name = format!("{name} → {}", item.link);
+            }
+            list.push(ListItem::new(Spans::from(vec![
+                Span::styled(get_file_mode_str(&item.mode), style),
+                space_span.clone(),
+                Span::styled(get_id_str(&id), style),
+                space_span.clone(),
+                Span::styled(get_size_str(item.size), style),
+                space_span.clone(),
+                // padding
+                Span::from(padding),
+                Span::styled(name, style),
+            ])));
+            if !item.children.is_empty() {
+                self.add_to_file_tree_view(list, &item.children, level + 1);
+            }
+        }
+    }
+    fn add_to_list(&self, list: &mut Vec<ListItem>) {
+        self.add_to_file_tree_view(list, &self.items, 0);
+    }
 }
 
 pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) -> FilesWidget {
@@ -74,122 +131,13 @@ pub fn new_files_widget(result: &ImageAnalysisResult, opt: FilesWidgetOption) ->
     ]);
 
     let mut list = vec![];
-    let permission_width = name_list[0].len();
-    let id_width = name_list[1].len();
-    let size_width = name_list[2].len();
 
-    let get_file_mode_str = |mode: &str| -> String {
-        mode.pad_to_width_with_alignment(permission_width, pad::Alignment::Middle)
-    };
-    let get_id_str =
-        |id: &str| -> String { id.pad_to_width_with_alignment(id_width, pad::Alignment::Right) };
-    let get_size_str = |size: u64| -> String {
-        ByteSize(size)
-            .to_string()
-            .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
-    };
-    let get_padding_str = |level: usize, is_last: bool| -> String {
-        let mut arr = vec!["│   ".repeat(level)];
-        if is_last {
-            arr.push("└── ".to_string());
-        } else {
-            arr.push("├── ".to_string());
-        }
-        arr.join("")
-    };
-    let mut file_count: usize = 0;
-    // TODO for each生成map，map每次获取数据来调整更新
-    if let Some(layer) = result.layers.get(opt.selected_layer) {
-        let files = &layer.info.files;
+    let width_list: Vec<usize> = name_list.iter().map(|item| item.len()).collect();
+    let file_tree_items = result.get_layer_file_tree(opt.selected_layer);
+    let file_tree_view = FileTreeView::new(file_tree_items, width_list);
 
-        let mut path_index_map: HashMap<String, usize> = HashMap::with_capacity(files.len() / 10);
-        let mut file_tree_items = Vec::with_capacity(files.len());
-        for (index, file) in files.iter().enumerate() {
-            let arr: Vec<&str> = file.path.split('/').collect();
-            let parent_dir = arr[0..arr.len() - 1].join("/");
-            for i in 0..arr.len() {
-                let mut name = arr[i].to_string();
-                // 文件
-                if i == arr.len() - 1 {
-                    // 如果文件链接至其它文件
-                    if !file.link.is_empty() {
-                        name = format!("{name} → {}", file.link);
-                    }
-                    let mut is_last = false;
-                    // 如果有下一个文件并且不同路径，是当前目录最后一个文件
-                    if let Some(next_file) = layer.info.files.get(index + 1) {
-                        if !next_file.path.starts_with(&parent_dir) {
-                            is_last = true;
-                        }
-                    } else {
-                        // 如果已无下一下，则是当前目录最后一个文件
-                        is_last = true;
-                    }
-                    // 如果每次计算大小较慢
-                    // 后续考虑单独记录
-                    let mut size = file.size;
-                    let category = result.get_category(&file.path, opt.selected_layer);
-                    if category.is_some() && category.clone().unwrap() == CATEGORY_REMOVED {
-                        size = result.get_removed_file_size(&file.path);
-                    }
-                    file_tree_items.push(FileTreeItem {
-                        permission: file.mode.clone(),
-                        uid_gid: format!("{}:{}", file.uid, file.gid),
-                        size,
-                        name,
-                        padding: get_padding_str(arr.len() - 1, is_last),
-                        category,
-                    });
-                } else {
-                    // 目录的相关处理
-
-                    // 目录完整路径
-                    let dir = arr[0..i + 1].join("/");
-                    // 如果已存，则目录空间增加
-                    if let Some(path_index) = path_index_map.get(&dir) {
-                        if let Some(item) = file_tree_items.get_mut(path_index.to_owned()) {
-                            item.size += file.size;
-                        }
-                    } else {
-                        path_index_map.insert(dir.clone(), file_tree_items.len());
-                        file_tree_items.push(FileTreeItem {
-                            uid_gid: "0:0".to_string(),
-                            size: file.size,
-                            name,
-                            padding: get_padding_str(i, false),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-        let empty_str = &"".to_string();
-        file_count = file_tree_items.len();
-        for item in file_tree_items.iter() {
-            let mut style = Style::default();
-            let category = item.category.as_ref().unwrap_or(empty_str);
-            // let mut size = item.size;
-            if category == CATEGORY_REMOVED {
-                // TODO 删除文件获取原文件大小
-                style = style.fg(Color::Red);
-                // size = result.get_removed_file_size(item.p)
-            } else if category == CATEGORY_MODIFIED {
-                style = style.fg(Color::Yellow);
-            } else if category == CATEGORY_ADDED {
-                style = style.fg(Color::Green);
-            }
-            list.push(ListItem::new(Spans::from(vec![
-                Span::styled(get_file_mode_str(&item.permission), style),
-                space_span.clone(),
-                Span::styled(get_id_str(&item.uid_gid), style),
-                space_span.clone(),
-                Span::styled(get_size_str(item.size), style),
-                space_span.clone(),
-                Span::from(item.padding.clone()),
-                Span::styled(item.name.clone(), style),
-            ])));
-        }
-    }
+    file_tree_view.add_to_list(&mut list);
+    let file_count = list.len();
     let files = List::new(list).highlight_style(Style::default().bg(Color::White).fg(Color::Black));
     FilesWidget {
         file_count,
