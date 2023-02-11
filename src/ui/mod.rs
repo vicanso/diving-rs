@@ -128,8 +128,6 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         file_summary_list: result.file_summary_list,
         size: result.size,
         total_size: result.total_size,
-
-        // layer_count: result.layers.len(),
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
         active: LAYERS_WIDGET.to_string(),

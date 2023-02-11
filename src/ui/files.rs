@@ -36,7 +36,7 @@ fn add_to_file_tree_view(
     width_list: Vec<usize>,
     list: &mut Vec<ListItem>,
     items: &Vec<FileTreeItem>,
-    level: usize,
+    is_last_list: Vec<bool>,
 ) {
     let space_span = Span::from("   ");
     let permission_width = width_list[0];
@@ -53,8 +53,11 @@ fn add_to_file_tree_view(
             .to_string()
             .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
     };
-    let get_padding_str = |level: usize, is_last: bool| -> String {
-        let mut arr = vec!["│   ".repeat(level)];
+    let get_padding_str = |list: &[bool], is_last: bool| -> String {
+        let mut arr: Vec<String> = list
+            .iter()
+            .map(|is_last| if is_last.to_owned() { "    " } else { "│   " }.to_string())
+            .collect();
         if is_last {
             arr.push("└── ".to_string());
         } else {
@@ -67,7 +70,8 @@ fn add_to_file_tree_view(
     for (index, item) in items.iter().enumerate() {
         let style = Style::default();
         let id = format!("{}:{}", item.uid, item.gid);
-        let padding = get_padding_str(level, index == max - 1);
+        let is_last = index == max - 1;
+        let padding = get_padding_str(&is_last_list, is_last);
         let mut name = item.name.clone();
         if !item.link.is_empty() {
             name = format!("{name} → {}", item.link);
@@ -84,7 +88,10 @@ fn add_to_file_tree_view(
             Span::styled(name, style),
         ])));
         if !item.children.is_empty() {
-            add_to_file_tree_view(width_list.clone(), list, &item.children, level + 1);
+            let mut tmp = is_last_list.clone();
+            tmp.push(is_last);
+
+            add_to_file_tree_view(width_list.clone(), list, &item.children, tmp);
         }
     }
 }
@@ -124,7 +131,7 @@ pub fn new_files_widget(
     let width_list: Vec<usize> = name_list.iter().map(|item| item.len()).collect();
     let file_tree_items = &file_tree_list[opt.selected_layer];
 
-    add_to_file_tree_view(width_list, &mut list, file_tree_items, 0);
+    add_to_file_tree_view(width_list, &mut list, file_tree_items, vec![]);
 
     let file_count = list.len();
     let files = List::new(list).highlight_style(Style::default().bg(Color::White).fg(Color::Black));
