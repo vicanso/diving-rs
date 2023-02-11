@@ -9,7 +9,7 @@ mod ui;
 
 use crate::{
     config::{get_config_path, get_layer_path, load_config},
-    image::{get_file_content_from_layer, get_files_from_layer, DockerClient, ImageAnalysisResult},
+    image::{get_file_content_from_layer, get_files_from_layer, DockerClient},
     store::clear_blob_files,
 };
 
@@ -28,7 +28,7 @@ fn init_logger() {
 async fn main() {
     init_logger();
     let c = DockerClient::new();
-    let result = c.do_analyze("vicanso", "static", "latest").await.unwrap();
+    let result = c.analyze("vicanso", "static", "latest").await.unwrap();
     // let result = c.analyze("vicanso", "image-optim", "latest").await.unwrap();
     ui::run_app(result).unwrap();
     // println!("{:?}", load_config());

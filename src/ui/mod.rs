@@ -13,7 +13,9 @@ use tui::{
     Frame, Terminal,
 };
 
-use crate::image::{DockerAnalyzeResult, ImageAnalysisResult, ImageLayer};
+use crate::image::{DockerAnalyzeResult, FileTreeItem, ImageFileSummary, ImageLayer};
+
+use self::image_detail::ImageDetailWidgetOption;
 
 mod files;
 mod image_detail;
@@ -27,11 +29,20 @@ struct WidgetState {
     active_list: Vec<String>,
     // 选中的区域
     active: String,
-    layers: Vec<ImageLayer>,
     selected_layer: usize,
+    // 镜像大小
+    size: u64,
+    // 镜像解压大小
+    total_size: u64,
+    // 镜像层的信息
+    layers: Vec<ImageLayer>,
+    // 每层对应的文件树
+    file_tree_list: Vec<Vec<FileTreeItem>>,
+    // 镜像删除、更新等文件汇总
+    file_summary_list: Vec<ImageFileSummary>,
     // 文件列表的状态
     files_state: ListState,
-    // 文件总数
+    // 文件列表项总数
     file_count: usize,
 }
 
@@ -69,6 +80,7 @@ impl WidgetState {
             value = v as i64;
         }
         value += offset;
+
         if value >= self.file_count as i64 {
             return;
         }
@@ -111,6 +123,12 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let mut state = WidgetState {
         name: result.name,
         layers: result.layers,
+        selected_layer: 0,
+        file_tree_list: result.file_tree_list,
+        file_summary_list: result.file_summary_list,
+        size: result.size,
+        total_size: result.total_size,
+
         // layer_count: result.layers.len(),
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
@@ -185,29 +203,33 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, state: &mut WidgetState) {
             .as_ref(),
         )
         .split(chunks[0]);
+    let image_detail_widget = image_detail::new_image_detail_widget(ImageDetailWidgetOption {
+        name: state.name.clone(),
+        total_size: state.total_size,
+        size: state.size,
+        file_summary_list: state.file_summary_list.clone(),
+    });
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);
+    f.render_widget(image_detail_widget.widget, left_chunks[2]);
 
-    // let image_detail_widget = image_detail::new_image_detail_widget(&state);
-    // f.render_widget(image_detail_widget.widget, left_chunks[2]);
-
-    // // 文件列表
-    // let files_widget = files::new_files_widget(
-    //     result,
-    //     files::FilesWidgetOption {
-    //         is_active: state.is_files_widget_active(),
-    //         selected_layer: state.selected_layer,
-    //         area: chunks[1],
-    //     },
-    // );
-    // if state.file_count != files_widget.file_count {
-    //     state.file_count = files_widget.file_count;
-    // }
-    // f.render_widget(files_widget.block, files_widget.block_area);
-    // f.render_widget(files_widget.content, files_widget.content_area);
-    // f.render_stateful_widget(
-    //     files_widget.files,
-    //     files_widget.files_area,
-    //     &mut state.files_state,
-    // );
+    // 文件列表
+    let files_widget = files::new_files_widget(
+        &state.file_tree_list,
+        files::FilesWidgetOption {
+            is_active: state.is_files_widget_active(),
+            selected_layer: state.selected_layer,
+            area: chunks[1],
+        },
+    );
+    if state.file_count != files_widget.file_count {
+        state.file_count = files_widget.file_count;
+    }
+    f.render_widget(files_widget.block, files_widget.block_area);
+    f.render_widget(files_widget.content, files_widget.content_area);
+    f.render_stateful_widget(
+        files_widget.files,
+        files_widget.files_area,
+        &mut state.files_state,
+    );
 }

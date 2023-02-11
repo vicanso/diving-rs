@@ -86,16 +86,41 @@ pub enum Op {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTreeItem {
+    // 文件或目录名称
     pub name: String,
+    // 链接
     pub link: String,
+    // 文件大小
     pub size: u64,
+    // unix mode
     pub mode: String,
     pub uid: u64,
     pub gid: u64,
+    // 操作：删除、更新等
     pub op: Op,
+    // 子文件
     pub children: Vec<FileTreeItem>,
 }
 
+// 从文件树中查找文件
+pub fn find_file_tree_item(items: &[FileTreeItem], path_list: Vec<&str>) -> Option<FileTreeItem> {
+    if path_list.is_empty() {
+        return None;
+    }
+    let is_last = path_list.len() == 1;
+    let path = path_list.first().unwrap().to_string();
+    for item in items.iter() {
+        if item.name == path {
+            if is_last {
+                return Some(item.clone());
+            }
+            return find_file_tree_item(&item.children, path_list[1..].to_vec());
+        }
+    }
+    None
+}
+
+// 添加文件至文件树
 fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeItem) {
     // 文件
     if name_list.is_empty() {
@@ -128,7 +153,8 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeI
     }
 }
 
-pub fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> {
+// 将文件转换为文件树
+fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> {
     let mut file_tree: Vec<FileTreeItem> = vec![];
     for file in files.iter() {
         let arr: Vec<&str> = file.path.split('/').collect();

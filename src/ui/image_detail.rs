@@ -1,31 +1,60 @@
-use std::collections::HashMap;
-
 use bytesize::ByteSize;
-use chrono::{DateTime, Local, TimeZone};
 use pad::PadStr;
 use tui::{
-    layout::Alignment,
     style::{Modifier, Style},
     text::{Span, Spans},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 
 use super::util;
-use crate::image::ImageAnalysisResult;
+use crate::image::ImageFileSummary;
 
 pub struct ImageDetailWidget<'a> {
     pub widget: Paragraph<'a>,
 }
 
-pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidget {
-    let total_size = result.total_size;
-    let size = result.size;
+pub struct ImageDetailWidgetOption {
+    pub name: String,
+    pub total_size: u64,
+    pub size: u64,
+    pub file_summary_list: Vec<ImageFileSummary>,
+}
 
-    let wasted_size = result
-        .layer_file_wasted_summary_list
-        .iter()
-        .map(|item| item.total_size)
-        .sum();
+#[derive(Default, Debug, Clone, PartialEq)]
+struct ImageFileWastedSummary {
+    pub path: String,
+    pub total_size: u64,
+    pub count: u32,
+}
+
+pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailWidget<'a> {
+    let total_size = opt.total_size;
+    let size = opt.size;
+
+    let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
+    let mut wasted_size = 0;
+    for file in opt.file_summary_list.iter() {
+        let mut found = false;
+        let info = &file.info;
+        wasted_size += info.size;
+        for wasted in wasted_list.iter_mut() {
+            if wasted.path == info.path {
+                found = true;
+                wasted.count += 1;
+                wasted.total_size += info.size;
+            }
+        }
+        if !found {
+            wasted_list.push(ImageFileWastedSummary {
+                path: info.path.clone(),
+                count: 1,
+                total_size: info.size,
+            });
+        }
+    }
+    wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+
+    // let wasted_size = opt.file_summary_list.iter().map(|item| item.info.size).sum();
 
     let mut score = 100 - wasted_size * 100 / total_size;
     // 有浪费空间，则分数-1
@@ -42,7 +71,7 @@ pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidge
                 "Image name: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::from(result.name.clone()),
+            Span::from(opt.name),
         ]),
         Spans::from(vec![
             Span::styled(
@@ -78,7 +107,7 @@ pub fn new_image_detail_widget(result: &ImageAnalysisResult) -> ImageDetailWidge
     let count_pad_width = headers[0].len();
     let size_pad_width = headers[1].len();
 
-    for wasted in result.layer_file_wasted_summary_list.iter() {
+    for wasted in wasted_list.iter() {
         let count_str = format!("{}", wasted.count)
             .pad_to_width_with_alignment(count_pad_width, pad::Alignment::Right);
         let size_str = ByteSize(wasted.total_size)
