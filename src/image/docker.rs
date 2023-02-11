@@ -9,13 +9,11 @@ use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, ti
 use tracing::info;
 
 use super::{
-    get_files_from_layer, ImageAnalysisResult, ImageConfig, ImageIndex, ImageLayer, ImageManifest,
-    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
+    get_files_from_layer, image::ImageHistory, layer::ImageLayerInfo, ImageAnalysisResult,
+    ImageConfig, ImageIndex, ImageLayer, ImageManifest, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
+    MEDIA_TYPE_IMAGE_INDEX,
 };
-use crate::{
-    image::layer::ImageLayerInfo,
-    store::{get_blob_from_file, save_blob_to_file},
-};
+use crate::store::{get_blob_from_file, save_blob_to_file};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -58,6 +56,11 @@ pub struct DockerTokenInfo {
     access_token: String,
     expires_in: i32,
     issued_at: String,
+}
+
+pub struct DockerAnalyzeResult {
+    pub name: String,
+    pub layers: Vec<ImageLayer>,
 }
 
 impl DockerTokenInfo {
@@ -282,11 +285,16 @@ impl DockerClient {
         info!(url = url, "Got blob");
         Ok(resp.to_vec())
     }
-    // 分析镜像
-    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<ImageAnalysisResult> {
+    pub async fn do_analyze(
+        &self,
+        user: &str,
+        img: &str,
+        tag: &str,
+    ) -> Result<DockerAnalyzeResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
         let mut layers = vec![];
+        // let mut layer_infos = vec![];
         let mut index = 0;
         info!(user = user, img = img, tag = tag, "analyzing image",);
         for history in &config.history {
@@ -296,7 +304,7 @@ impl DockerClient {
                 ..Default::default()
             };
             let mut size = 0;
-            // 只有空的layer需要获取files
+            // 只有非空的layer需要获取files
             if !empty {
                 if let Some(value) = manifest.layers.get(index) {
                     size = value.size;
@@ -316,11 +324,62 @@ impl DockerClient {
                 cmd: history.created_by.clone(),
                 empty,
                 digest,
-                info,
+                unpack_size: info.size,
+                // 删除此属性
+                info: info.clone(),
                 size,
             });
+            println!("{:?}", info.to_file_tree());
+            // layer_infos.push(info);
         }
-        info!(user = user, img = img, tag = tag, "analyze image done",);
+
+        Ok(DockerAnalyzeResult {
+            name: format!("{user}/{img}:{tag}"),
+            layers,
+        })
+    }
+    // 分析镜像
+    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<ImageAnalysisResult> {
+        let manifest = self.get_manifest(user, img, tag).await?;
+        let config = self.get_image_config(user, img, tag).await?;
+        let mut layers = vec![];
+        let mut layer_infos = vec![];
+        let mut index = 0;
+        info!(user = user, img = img, tag = tag, "analyzing image",);
+        for history in &config.history {
+            let empty = history.empty_layer.unwrap_or_default();
+            let mut digest = "".to_string();
+            let mut info = ImageLayerInfo {
+                ..Default::default()
+            };
+            let mut size = 0;
+            // 只有非空的layer需要获取files
+            if !empty {
+                if let Some(value) = manifest.layers.get(index) {
+                    size = value.size;
+                    digest = value.digest.clone();
+                    // 判断是否压缩
+                    let buf = self.get_blob(user, img, &digest).await?;
+
+                    info = get_files_from_layer(&buf, &value.media_type)
+                        .await
+                        .context(LayerSnafu {})?;
+                }
+                index += 1;
+            }
+
+            layers.push(ImageLayer {
+                created: history.created.clone(),
+                cmd: history.created_by.clone(),
+                empty,
+                digest,
+                unpack_size: info.unpack_size,
+                // 删除此属性
+                info: info.clone(),
+                size,
+            });
+            layer_infos.push(info);
+        }
         let mut result = ImageAnalysisResult {
             name: format!("{user}/{img}:{tag}"),
             created: config.created,
@@ -329,6 +388,7 @@ impl DockerClient {
             ..Default::default()
         };
         result.auto_fill();
+        info!(user = user, img = img, tag = tag, "analyze image done",);
         Ok(result)
     }
 }

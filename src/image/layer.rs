@@ -74,30 +74,117 @@ pub async fn get_file_content_from_layer(
     Ok(content)
 }
 
-// 从分层数据中读取所有文件信息
-// "application/vnd.oci.image.layer.v1.tar+gzip",
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Op {
+    #[default]
+    None,
+    Remove,
+    Modified,
+    Added,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTreeItem {
+    pub name: String,
+    pub link: String,
+    pub size: u64,
+    pub mode: String,
+    pub uid: u64,
+    pub gid: u64,
+    pub op: Op,
+    pub children: Vec<FileTreeItem>,
+}
+
+fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeItem) {
+    // 文件
+    if name_list.is_empty() {
+        items.push(item);
+        return;
+    }
+    // 目录
+    let name = name_list[0];
+    let mut found_index = -1;
+    // 是否已存在此目录
+    for (index, dir) in items.iter_mut().enumerate() {
+        if dir.name == name {
+            dir.size += item.size;
+            found_index = index as i64;
+        }
+    }
+    // 不存在则插入
+    if found_index < 0 {
+        found_index = items.len() as i64;
+        items.push(FileTreeItem {
+            name: name.to_string(),
+            size: item.size,
+            // TODO 其它属性
+            ..Default::default()
+        });
+    }
+    if let Some(file_tree_item) = items.get_mut(found_index as usize) {
+        // 子目录
+        add_file(&mut file_tree_item.children, name_list[1..].to_vec(), item);
+    }
+}
+
+pub fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> {
+    let mut file_tree: Vec<FileTreeItem> = vec![];
+    for file in files.iter() {
+        let arr: Vec<&str> = file.path.split('/').collect();
+        if arr.is_empty() {
+            continue;
+        }
+        let size = arr.len();
+        add_file(
+            &mut file_tree,
+            arr[0..size - 1].to_vec(),
+            FileTreeItem {
+                // 已保证不会为空
+                name: arr[size - 1].to_string(),
+                link: file.link.clone(),
+                size: file.size,
+                mode: file.mode.clone(),
+                uid: file.uid,
+                gid: file.gid,
+                // TODO 其它属性
+                ..Default::default()
+            },
+        )
+    }
+    file_tree
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageLayerInfo {
     // 原始大小
-    pub original_size: u64,
-    // 解压后的大小
     pub size: u64,
+    // 解压后的大小
+    pub unpack_size: u64,
     // 文件列表
     pub files: Vec<ImageFileInfo>,
 }
+
+impl ImageLayerInfo {
+    pub fn to_file_tree(&self) -> Vec<FileTreeItem> {
+        convert_files_to_file_tree(&self.files)
+    }
+}
+
+// 从分层数据中读取所有文件信息
+// "application/vnd.oci.image.layer.v1.tar+gzip",
 pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<ImageLayerInfo> {
     let buf;
-    let original_size = data.len() as u64;
-    let mut size = original_size;
+    let size = data.len() as u64;
+    let mut unpack_size = size;
     // TODO 支持gzip zstd等
     let mut a = if media_type.contains("gzip") {
         buf = gunzip(data)?;
-        size = buf.len() as u64;
+        unpack_size = buf.len() as u64;
         Archive::new(&buf[..])
     } else if media_type.contains("zstd") {
         buf = zstd_decode(data)?;
-        size = buf.len() as u64;
+        unpack_size = buf.len() as u64;
         Archive::new(&buf[..])
     } else {
         Archive::new(data)
@@ -147,7 +234,7 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Image
     }
     Ok(ImageLayerInfo {
         files,
-        original_size,
+        unpack_size,
         size,
     })
 }

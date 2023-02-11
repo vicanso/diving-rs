@@ -1,3 +1,7 @@
+use std::{env, str::FromStr};
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
+
 mod config;
 mod image;
 mod store;
@@ -5,19 +9,28 @@ mod ui;
 
 use crate::{
     config::{get_config_path, get_layer_path, load_config},
-    image::{
-        get_file_content_from_layer, get_files_from_layer, DockerAnalysisResult, DockerClient,
-    },
+    image::{get_file_content_from_layer, get_files_from_layer, DockerClient, ImageAnalysisResult},
     store::clear_blob_files,
 };
 
+fn init_logger() {
+    let mut level = Level::INFO;
+    if let Ok(log_level) = env::var("LOG_LEVEL") {
+        if let Ok(value) = Level::from_str(log_level.as_str()) {
+            level = value;
+        }
+    }
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+}
+
 #[tokio::main]
 async fn main() {
+    init_logger();
     let c = DockerClient::new();
-    c.analyze("vicanso", "image-optim", "latest").await;
-    ui::run_app(DockerAnalysisResult {
-        ..Default::default()
-    });
+    let result = c.do_analyze("vicanso", "static", "latest").await.unwrap();
+    // let result = c.analyze("vicanso", "image-optim", "latest").await.unwrap();
+    ui::run_app(result).unwrap();
     // println!("{:?}", load_config());
     // load_config();
     // // 初始化layer path

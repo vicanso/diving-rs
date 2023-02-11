@@ -13,7 +13,7 @@ use tui::{
     Frame, Terminal,
 };
 
-use crate::image::ImageAnalysisResult;
+use crate::image::{DockerAnalyzeResult, ImageAnalysisResult, ImageLayer};
 
 mod files;
 mod image_detail;
@@ -23,13 +23,12 @@ mod util;
 
 #[derive(Default, Debug, Clone)]
 struct WidgetState {
+    name: String,
     active_list: Vec<String>,
     // 选中的区域
     active: String,
-    // 被选中的层
+    layers: Vec<ImageLayer>,
     selected_layer: usize,
-    // 层级数
-    layer_count: usize,
     // 文件列表的状态
     files_state: ListState,
     // 文件总数
@@ -85,7 +84,7 @@ impl WidgetState {
             return;
         }
 
-        if self.is_layers_widget_active() && self.selected_layer < self.layer_count - 1 {
+        if self.is_layers_widget_active() && self.selected_layer < self.layers.len() - 1 {
             self.selected_layer += 1;
         }
     }
@@ -100,7 +99,7 @@ impl WidgetState {
     }
 }
 
-pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
+pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -110,14 +109,16 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
 
     // create app and run it
     let mut state = WidgetState {
-        layer_count: result.layers.len(),
+        name: result.name,
+        layers: result.layers,
+        // layer_count: result.layers.len(),
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
         active: LAYERS_WIDGET.to_string(),
         ..Default::default()
     };
     loop {
-        terminal.draw(|f| draw_widgets(f, &result, &mut state))?;
+        terminal.draw(|f| draw_widgets(f, &mut state))?;
 
         if let Event::Key(key) = event::read()? {
             match key.code {
@@ -149,27 +150,23 @@ pub fn run_app(result: ImageAnalysisResult) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn draw_widgets<B: Backend>(
-    f: &mut Frame<B>,
-    result: &ImageAnalysisResult,
-    state: &mut WidgetState,
-) {
+fn draw_widgets<B: Backend>(f: &mut Frame<B>, state: &mut WidgetState) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(f.size());
 
     let layers_widget = layers::new_layers_widget(
-        &result.layers,
+        &state.layers,
         layers::LayersWidgetOption {
             is_active: state.is_layers_widget_active(),
             selected_layer: state.selected_layer,
         },
     );
-    let layer = result
+    let layer = state
         .layers
         .get(state.selected_layer)
-        .unwrap_or_else(|| &result.layers[0]);
+        .unwrap_or_else(|| &state.layers[0]);
     let detail_widget = layer_detail::new_layer_detail_widget(
         layer,
         layer_detail::DetailWidgetOption {
@@ -191,26 +188,26 @@ fn draw_widgets<B: Backend>(
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);
 
-    let image_detail_widget = image_detail::new_image_detail_widget(result);
-    f.render_widget(image_detail_widget.widget, left_chunks[2]);
+    // let image_detail_widget = image_detail::new_image_detail_widget(&state);
+    // f.render_widget(image_detail_widget.widget, left_chunks[2]);
 
-    // 文件列表
-    let files_widget = files::new_files_widget(
-        result,
-        files::FilesWidgetOption {
-            is_active: state.is_files_widget_active(),
-            selected_layer: state.selected_layer,
-            area: chunks[1],
-        },
-    );
-    if state.file_count != files_widget.file_count {
-        state.file_count = files_widget.file_count;
-    }
-    f.render_widget(files_widget.block, files_widget.block_area);
-    f.render_widget(files_widget.content, files_widget.content_area);
-    f.render_stateful_widget(
-        files_widget.files,
-        files_widget.files_area,
-        &mut state.files_state,
-    );
+    // // 文件列表
+    // let files_widget = files::new_files_widget(
+    //     result,
+    //     files::FilesWidgetOption {
+    //         is_active: state.is_files_widget_active(),
+    //         selected_layer: state.selected_layer,
+    //         area: chunks[1],
+    //     },
+    // );
+    // if state.file_count != files_widget.file_count {
+    //     state.file_count = files_widget.file_count;
+    // }
+    // f.render_widget(files_widget.block, files_widget.block_area);
+    // f.render_widget(files_widget.content, files_widget.content_area);
+    // f.render_stateful_widget(
+    //     files_widget.files,
+    //     files_widget.files_area,
+    //     &mut state.files_state,
+    // );
 }
