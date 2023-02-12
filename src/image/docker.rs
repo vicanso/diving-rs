@@ -369,7 +369,7 @@ impl DockerClient {
                     image_size += info.size;
                     image_total_size += info.unpack_size;
                     // TODO 根据file summary判断文件是否更新或删除
-                    file_tree = convert_files_to_file_tree(&info.files);
+                    file_tree = convert_files_to_file_tree(&info.files, &file_summary_list);
                 }
                 index += 1;
             }

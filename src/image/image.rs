@@ -242,9 +242,14 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeI
     // 不存在则插入
     if found_index < 0 {
         found_index = items.len() as i64;
+        let mut op = Op::None;
+        if item.op == Op::Modified {
+            op = Op::Modified;
+        }
         items.push(FileTreeItem {
             name: name.to_string(),
             size: item.size,
+            op,
             // TODO 其它属性
             ..Default::default()
         });
@@ -256,13 +261,26 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeI
 }
 
 // 将文件转换为文件树
-pub fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> {
+pub fn convert_files_to_file_tree(
+    files: &[ImageFileInfo],
+    file_summary_list: &[ImageFileSummary],
+) -> Vec<FileTreeItem> {
     let mut file_tree: Vec<FileTreeItem> = vec![];
     for file in files.iter() {
         let arr: Vec<&str> = file.path.split('/').collect();
         if arr.is_empty() {
             continue;
         }
+        let mut op = Op::None;
+        if file.is_whiteout.is_some() {
+            op = Op::Remove;
+        } else if file_summary_list
+            .iter()
+            .any(|item| item.info.path == file.path)
+        {
+            op = Op::Modified;
+        }
+
         let size = arr.len();
         add_file(
             &mut file_tree,
@@ -275,7 +293,7 @@ pub fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> 
                 mode: file.mode.clone(),
                 uid: file.uid,
                 gid: file.gid,
-                // TODO 其它属性
+                op,
                 ..Default::default()
             },
         )

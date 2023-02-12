@@ -71,6 +71,7 @@ fn add_to_file_tree_view(
         let mut style = Style::default();
         match item.op {
             Op::Modified => style = style.fg(Color::Yellow),
+            Op::Remove => style = style.fg(Color::Red),
             _ => {}
         }
         let id = format!("{}:{}", item.uid, item.gid);
