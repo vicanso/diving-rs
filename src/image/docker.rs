@@ -9,7 +9,7 @@ use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, ti
 use tracing::info;
 
 use super::{
-    get_files_from_layer, image::ImageFileSummary, layer::ImageLayerInfo, FileTreeItem,
+    get_files_from_layer, layer::ImageLayerInfo, oci_image::ImageFileSummary, FileTreeItem,
     ImageConfig, ImageIndex, ImageLayer, ImageManifest, Op, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
     MEDIA_TYPE_IMAGE_INDEX,
 };

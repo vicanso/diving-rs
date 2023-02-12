@@ -2,7 +2,7 @@ use bytesize::ByteSize;
 use pad::PadStr;
 use tui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Span, Spans},
     widgets::{Block, List, ListItem, Paragraph},
 };
@@ -15,6 +15,7 @@ pub struct FilesWidgetOption {
     pub is_active: bool,
     pub selected_layer: usize,
     pub area: Rect,
+    pub mode: u8,
 }
 
 pub struct FilesWidget<'a> {
@@ -119,7 +120,10 @@ pub fn new_files_widget(
     let space_span = Span::from("   ");
     let name_list = vec!["Permission", "UID:GID", "    Size", "FileTree"];
     let content = Paragraph::new(vec![
-        Spans::from(vec![Span::from("")]),
+        Spans::from(vec![Span::styled(
+            "0:All 1:Modified/Removed 2:File >= 1MB",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Spans::from(vec![
             Span::from(name_list[0]),
             space_span.clone(),

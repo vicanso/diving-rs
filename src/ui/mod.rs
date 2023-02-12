@@ -43,6 +43,8 @@ struct WidgetState {
     files_state: ListState,
     // 文件列表项总数
     file_count: usize,
+    // 文件树模式
+    file_tree_mode: u8,
 }
 
 static LAYERS_WIDGET: &str = "layers";
@@ -108,6 +110,11 @@ impl WidgetState {
             self.selected_layer -= 1;
         }
     }
+    fn change_file_tree_mode(&mut self, mode: u8) {
+        if self.is_files_widget_active() {
+            self.file_tree_mode = mode;
+        }
+    }
 }
 
 pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
@@ -152,6 +159,10 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
                 // 组件中的上下移动
                 KeyCode::Down => state.select_next(),
                 KeyCode::Up => state.select_prev(),
+                // 文件树模式选择
+                KeyCode::Char('1') => state.change_file_tree_mode(1),
+                KeyCode::Char('0') => state.change_file_tree_mode(0),
+
                 _ => continue,
             }
         }
@@ -217,6 +228,7 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, state: &mut WidgetState) {
             is_active: state.is_files_widget_active(),
             selected_layer: state.selected_layer,
             area: chunks[1],
+            mode: state.file_tree_mode,
         },
     );
     if state.file_count != files_widget.file_count {
