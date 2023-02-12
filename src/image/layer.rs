@@ -75,113 +75,6 @@ pub async fn get_file_content_from_layer(
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Op {
-    #[default]
-    None,
-    Remove,
-    Modified,
-    Added,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileTreeItem {
-    // 文件或目录名称
-    pub name: String,
-    // 链接
-    pub link: String,
-    // 文件大小
-    pub size: u64,
-    // unix mode
-    pub mode: String,
-    pub uid: u64,
-    pub gid: u64,
-    // 操作：删除、更新等
-    pub op: Op,
-    // 子文件
-    pub children: Vec<FileTreeItem>,
-}
-
-// 从文件树中查找文件
-pub fn find_file_tree_item(items: &[FileTreeItem], path_list: Vec<&str>) -> Option<FileTreeItem> {
-    if path_list.is_empty() {
-        return None;
-    }
-    let is_last = path_list.len() == 1;
-    let path = path_list.first().unwrap().to_string();
-    for item in items.iter() {
-        if item.name == path {
-            if is_last {
-                return Some(item.clone());
-            }
-            return find_file_tree_item(&item.children, path_list[1..].to_vec());
-        }
-    }
-    None
-}
-
-// 添加文件至文件树
-fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeItem) {
-    // 文件
-    if name_list.is_empty() {
-        items.push(item);
-        return;
-    }
-    // 目录
-    let name = name_list[0];
-    let mut found_index = -1;
-    // 是否已存在此目录
-    for (index, dir) in items.iter_mut().enumerate() {
-        if dir.name == name {
-            dir.size += item.size;
-            found_index = index as i64;
-        }
-    }
-    // 不存在则插入
-    if found_index < 0 {
-        found_index = items.len() as i64;
-        items.push(FileTreeItem {
-            name: name.to_string(),
-            size: item.size,
-            // TODO 其它属性
-            ..Default::default()
-        });
-    }
-    if let Some(file_tree_item) = items.get_mut(found_index as usize) {
-        // 子目录
-        add_file(&mut file_tree_item.children, name_list[1..].to_vec(), item);
-    }
-}
-
-// 将文件转换为文件树
-fn convert_files_to_file_tree(files: &[ImageFileInfo]) -> Vec<FileTreeItem> {
-    let mut file_tree: Vec<FileTreeItem> = vec![];
-    for file in files.iter() {
-        let arr: Vec<&str> = file.path.split('/').collect();
-        if arr.is_empty() {
-            continue;
-        }
-        let size = arr.len();
-        add_file(
-            &mut file_tree,
-            arr[0..size - 1].to_vec(),
-            FileTreeItem {
-                // 已保证不会为空
-                name: arr[size - 1].to_string(),
-                link: file.link.clone(),
-                size: file.size,
-                mode: file.mode.clone(),
-                uid: file.uid,
-                gid: file.gid,
-                // TODO 其它属性
-                ..Default::default()
-            },
-        )
-    }
-    file_tree
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageLayerInfo {
     // 原始大小
     pub size: u64,
@@ -191,11 +84,11 @@ pub struct ImageLayerInfo {
     pub files: Vec<ImageFileInfo>,
 }
 
-impl ImageLayerInfo {
-    pub fn to_file_tree(&self) -> Vec<FileTreeItem> {
-        convert_files_to_file_tree(&self.files)
-    }
-}
+// impl ImageLayerInfo {
+//     pub fn to_file_tree(&self) -> Vec<FileTreeItem> {
+//         convert_files_to_file_tree(&self.files)
+//     }
+// }
 
 // 从分层数据中读取所有文件信息
 // "application/vnd.oci.image.layer.v1.tar+gzip",

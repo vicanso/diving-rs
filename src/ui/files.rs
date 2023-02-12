@@ -7,7 +7,7 @@ use tui::{
     widgets::{Block, List, ListItem, Paragraph},
 };
 
-use crate::image::FileTreeItem;
+use crate::image::{FileTreeItem, Op};
 
 use super::util;
 
@@ -68,7 +68,11 @@ fn add_to_file_tree_view(
 
     let max = items.len();
     for (index, item) in items.iter().enumerate() {
-        let style = Style::default();
+        let mut style = Style::default();
+        match item.op {
+            Op::Modified => style = style.fg(Color::Yellow),
+            _ => {}
+        }
         let id = format!("{}:{}", item.uid, item.gid);
         let is_last = index == max - 1;
         let padding = get_padding_str(&is_last_list, is_last);

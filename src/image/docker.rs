@@ -14,7 +14,7 @@ use super::{
     MEDIA_TYPE_IMAGE_INDEX,
 };
 use crate::{
-    image::{find_file_tree_item, ImageFileInfo},
+    image::{convert_files_to_file_tree, find_file_tree_item, ImageFileInfo},
     store::{get_blob_from_file, save_blob_to_file},
 };
 
@@ -345,6 +345,7 @@ impl DockerClient {
                 ..Default::default()
             };
             let mut size = 0;
+            let mut file_tree = vec![];
             // 只有非空的layer需要获取files
             if !empty {
                 // manifest中的layer只对应非空的操作
@@ -367,6 +368,8 @@ impl DockerClient {
                     }
                     image_size += info.size;
                     image_total_size += info.unpack_size;
+                    // TODO 根据file summary判断文件是否更新或删除
+                    file_tree = convert_files_to_file_tree(&info.files);
                 }
                 index += 1;
             }
@@ -379,7 +382,7 @@ impl DockerClient {
                 unpack_size: info.unpack_size,
                 size,
             });
-            file_tree_list.push(info.to_file_tree());
+            file_tree_list.push(file_tree);
         }
 
         Ok(DockerAnalyzeResult {

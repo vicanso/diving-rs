@@ -54,8 +54,6 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
     }
     wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
 
-    // let wasted_size = opt.file_summary_list.iter().map(|item| item.info.size).sum();
-
     let mut score = 100 - wasted_size * 100 / total_size;
     // 有浪费空间，则分数-1
     if wasted_size != 0 {

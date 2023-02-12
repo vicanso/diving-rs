@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -7,9 +7,8 @@ use std::{error::Error, io};
 use tui::{
     backend::Backend,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    text::{Span, Spans},
-    widgets::{ListState, Paragraph},
+    layout::{Constraint, Direction, Layout},
+    widgets::ListState,
     Frame, Terminal,
 };
 
