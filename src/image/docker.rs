@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use futures;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use reqwest::Client;
@@ -9,9 +10,11 @@ use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, ti
 use tracing::info;
 
 use super::{
-    get_files_from_layer, layer::ImageLayerInfo, oci_image::ImageFileSummary, FileTreeItem,
-    ImageConfig, ImageIndex, ImageLayer, ImageManifest, Op, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
-    MEDIA_TYPE_IMAGE_INDEX,
+    get_files_from_layer,
+    layer::ImageLayerInfo,
+    oci_image::{ImageFileSummary, ImageManifestLayer},
+    FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, Op,
+    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
 };
 use crate::{
     image::{convert_files_to_file_tree, find_file_tree_item, ImageFileInfo},
@@ -326,6 +329,40 @@ impl DockerClient {
         info!(url = url, "Got blob");
         Ok(resp.to_vec())
     }
+    async fn get_layer_files(
+        &self,
+        user: &str,
+        img: &str,
+        layer: ImageManifestLayer,
+    ) -> Result<ImageLayerInfo> {
+        let buf = self.get_blob(user, img, &layer.digest).await?;
+
+        let info = get_files_from_layer(&buf, &layer.media_type)
+            .await
+            .context(LayerSnafu {})?;
+        Ok(info)
+    }
+    async fn get_all_layer_info(
+        &self,
+        user: &str,
+        img: &str,
+        layers: Vec<ImageManifestLayer>,
+    ) -> Result<Vec<ImageLayerInfo>> {
+        let mut handles = Vec::with_capacity(layers.len());
+        for layer in layers {
+            handles.push(self.get_layer_files(user, img, layer));
+        }
+
+        let arr = futures::future::join_all(handles).await;
+        let mut info_list = vec![];
+        for result in arr {
+            if result.is_err() {
+                return Err(result.unwrap_err());
+            }
+            info_list.push(result.unwrap())
+        }
+        Ok(info_list)
+    }
     pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalyzeResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
         let config = self.get_image_config(user, img, tag).await?;
@@ -338,10 +375,13 @@ impl DockerClient {
 
         let mut image_size = 0;
         let mut image_total_size = 0;
+        let info_list = self
+            .get_all_layer_info(user, img, manifest.layers.clone())
+            .await?;
         for (layer_index, history) in config.history.iter().enumerate() {
             let empty = history.empty_layer.unwrap_or_default();
             let mut digest = "".to_string();
-            let mut info = ImageLayerInfo {
+            let mut info = &ImageLayerInfo {
                 ..Default::default()
             };
             let mut size = 0;
@@ -350,14 +390,9 @@ impl DockerClient {
             if !empty {
                 // manifest中的layer只对应非空的操作
                 if let Some(value) = manifest.layers.get(index) {
+                    info = info_list.get(index).unwrap();
                     size = value.size;
                     digest = value.digest.clone();
-                    // 判断是否压缩
-                    let buf = self.get_blob(user, img, &digest).await?;
-
-                    info = get_files_from_layer(&buf, &value.media_type)
-                        .await
-                        .context(LayerSnafu {})?;
                     if layer_index != 0 {
                         add_to_file_summary(
                             &mut file_summary_list,
