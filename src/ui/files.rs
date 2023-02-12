@@ -34,11 +34,13 @@ pub struct FilesWidget<'a> {
 }
 
 fn add_to_file_tree_view(
+    mode: u8,
     width_list: Vec<usize>,
     list: &mut Vec<ListItem>,
     items: &Vec<FileTreeItem>,
     is_last_list: Vec<bool>,
-) {
+) -> usize {
+    let mut count = 0;
     let space_span = Span::from("   ");
     let permission_width = width_list[0];
     let id_width = width_list[1];
@@ -69,6 +71,21 @@ fn add_to_file_tree_view(
 
     let max = items.len();
     for (index, item) in items.iter().enumerate() {
+        match mode {
+            // 只展示更新与删除
+            1 => {
+                if item.op != Op::Remove && item.op != Op::Modified {
+                    continue;
+                }
+            }
+            // 只显示大于1MB
+            2 => {
+                if item.size < 1024 * 1024 {
+                    continue;
+                }
+            }
+            _ => {}
+        }
         let mut style = Style::default();
         match item.op {
             Op::Modified => style = style.fg(Color::Yellow),
@@ -93,13 +110,22 @@ fn add_to_file_tree_view(
             Span::from(padding),
             Span::styled(name, style),
         ])));
+        count += 1;
         if !item.children.is_empty() {
             let mut tmp = is_last_list.clone();
             tmp.push(is_last);
 
-            add_to_file_tree_view(width_list.clone(), list, &item.children, tmp);
+            // 如果子元素没有符合插入到列表的
+            // 则当前元素也删除
+            let child_append_count =
+                add_to_file_tree_view(mode, width_list.clone(), list, &item.children, tmp);
+            if child_append_count == 0 {
+                list.pop();
+                count -= 1;
+            }
         }
     }
+    count
 }
 
 pub fn new_files_widget(
@@ -140,7 +166,7 @@ pub fn new_files_widget(
     let width_list: Vec<usize> = name_list.iter().map(|item| item.len()).collect();
     let file_tree_items = &file_tree_list[opt.selected_layer];
 
-    add_to_file_tree_view(width_list, &mut list, file_tree_items, vec![]);
+    add_to_file_tree_view(opt.mode, width_list, &mut list, file_tree_items, vec![]);
 
     let file_count = list.len();
     let files = List::new(list).highlight_style(Style::default().bg(Color::White).fg(Color::Black));

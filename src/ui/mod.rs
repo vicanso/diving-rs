@@ -111,9 +111,7 @@ impl WidgetState {
         }
     }
     fn change_file_tree_mode(&mut self, mode: u8) {
-        if self.is_files_widget_active() {
-            self.file_tree_mode = mode;
-        }
+        self.file_tree_mode = mode;
     }
 }
 
@@ -160,8 +158,10 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
                 KeyCode::Down => state.select_next(),
                 KeyCode::Up => state.select_prev(),
                 // 文件树模式选择
-                KeyCode::Char('1') => state.change_file_tree_mode(1),
                 KeyCode::Char('0') => state.change_file_tree_mode(0),
+                KeyCode::Char('1') => state.change_file_tree_mode(1),
+                KeyCode::Char('2') => state.change_file_tree_mode(2),
+                KeyCode::Esc => state.change_file_tree_mode(0),
 
                 _ => continue,
             }
