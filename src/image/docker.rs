@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use futures;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use reqwest::Client;
@@ -35,12 +34,16 @@ pub enum Error {
     SerdeJson { source: serde_json::Error },
     #[snafu(display("Layer handle fail: {}", source))]
     Layer { source: super::layer::Error },
+    #[snafu(display("Task fail: {}", source))]
+    Task { source: tokio::task::JoinError },
     #[snafu(display("Request {} code: {} fail: {}", url, code, message))]
     Docker {
         message: String,
         code: String,
         url: String,
     },
+    #[snafu(display("{message}"))]
+    Whatever { message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -344,24 +347,39 @@ impl DockerClient {
     }
     async fn get_all_layer_info(
         &self,
-        user: &str,
-        img: &str,
+        user: String,
+        img: String,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
-        let mut handles = Vec::with_capacity(layers.len());
-        for layer in layers {
-            handles.push(self.get_layer_files(user, img, layer));
-        }
+        let s = self.clone();
+        let result = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("getAllLayerInfo")
+                .worker_threads(layers.len())
+                .build()
+                .expect("Creating tokio runtime");
+            runtime.block_on(async move {
+                let mut handles = Vec::with_capacity(layers.len());
+                for layer in layers {
+                    handles.push(s.get_layer_files(&user, &img, layer));
+                }
 
-        let arr = futures::future::join_all(handles).await;
-        let mut info_list = vec![];
-        for result in arr {
-            if result.is_err() {
-                return Err(result.unwrap_err());
-            }
-            info_list.push(result.unwrap())
-        }
-        Ok(info_list)
+                let arr = futures::future::join_all(handles).await;
+                let mut info_list = vec![];
+                for result in arr {
+                    let info = result?;
+                    info_list.push(info);
+                }
+                Ok::<Vec<ImageLayerInfo>, Error>(info_list)
+            })
+        })
+        .join()
+        .map_err(|_| Error::Whatever {
+            message: "thread join error".to_string(),
+        })?;
+        let infos = result?;
+        Ok(infos)
     }
     pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalyzeResult> {
         let manifest = self.get_manifest(user, img, tag).await?;
@@ -376,7 +394,7 @@ impl DockerClient {
         let mut image_size = 0;
         let mut image_total_size = 0;
         let info_list = self
-            .get_all_layer_info(user, img, manifest.layers.clone())
+            .get_all_layer_info(user.to_string(), img.to_string(), manifest.layers.clone())
             .await?;
         for (layer_index, history) in config.history.iter().enumerate() {
             let empty = history.empty_layer.unwrap_or_default();
@@ -419,6 +437,8 @@ impl DockerClient {
             });
             file_tree_list.push(file_tree);
         }
+
+        info!(user = user, img = img, tag = tag, "analyze image done",);
 
         Ok(DockerAnalyzeResult {
             name: format!("{user}/{img}:{tag}"),

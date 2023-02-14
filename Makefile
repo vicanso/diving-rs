@@ -5,4 +5,7 @@ fmt:
 	cargo fmt
 
 dev:
-	cargo run
+	cargo run -- mongo
+
+release:
+	cargo build --release

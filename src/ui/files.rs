@@ -144,7 +144,7 @@ pub fn new_files_widget(
         .split(opt.area);
 
     let space_span = Span::from("   ");
-    let name_list = vec!["Permission", "UID:GID", "    Size", "FileTree"];
+    let name_list = vec!["Permission", " UID:GID ", "    Size", "FileTree"];
     let content = Paragraph::new(vec![
         Spans::from(vec![Span::styled(
             "0:All 1:Modified/Removed 2:File >= 1MB",
