@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
+use http::StatusCode;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
+use regex::Regex;
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -49,22 +51,92 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 static REGISTRY: &str = "https://index.docker.io/v2";
-static AUTH: &str = "https://auth.docker.io";
-static SERVICE: &str = "registry.docker.io";
+
+#[derive(Debug, Clone, Default)]
+pub struct ImageInfo {
+    // 镜像对应的registry
+    pub registry: String,
+    // 镜像用户
+    pub user: String,
+    // 镜像名称
+    pub name: String,
+    // 镜像版本
+    pub tag: String,
+}
+
+pub fn parse_image_info(image: &str) -> ImageInfo {
+    let mut value = image.to_string();
+    if !value.contains(':') {
+        value += ":latest";
+    }
+    let mut values: Vec<&str> = value.split(&['/', ':']).collect();
+    let tag = values.pop().unwrap_or_default().to_string();
+    let mut registry = REGISTRY.to_string();
+    let mut user = "library".to_string();
+    let mut name = "".to_string();
+    match values.len() {
+        1 => {
+            name = values[0].to_string();
+        }
+        2 => {
+            user = values[0].to_string();
+            name = values[1].to_string();
+        }
+        3 => {
+            // 默认仅支持https v2
+            registry = format!("https://{}/v2", values[0]);
+            user = values[1].to_string();
+            name = values[2].to_string();
+        }
+        _ => {}
+    }
+
+    ImageInfo {
+        registry,
+        user,
+        name,
+        tag,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthInfo {
+    pub auth: String,
+    pub service: String,
+    pub scope: String,
+}
+
+fn parse_auth_info(auth: &str) -> Result<AuthInfo> {
+    let re =
+        Regex::new("(?P<key>\\S+?)=\"(?P<value>\\S+?)\",?").map_err(|err| Error::Whatever {
+            message: err.to_string(),
+        })?;
+    let mut auth_info = AuthInfo {
+        ..Default::default()
+    };
+    for caps in re.captures_iter(auth) {
+        let value = caps["value"].to_string();
+        match &caps["key"] {
+            "realm" => auth_info.auth = value,
+            "service" => auth_info.service = value,
+            "scope" => auth_info.scope = value,
+            _ => {}
+        }
+    }
+
+    Ok(auth_info)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct DockerClient {
     registry: String,
-    auth: String,
-    service: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockerTokenInfo {
     token: String,
-    access_token: String,
     expires_in: i32,
-    issued_at: String,
+    issued_at: Option<String>,
 }
 
 pub struct DockerAnalyzeResult {
@@ -85,7 +157,8 @@ pub struct DockerAnalyzeResult {
 impl DockerTokenInfo {
     // 判断docker token是否已过期
     fn expired(&self) -> bool {
-        if let Ok(value) = DateTime::<Utc>::from_str(self.issued_at.as_str()) {
+        let issued_at = self.issued_at.clone().unwrap_or_default();
+        if let Ok(value) = DateTime::<Utc>::from_str(&issued_at) {
             // 因为后续需要使用token获取数据
             // 因此提交10秒认为过期，避免请求时失效
             let offset = (self.expires_in - 10) as i64;
@@ -177,11 +250,9 @@ fn add_to_file_summary(
 }
 
 impl DockerClient {
-    pub fn new() -> Self {
+    pub fn new(register: &str) -> Self {
         DockerClient {
-            registry: REGISTRY.to_string(),
-            auth: AUTH.to_string(),
-            service: SERVICE.to_string(),
+            registry: register.to_string(),
         }
     }
     async fn get_bytes(
@@ -201,7 +272,7 @@ impl DockerClient {
             .send()
             .await
             .context(RequestSnafu { url: url.clone() })?;
-        if resp.status().as_u16() >= 400 {
+        if resp.status() >= StatusCode::UNAUTHORIZED {
             let err = resp
                 .json::<DockerRequestErrorResp>()
                 .await
@@ -225,51 +296,24 @@ impl DockerClient {
         let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
-    pub fn new_custom(register: &str, auth: &str, service: &str) -> Self {
-        DockerClient {
-            registry: register.to_string(),
-            auth: auth.to_string(),
-            service: service.to_string(),
-        }
-    }
-    // 获取docker的token
-    async fn get_token(&self, scope: &String) -> Result<DockerTokenInfo> {
-        let url = format!("{}/token?service={}&scope={scope}", self.auth, self.service);
-        let key = &url.clone();
-        if let Some(info) = get_docker_token_from_cache(&url).await {
-            if !info.expired() {
-                return Ok(info);
-            }
-        }
-        info!(url = url, "Getting token");
-        let resp = self
-            .get::<DockerTokenInfo>(url.clone(), HashMap::new())
-            .await?;
-        // 将token缓存，方便后续使用
-        set_docker_token_to_cache(key, resp.clone()).await;
-        info!(url = url, "Got token");
-        Ok(resp)
-    }
-    // 获取pull时使用的token
-    async fn get_pull_token(&self, user: &str, img: &str) -> Result<DockerTokenInfo> {
-        let scope = format!("repository:{user}/{img}:pull");
-        let token = self.get_token(&scope).await?;
-        Ok(token)
-    }
     // 获取manifest
-    pub async fn get_manifest(&self, user: &str, img: &str, tag: &str) -> Result<ImageManifest> {
+    pub async fn get_manifest(
+        &self,
+        user: &str,
+        img: &str,
+        tag: &str,
+        token: &str,
+    ) -> Result<ImageManifest> {
         // TODO 如果tag非latest，是否可以缓存
         // 需要注意以命令行或以web server执行的程序生命周期的差别
-        let token = self.get_pull_token(user, img).await?;
 
         // 根据tag获取manifest
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         info!(url = url, "Getting manifest");
         let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", token.token),
-        );
+        if !token.is_empty() {
+            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        }
         // 支持的类型
         let accepts = vec![MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST];
 
@@ -285,10 +329,9 @@ impl DockerClient {
                 // TODO 后续是否可根据系统或客户自动选择
                 .guess_manifest();
             let mut headers = HashMap::new();
-            headers.insert(
-                "Authorization".to_string(),
-                format!("Bearer {}", token.token),
-            );
+            if !token.is_empty() {
+                headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+            }
             headers.insert("Accept".to_string(), manifest.media_type);
             // 根据digest再次获取
             let url = format!(
@@ -302,16 +345,29 @@ impl DockerClient {
         Ok(resp)
     }
     // 获取镜像的信息
-    pub async fn get_image_config(&self, user: &str, img: &str, tag: &str) -> Result<ImageConfig> {
-        let manifest = self.get_manifest(user, img, tag).await?;
+    pub async fn get_image_config(
+        &self,
+        user: &str,
+        img: &str,
+        tag: &str,
+        token: &str,
+    ) -> Result<ImageConfig> {
+        let manifest = self.get_manifest(user, img, tag, token).await?;
         // 暂时只获取amd64, linux
-        let data = self.get_blob(user, img, &manifest.config.digest).await?;
+        let data = self
+            .get_blob(user, img, &manifest.config.digest, token)
+            .await?;
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
     // 获取镜像分层的blob
-    pub async fn get_blob(&self, user: &str, img: &str, digest: &str) -> Result<Vec<u8>> {
-        let token = self.get_pull_token(user, img).await?;
+    pub async fn get_blob(
+        &self,
+        user: &str,
+        img: &str,
+        digest: &str,
+        token: &str,
+    ) -> Result<Vec<u8>> {
         // 是否需要加锁避免同时读写
         // 忽略出错，如果出错直接从网络加载
         if let Ok(data) = get_blob_from_file(digest).await {
@@ -320,10 +376,9 @@ impl DockerClient {
         let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
         info!(url = url, "Getting blob");
         let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", token.token),
-        );
+        if !token.is_empty() {
+            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        }
         let resp = self.get_bytes(url.clone(), headers).await?;
 
         // 出错忽略
@@ -336,9 +391,10 @@ impl DockerClient {
         &self,
         user: &str,
         img: &str,
+        token: &str,
         layer: ImageManifestLayer,
     ) -> Result<ImageLayerInfo> {
-        let buf = self.get_blob(user, img, &layer.digest).await?;
+        let buf = self.get_blob(user, img, &layer.digest, token).await?;
 
         let info = get_files_from_layer(&buf, &layer.media_type)
             .await
@@ -349,6 +405,7 @@ impl DockerClient {
         &self,
         user: String,
         img: String,
+        token: String,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
         let s = self.clone();
@@ -362,7 +419,7 @@ impl DockerClient {
             runtime.block_on(async move {
                 let mut handles = Vec::with_capacity(layers.len());
                 for layer in layers {
-                    handles.push(s.get_layer_files(&user, &img, layer));
+                    handles.push(s.get_layer_files(&user, &img, &token, layer));
                 }
 
                 let arr = futures::future::join_all(handles).await;
@@ -381,9 +438,49 @@ impl DockerClient {
         let infos = result?;
         Ok(infos)
     }
+    async fn get_auth_token(&self, user: &str, img: &str, tag: &str) -> Result<String> {
+        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        let mut builder = Client::builder()
+            .build()
+            .context(BuildSnafu { url: url.clone() })?
+            .head(url.clone());
+        builder = builder.timeout(Duration::from_secs(5 * 60));
+        let resp = builder
+            .send()
+            .await
+            .context(RequestSnafu { url: url.clone() })?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            if let Some(value) = resp.headers().get("www-authenticate") {
+                let auth_info = parse_auth_info(value.to_str().unwrap_or_default())?;
+                let url = format!(
+                    "{}?service={}&scope={}",
+                    auth_info.auth, auth_info.service, auth_info.scope
+                );
+                let key = &url.clone();
+                if let Some(info) = get_docker_token_from_cache(&url).await {
+                    if !info.expired() {
+                        return Ok(info.token);
+                    }
+                }
+                info!(url = url, "Getting token");
+                let mut resp = self
+                    .get::<DockerTokenInfo>(url.clone(), HashMap::new())
+                    .await?;
+                if resp.issued_at.is_none() {
+                    resp.issued_at = Some(Utc::now().to_rfc3339());
+                }
+                // 将token缓存，方便后续使用
+                set_docker_token_to_cache(key, resp.clone()).await;
+                info!(url = url, "Got token");
+                return Ok(resp.token);
+            }
+        }
+        Ok("".to_string())
+    }
     pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalyzeResult> {
-        let manifest = self.get_manifest(user, img, tag).await?;
-        let config = self.get_image_config(user, img, tag).await?;
+        let token = self.get_auth_token(user, img, tag).await?;
+        let manifest = self.get_manifest(user, img, tag, &token).await?;
+        let config = self.get_image_config(user, img, tag, &token).await?;
         let mut layers = vec![];
         // let mut layer_infos = vec![];
         let mut file_tree_list: Vec<Vec<FileTreeItem>> = vec![];
@@ -394,7 +491,12 @@ impl DockerClient {
         let mut image_size = 0;
         let mut image_total_size = 0;
         let info_list = self
-            .get_all_layer_info(user.to_string(), img.to_string(), manifest.layers.clone())
+            .get_all_layer_info(
+                user.to_string(),
+                img.to_string(),
+                token.clone(),
+                manifest.layers.clone(),
+            )
             .await?;
         for (layer_index, history) in config.history.iter().enumerate() {
             let empty = history.empty_layer.unwrap_or_default();

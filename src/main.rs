@@ -8,7 +8,10 @@ mod image;
 mod store;
 mod ui;
 
-use crate::{image::DockerClient, store::clear_blob_files};
+use crate::{
+    image::{parse_image_info, DockerClient},
+    store::clear_blob_files,
+};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -48,29 +51,14 @@ async fn main() {
         if args.image.is_none() {
             panic!("image cat not be nil")
         }
+
         if let Some(value) = args.image {
-            let mut image = value.clone();
-            if !image.contains(':') {
-                image += ":latest";
-            }
-            let mut values: Vec<&str> = image.split(&['/', ':']).collect();
-            let docker_service = "docker";
-            if values.len() == 2 {
-                values.reverse();
-                values.push("library");
-                values.push(docker_service);
-                values.reverse();
-            } else if values.len() == 3 {
-                values.reverse();
-                values.push(docker_service);
-                values.reverse();
-            }
-            let c = if values[0] == docker_service {
-                DockerClient::new()
-            } else {
-                DockerClient::new_custom(values[0], values[0], values[0])
-            };
-            let result = c.analyze(values[1], values[2], values[3]).await.unwrap();
+            let image_info = parse_image_info(&value);
+            let c = DockerClient::new(&image_info.registry);
+            let result = c
+                .analyze(&image_info.user, &image_info.name, &image_info.tag)
+                .await
+                .unwrap();
             ui::run_app(result).unwrap();
         }
     }
