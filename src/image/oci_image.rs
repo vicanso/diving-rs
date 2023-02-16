@@ -4,6 +4,8 @@ pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+js
 
 pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
+pub static MEDIA_TYPE_MANIFEST_LIST: &str =
+    "application/vnd.docker.distribution.manifest.list.v2+json";
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,7 +182,7 @@ pub struct ImageRootfs {
 pub enum Op {
     #[default]
     None,
-    Remove,
+    Removed,
     Modified,
     Added,
 }
@@ -273,7 +275,7 @@ pub fn convert_files_to_file_tree(
         }
         let mut op = Op::None;
         if file.is_whiteout.is_some() {
-            op = Op::Remove;
+            op = Op::Removed;
         } else if file_summary_list
             .iter()
             .any(|item| item.info.path == file.path)

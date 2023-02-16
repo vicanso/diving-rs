@@ -15,9 +15,10 @@ use super::{
     layer::ImageLayerInfo,
     oci_image::{ImageFileSummary, ImageManifestLayer},
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, Op,
-    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX,
+    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
 use crate::{
+    error::HTTPError,
     image::{convert_files_to_file_tree, find_file_tree_item, ImageFileInfo},
     store::{get_blob_from_file, save_blob_to_file},
 };
@@ -46,6 +47,13 @@ pub enum Error {
     },
     #[snafu(display("{message}"))]
     Whatever { message: String },
+}
+
+impl From<Error> for HTTPError {
+    fn from(err: Error) -> Self {
+        // 对于部分error单独转换
+        HTTPError::new_with_category(&err.to_string(), "docker")
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -139,6 +147,7 @@ pub struct DockerTokenInfo {
     issued_at: Option<String>,
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockerAnalyzeResult {
     // 镜像名称
     pub name: String,
@@ -236,7 +245,7 @@ fn add_to_file_summary(
                 let mut op = Op::Modified;
                 let mut info = file.clone();
                 if file.is_whiteout.is_some() {
-                    op = Op::Remove;
+                    op = Op::Removed;
                     info.size = found.size;
                 }
                 file_summary_list.push(ImageFileSummary {
@@ -315,7 +324,11 @@ impl DockerClient {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
         // 支持的类型
-        let accepts = vec![MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST];
+        let accepts = vec![
+            MEDIA_TYPE_IMAGE_INDEX,
+            MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
+            MEDIA_TYPE_MANIFEST_LIST,
+        ];
 
         headers.insert("Accept".to_string(), accepts.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
@@ -551,4 +564,10 @@ impl DockerClient {
             file_summary_list,
         })
     }
+}
+
+pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyzeResult> {
+    let c = DockerClient::new(&image_info.registry);
+    c.analyze(&image_info.user, &image_info.name, &image_info.tag)
+        .await
 }

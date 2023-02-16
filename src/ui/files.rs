@@ -33,6 +33,18 @@ pub struct FilesWidget<'a> {
     pub content_area: Rect,
 }
 
+fn is_modified_or_removed(item: &FileTreeItem) -> bool {
+    if item.op == Op::Removed || item.op == Op::Modified {
+        return true;
+    }
+    // 如果子元素有此类型，也要展示
+    for child in item.children.iter() {
+        if is_modified_or_removed(child) {
+            return true;
+        }
+    }
+    false
+}
 fn add_to_file_tree_view(
     mode: u8,
     width_list: Vec<usize>,
@@ -70,11 +82,12 @@ fn add_to_file_tree_view(
     };
 
     let max = items.len();
+
     for (index, item) in items.iter().enumerate() {
         match mode {
             // 只展示更新与删除
             1 => {
-                if item.op != Op::Remove && item.op != Op::Modified {
+                if !is_modified_or_removed(item) {
                     continue;
                 }
             }
@@ -89,7 +102,7 @@ fn add_to_file_tree_view(
         let mut style = Style::default();
         match item.op {
             Op::Modified => style = style.fg(Color::Yellow),
-            Op::Remove => style = style.fg(Color::Red),
+            Op::Removed => style = style.fg(Color::Red),
             _ => {}
         }
         let id = format!("{}:{}", item.uid, item.gid);
@@ -145,9 +158,13 @@ pub fn new_files_widget(
 
     let space_span = Span::from("   ");
     let name_list = vec!["Permission", " UID:GID ", "    Size", "FileTree"];
+    let mode_tips = format!(
+        "Esc|0: All 1: Modified/Removed 2: File >= 1MB  |  Current: {}",
+        opt.mode
+    );
     let content = Paragraph::new(vec![
         Spans::from(vec![Span::styled(
-            "0:All 1:Modified/Removed 2:File >= 1MB",
+            mode_tips,
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Spans::from(vec![

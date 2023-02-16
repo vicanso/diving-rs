@@ -1,15 +1,27 @@
+use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
+use axum_client_ip::SecureClientIpSource;
 use clap::Parser;
+use std::net::SocketAddr;
+use std::time::Duration;
 use std::{env, str::FromStr};
+use tokio::signal;
+use tower::ServiceBuilder;
+use tracing::info;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 mod config;
+mod controller;
+mod error;
 mod image;
+mod middleware;
 mod store;
 mod ui;
 
 use crate::{
-    image::{parse_image_info, DockerClient},
+    controller::new_router,
+    image::{analyze_docker_image, parse_image_info},
+    middleware::access_log,
     store::clear_blob_files,
 };
 
@@ -51,15 +63,56 @@ async fn main() {
         if args.image.is_none() {
             panic!("image cat not be nil")
         }
-
         if let Some(value) = args.image {
             let image_info = parse_image_info(&value);
-            let c = DockerClient::new(&image_info.registry);
-            let result = c
-                .analyze(&image_info.user, &image_info.name, &image_info.tag)
-                .await
-                .unwrap();
+            let result = analyze_docker_image(image_info).await.unwrap();
             ui::run_app(result).unwrap();
         }
+    } else {
+        // build our application with a route
+        let app = Router::new()
+            .merge(new_router())
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(error::handle_error))
+                    .timeout(Duration::from_secs(10 * 60)),
+            )
+            // TODO 添加compression
+            // 后面的layer先执行
+            .layer(from_fn(access_log))
+            .layer(SecureClientIpSource::ConnectInfo.into_extension());
+        let addr = "127.0.0.1:7000".parse().unwrap();
+        info!("listening on http://{addr}");
+        axum::Server::bind(&addr)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .unwrap();
     }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("signal received, starting graceful shutdown");
 }
