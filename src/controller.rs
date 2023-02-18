@@ -8,7 +8,7 @@ type JSONResult<T> = HTTPResult<Json<T>>;
 pub fn new_router() -> Router {
     Router::new()
         .route("/ping", get(ping))
-        .route("/analyze", get(analyze))
+        .route("/api/analyze", get(analyze))
 }
 
 async fn ping() -> &'static str {

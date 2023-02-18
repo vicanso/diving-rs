@@ -5,9 +5,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
 use tokio::signal;
+use tokio_cron_scheduler::{Job, JobScheduler};
 use tower::ServiceBuilder;
-use tracing::info;
 use tracing::Level;
+use tracing::{error, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod config;
@@ -52,6 +53,31 @@ fn init_logger() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
 
+async fn start_scheduler() {
+    let scheduler = JobScheduler::new().await.unwrap();
+    scheduler
+        .add(
+            // TODO 后续调整为可配置
+            Job::new_async("@hourly", |_, _| {
+                Box::pin(async {
+                    let result = clear_blob_files().await;
+                    if let Err(err) = result {
+                        error!(
+                            err = err.to_string(),
+                            "clear blob files fail"
+                        )
+                    } else {
+                        info!("clear blob files success")
+                    }
+                })
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    scheduler.start().await.unwrap();
+}
+
 #[tokio::main]
 async fn main() {
     init_logger();
@@ -69,6 +95,7 @@ async fn main() {
             ui::run_app(result).unwrap();
         }
     } else {
+        start_scheduler().await;
         // build our application with a route
         let app = Router::new()
             .merge(new_router())
