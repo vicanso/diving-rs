@@ -1,8 +1,8 @@
 name: "publish"
-# on:
-#   push:
-#     branches:
-#       - release
+on:
+  push:
+    branches:
+      - main 
 
 jobs:
   publish-diving:
