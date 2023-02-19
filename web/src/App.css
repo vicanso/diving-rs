@@ -1,0 +1,31 @@
+.contentWrapper {
+    width: 1200px;
+    margin: auto;
+}
+
+.logo {
+    float: left;
+    width: 120px;
+    height: 31px;
+    margin: 16px 24px 16px 0;
+    line-height: 31px;
+    font-weight: 900;
+    font-size: 18px;
+}
+
+.logo img {
+    display: block;
+    float: left;
+    height: 100%;
+    margin-right: 10px;
+}
+
+.search {
+    float: left;
+    margin-top: 10px;
+    width: 500px;
+}
+
+.mtop30 {
+    margin-top: 30px;
+}

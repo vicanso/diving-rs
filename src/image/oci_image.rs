@@ -25,6 +25,7 @@ pub struct ImageFileInfo {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageLayer {
     // 创建时间
     pub created: String,

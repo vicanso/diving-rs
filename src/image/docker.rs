@@ -148,6 +148,7 @@ pub struct DockerTokenInfo {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockerAnalyzeResult {
     // 镜像名称
     pub name: String,
