@@ -5,7 +5,7 @@
 
 .logo {
     float: left;
-    width: 120px;
+    width: 150px;
     height: 31px;
     margin: 16px 24px 16px 0;
     line-height: 31px;
@@ -23,7 +23,7 @@
 .search {
     float: left;
     margin-top: 10px;
-    width: 500px;
+    width: 800px;
 }
 
 .mtop30 {
