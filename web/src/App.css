@@ -1,31 +1,61 @@
 .contentWrapper {
-    width: 1200px;
-    margin: auto;
+  width: 1200px;
+  margin: auto;
 }
 
 .logo {
-    float: left;
-    width: 150px;
-    height: 31px;
-    margin: 16px 24px 16px 0;
-    line-height: 31px;
-    font-weight: 900;
-    font-size: 18px;
+  float: left;
+  width: 150px;
+  height: 31px;
+  margin: 16px 24px 16px 0;
+  line-height: 31px;
+  font-weight: 900;
+  font-size: 18px;
 }
 
 .logo img {
-    display: block;
-    float: left;
-    height: 100%;
-    margin-right: 10px;
+  display: block;
+  float: left;
+  height: 100%;
+  margin-right: 10px;
 }
 
 .search {
-    float: left;
-    margin-top: 10px;
-    width: 800px;
+  float: left;
+  margin-top: 10px;
+  width: 800px;
 }
 
 .mtop30 {
-    margin-top: 30px;
+  margin-top: 30px;
+}
+
+.fileTree {
+  margin: 0;
+  padding: 0;
+}
+.fileTree li:nth-child(odd) {
+  background-color: rgb(241, 245, 249);
+}
+.fileTree.dark li:nth-child(odd) {
+  background-color: rgba(0, 0, 0, 0.6);
+}
+.fileTree li {
+  list-style: none;
+  padding: 8px 10px;
+}
+.fileTree li span {
+  display: inline-block;
+}
+.fileTree li span:nth-child(1) {
+  width: 100px;
+}
+.fileTree li span:nth-child(2) {
+  width: 50px;
+  text-align: right;
+}
+.fileTree li span:nth-child(3) {
+  width: 80px;
+  text-align: right;
+  margin-right: 20px;
 }
