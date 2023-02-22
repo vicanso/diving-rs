@@ -46,13 +46,13 @@ interface FileTreeList {
   mode: string;
   uid: number;
   gid: number;
-  op: string;
+  op: number;
   children: FileTreeList[];
 }
 
 interface FileSummaryList {
   layerIndex: number;
-  op: string;
+  op: number;
   info: Info;
 }
 
@@ -75,10 +75,7 @@ const { defaultAlgorithm, darkAlgorithm } = theme;
 const { Header, Content } = Layout;
 const { Search } = Input;
 
-const iconStyle = {
-  verticalAlign: "middle",
-  margin: "-2px 5px 0 0",
-};
+const iconStyle = {};
 const plusOutlined = (
   <svg
     viewBox="64 64 896 896"
@@ -152,17 +149,62 @@ const addKeyToFileTreeItem = (items: FileTreeList[]) => {
   });
 };
 
+interface FileTreeViewOption {
+  expandAll: boolean;
+  expandItems: string[];
+  sizeLimit: number;
+  onlyModifiedRemoved: boolean;
+  keyword: string;
+}
+
+const opRemoved = 1;
+const opModified = 2;
+
+const isModifiedRemoved = (item: FileTreeList) => {
+  const arr = [opRemoved, opModified];
+  if (arr.includes(item.op)) {
+    return true;
+  }
+  // 如果子元素符合，则也符合
+  for (let i = 0; i < item.children.length; i++) {
+    const { op } = item.children[i];
+    if (arr.includes(op)) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const addToFileTreeView = (
+  onToggleExpand: (key: string) => void,
   list: JSX.Element[],
   items: FileTreeList[],
-  isLastList: boolean[]
+  isLastList: boolean[],
+  opt: FileTreeViewOption
 ) => {
   if (!items) {
     return 0;
   }
   const max = items.length;
   let count = 0;
+  const shouldExpand = (key: string) => {
+    if (opt.expandAll) {
+      return true;
+    }
+    if (opt.expandItems?.includes(key)) {
+      return true;
+    }
+    return false;
+  };
   items.forEach((item, index) => {
+    // 如果限制了大小
+    if (opt.sizeLimit && item.size < opt.sizeLimit) {
+      return;
+    }
+    // 如果仅展示更新、删除选项
+    if (opt.onlyModifiedRemoved && !isModifiedRemoved(item)) {
+      return;
+    }
     const id = `${item.uid}:${item.gid}`;
     const isLast = index === max - 1;
     let name = item.name;
@@ -170,9 +212,33 @@ const addToFileTreeView = (
       name = `${name} → ${item.link}`;
     }
     const padding = isLastList.length * 30;
+
+    let className = "";
+    if (item.op === opRemoved) {
+      className = "removed";
+    } else if (item.op === opModified) {
+      className = "modified";
+    }
     let icon: JSX.Element = <></>;
     if (item.children.length) {
-      icon = plusOutlined;
+      const { key } = item;
+      if (opt.expandAll || opt.expandItems?.includes(key)) {
+        icon = minusOutlined;
+      } else {
+        icon = plusOutlined;
+      }
+      icon = (
+        <a
+          href="#"
+          className="icon"
+          onClick={(e) => {
+            e.preventDefault();
+            onToggleExpand(key);
+          }}
+        >
+          {icon}
+        </a>
+      );
     }
     list.push(
       <li key={item.key}>
@@ -180,6 +246,7 @@ const addToFileTreeView = (
         <span>{id}</span>
         <span>{prettyBytes(item.size)}</span>
         <span
+          className={className}
           style={{
             paddingLeft: padding,
           }}
@@ -190,10 +257,16 @@ const addToFileTreeView = (
       </li>
     );
     count++;
-    if (item.children.length) {
+    if (item.children.length && shouldExpand(item.key)) {
       const tmp = isLastList.slice(0);
       tmp.push(isLast);
-      const childAppendCount = addToFileTreeView(list, item.children, tmp);
+      const childAppendCount = addToFileTreeView(
+        onToggleExpand,
+        list,
+        item.children,
+        tmp,
+        opt
+      );
       // 如果子文件一个都没有插入
       // 则将当前目录也删除
       if (childAppendCount === 0) {
@@ -207,6 +280,7 @@ const addToFileTreeView = (
 
 const App: FC = () => {
   const isDarkMode = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  // const isDarkMode = false;
 
   const [messageApi, contextHolder] = message.useMessage();
 
@@ -223,6 +297,22 @@ const App: FC = () => {
   const [layers, setLayers] = useState([] as Layer[]);
   const [currentLayer, setCurrentLayer] = useState(0);
   const [fileTreeList, setFileTreeList] = useState([] as FileTreeList[][]);
+  const [fileTreeViewOption, setFileTreeViewOption] = useState(
+    {} as FileTreeViewOption
+  );
+
+  const onToggleExpand = (key: string) => {
+    const opt = Object.assign({}, fileTreeViewOption);
+    const items = opt.expandItems || [];
+    const index = items.indexOf(key);
+    if (index === -1) {
+      items.push(key);
+    } else {
+      items.splice(index, 1);
+    }
+    opt.expandItems = items;
+    setFileTreeViewOption(opt);
+  };
 
   const onSearch = async (image: string) => {
     setLoading(true);
@@ -306,7 +396,13 @@ const App: FC = () => {
   });
 
   const fileTreeViewList = [] as JSX.Element[];
-  addToFileTreeView(fileTreeViewList, fileTreeList[currentLayer], []);
+  addToFileTreeView(
+    onToggleExpand,
+    fileTreeViewList,
+    fileTreeList[currentLayer],
+    [],
+    fileTreeViewOption
+  );
 
   const layerFilter = (
     <Row gutter={20}>
@@ -324,22 +420,54 @@ const App: FC = () => {
       </Col>
       <Col span={4}>
         <Form.Item label="Size">
-          <Select defaultValue={0} options={sizeOptions} />
+          <Select
+            defaultValue={0}
+            options={sizeOptions}
+            onChange={(limit: number) => {
+              const opt = Object.assign({}, fileTreeViewOption);
+              opt.sizeLimit = limit;
+              setFileTreeViewOption(opt);
+            }}
+          />
         </Form.Item>
       </Col>
       <Col span={3}>
         <Form.Item>
-          <Checkbox>Modifications</Checkbox>
+          <Checkbox
+            onChange={(e) => {
+              const opt = Object.assign({}, fileTreeViewOption);
+              opt.onlyModifiedRemoved = e.target.checked;
+              setFileTreeViewOption(opt);
+            }}
+          >
+            Modifications
+          </Checkbox>
         </Form.Item>
       </Col>
       <Col span={3}>
         <Form.Item>
-          <Checkbox>Expand</Checkbox>
+          <Checkbox
+            onChange={(e) => {
+              const opt = Object.assign({}, fileTreeViewOption);
+              opt.expandAll = e.target.checked;
+              setFileTreeViewOption(opt);
+            }}
+          >
+            Expand
+          </Checkbox>
         </Form.Item>
       </Col>
       <Col span={8}>
         <Form.Item>
-          <Input addonBefore="Keywords" allowClear />
+          <Input
+            addonBefore="Keywords"
+            allowClear
+            onChange={(e) => {
+              const opt = Object.assign({}, fileTreeViewOption);
+              opt.keyword = e.target.value.trim();
+              setFileTreeViewOption(opt);
+            }}
+          />
         </Form.Item>
       </Col>
     </Row>

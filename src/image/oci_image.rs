@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use serde_repr::{Serialize_repr, Deserialize_repr};
+
+
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
@@ -179,7 +182,8 @@ pub struct ImageRootfs {
     pub diff_ids: Vec<String>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
 pub enum Op {
     #[default]
     None,
