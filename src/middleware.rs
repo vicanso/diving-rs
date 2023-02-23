@@ -1,6 +1,7 @@
 use axum::{http::Request, middleware::Next, response::Response};
 use axum_client_ip::SecureClientIp;
 
+use crate::util::set_no_cache_if_not_exist;
 use chrono::Utc;
 use tracing::{event, Level};
 
@@ -24,5 +25,13 @@ pub async fn access_log<B>(
         status,
         cost,
     );
+    resp
+}
+
+pub async fn entry<B>(req: Request<B>, next: Next<B>) -> Response {
+    let mut resp = next.run(req).await;
+
+    let headers = resp.headers_mut();
+    set_no_cache_if_not_exist(headers);
     resp
 }

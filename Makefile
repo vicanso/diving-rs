@@ -7,7 +7,7 @@ fmt:
 dev:
 	cargo run -- mongo
 dev-web:
-	cargo run -- --mode=web
+	cargo watch -w src -x 'run -- --mode=web'
 
 release:
 	cargo build --release

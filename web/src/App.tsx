@@ -1,4 +1,4 @@
-import { useState, FC, Component } from "react";
+import { useState, FC } from "react";
 import {
   ConfigProvider,
   theme,
@@ -12,6 +12,7 @@ import {
   Col,
   Row,
   Checkbox,
+  Typography,
 } from "antd";
 import axios from "axios";
 import prettyBytes from "pretty-bytes";
@@ -19,6 +20,11 @@ import { nanoid } from "nanoid";
 
 import logo from "./assets/logo.png";
 import "./App.css";
+
+const { defaultAlgorithm, darkAlgorithm } = theme;
+const { Header, Content } = Layout;
+const { Search } = Input;
+const { Paragraph } = Typography;
 
 interface ImageAnalyzeResult {
   name: string;
@@ -70,10 +76,6 @@ interface FileWastedSummary {
   totalSize: number;
   count: number;
 }
-
-const { defaultAlgorithm, darkAlgorithm } = theme;
-const { Header, Content } = Layout;
-const { Search } = Input;
 
 const iconStyle = {};
 const plusOutlined = (
@@ -138,6 +140,7 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     wastedSize: prettyBytes(wastedSize),
   };
   return {
+    wastedList,
     imageDescriptions,
   };
 };
@@ -175,6 +178,20 @@ const isModifiedRemoved = (item: FileTreeList) => {
   return false;
 };
 
+const isMatchKeyword = (item: FileTreeList, keyword: string) => {
+  if (item.name.includes(keyword)) {
+    return true;
+  }
+  // 如果子元素符合，则也符合
+  for (let i = 0; i < item.children.length; i++) {
+    const { name } = item.children[i];
+    if (name.includes(keyword)) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const addToFileTreeView = (
   onToggleExpand: (key: string) => void,
   list: JSX.Element[],
@@ -203,6 +220,10 @@ const addToFileTreeView = (
     }
     // 如果仅展示更新、删除选项
     if (opt.onlyModifiedRemoved && !isModifiedRemoved(item)) {
+      return;
+    }
+    // 如果指定关键字筛选
+    if (opt.keyword && !isMatchKeyword(item, opt.keyword)) {
       return;
     }
     const id = `${item.uid}:${item.gid}`;
@@ -268,8 +289,9 @@ const addToFileTreeView = (
         opt
       );
       // 如果子文件一个都没有插入
+      // 也未指定keyword
       // 则将当前目录也删除
-      if (childAppendCount === 0) {
+      if (childAppendCount === 0 && opt.keyword === "") {
         list.pop();
         count -= 1;
       }
@@ -300,6 +322,7 @@ const App: FC = () => {
   const [fileTreeViewOption, setFileTreeViewOption] = useState(
     {} as FileTreeViewOption
   );
+  const [wastedList, setWastedList] = useState([] as FileWastedSummary[]);
 
   const onToggleExpand = (key: string) => {
     const opt = Object.assign({}, fileTreeViewOption);
@@ -325,14 +348,15 @@ const App: FC = () => {
 
       const result = getImageSummary(data);
       setImageDescriptions(result.imageDescriptions);
+      setWastedList(result.wastedList);
       setFileTreeList(data.fileTreeList);
       setLayers(data.layers);
       setCurrentLayer(0);
       // 设置已获取结果
       setGotResult(true);
-      console.dir(data);
-    } catch (err) {
-      messageApi.error(err.message || "analyze image fail");
+    } catch (err: any) {
+      let message = err?.message as string;
+      messageApi.error(message || "analyze image fail");
     } finally {
       setLoading(false);
     }
@@ -342,22 +366,25 @@ const App: FC = () => {
     setCurrentLayer(index);
   };
 
-  const imageSummary = (
-    <Descriptions title="Image Summary">
-      <Descriptions.Item label="Efficiency Score">
-        {imageDescriptions["score"]}
-      </Descriptions.Item>
-      <Descriptions.Item label="Image Size">
-        {imageDescriptions["size"]}
-      </Descriptions.Item>
-      <Descriptions.Item label="Other Layer Size">
-        {imageDescriptions["otherSize"]}
-      </Descriptions.Item>
-      <Descriptions.Item label="Wasted Size">
-        {imageDescriptions["wastedSize"]}
-      </Descriptions.Item>
-    </Descriptions>
-  );
+  const getImageSummaryView = () => {
+    const imageSummary = (
+      <Descriptions title="Image Summary">
+        <Descriptions.Item label="Efficiency Score">
+          {imageDescriptions["score"]}
+        </Descriptions.Item>
+        <Descriptions.Item label="Image Size">
+          {imageDescriptions["size"]}
+        </Descriptions.Item>
+        <Descriptions.Item label="Other Layer Size">
+          {imageDescriptions["otherSize"]}
+        </Descriptions.Item>
+        <Descriptions.Item label="Wasted Size">
+          {imageDescriptions["wastedSize"]}
+        </Descriptions.Item>
+      </Descriptions>
+    );
+    return <div className="imageSummary mtop30">{imageSummary}</div>;
+  };
 
   const layerOptions = layers.map((item, index) => {
     let { digest } = item;
@@ -473,10 +500,84 @@ const App: FC = () => {
     </Row>
   );
 
-  let fileTreeListClassName = "fileTree";
-  if (isDarkMode) {
-    fileTreeListClassName += " dark";
-  }
+  const getLayerContentView = () => {
+    let fileTreeListClassName = "fileTree";
+    if (isDarkMode) {
+      fileTreeListClassName += " dark";
+    }
+
+    const layerInfo = layers[currentLayer];
+
+    const cmd = (
+      <>
+        <Paragraph code={true}>
+          Created: {new Date(layerInfo.created).toLocaleString()}
+        </Paragraph>
+        <Paragraph code={true}>Command: {layerInfo.cmd}</Paragraph>
+      </>
+    );
+    return (
+      <div className="mtop30">
+        <Card title="Layer Content">
+          {layerFilter}
+          {cmd}
+          <ul className={fileTreeListClassName}>
+            <li>
+              <span>Permission</span>
+              <span>UID:GID</span>
+              <span>Size</span>
+              <span>FileTree</span>
+            </li>
+            {fileTreeViewList}
+          </ul>
+        </Card>
+      </div>
+    );
+  };
+
+  const getWastedSummaryView = () => {
+    if (wastedList.length === 0) {
+      return <></>;
+    }
+    const list = wastedList.map((item) => {
+      return (
+        <li key={item.path}>
+          <span>{prettyBytes(item.totalSize)}</span>
+          <span>{item.count}</span>
+          <span>/{item.path}</span>
+        </li>
+      );
+    });
+    let className = "wastedList";
+    if (isDarkMode) {
+      className += " dark";
+    }
+    return (
+      <div className="mtop30">
+        <Card title="Wasted Summary">
+          <ul className={className}>
+            <li>
+              <span>Total Size</span>
+              <span>Count</span>
+              <span>Path</span>
+            </li>
+            {list}
+          </ul>
+        </Card>
+      </div>
+    );
+  };
+  const searchView = (
+    <Search
+      autoFocus={true}
+      loading={loading}
+      placeholder="input the name of image"
+      allowClear
+      enterButton="Analyze"
+      size="large"
+      onSearch={onSearch}
+    />
+  );
 
   return (
     <ConfigProvider
@@ -492,37 +593,16 @@ const App: FC = () => {
               <img src={logo} />
               Diving
             </div>
-            <div className="search">
-              <Search
-                loading={loading}
-                placeholder="input the name of image"
-                allowClear
-                enterButton="Analyze"
-                size="large"
-                onSearch={onSearch}
-              />
-            </div>
+            {gotResult && <div className="search">{searchView}</div>}
           </div>
         </Header>
-        {!gotResult && <p>TODO 首次搜索框居中</p>}
+        {!gotResult && <div className="fixSearch">{searchView}</div>}
         {gotResult && (
           <Content>
             <div className="contentWrapper">
-              <div className="imageSummary mtop30">{imageSummary}</div>
-              <div className="mtop30">
-                <Card title="Layer Content">
-                  {layerFilter}
-                  <ul className={fileTreeListClassName}>
-                    <li>
-                      <span>Permission</span>
-                      <span>UID:GID</span>
-                      <span>Size</span>
-                      <span>FileTree</span>
-                    </li>
-                    {fileTreeViewList}
-                  </ul>
-                </Card>
-              </div>
+              {getImageSummaryView()}
+              {getLayerContentView()}
+              {getWastedSummaryView()}
             </div>
           </Content>
         )}

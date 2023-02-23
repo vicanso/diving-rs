@@ -13,16 +13,18 @@ use tracing_subscriber::FmtSubscriber;
 
 mod config;
 mod controller;
+mod dist;
 mod error;
 mod image;
 mod middleware;
 mod store;
 mod ui;
+mod util;
 
 use crate::{
     controller::new_router,
     image::{analyze_docker_image, parse_image_info},
-    middleware::access_log,
+    middleware::{access_log, entry},
     store::clear_blob_files,
 };
 
@@ -62,10 +64,7 @@ async fn start_scheduler() {
                 Box::pin(async {
                     let result = clear_blob_files().await;
                     if let Err(err) = result {
-                        error!(
-                            err = err.to_string(),
-                            "clear blob files fail"
-                        )
+                        error!(err = err.to_string(), "clear blob files fail")
                     } else {
                         info!("clear blob files success")
                     }
@@ -107,6 +106,7 @@ async fn main() {
             // TODO 添加compression
             // 后面的layer先执行
             .layer(from_fn(access_log))
+            .layer(from_fn(entry))
             .layer(SecureClientIpSource::ConnectInfo.into_extension());
         let addr = "127.0.0.1:7000".parse().unwrap();
         info!("listening on http://{addr}");
