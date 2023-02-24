@@ -1,6 +1,11 @@
 .contentWrapper {
   width: 1200px;
   margin: auto;
+  padding-bottom: 30px;
+}
+.header {
+  background-color: #171b21 !important;
+  color: #fff !important;
 }
 
 .logo {
@@ -36,6 +41,20 @@
   left: 50%;
   top: 200px;
   margin-left: -400px;
+}
+.fixSearch .ant-input-affix-wrapper {
+  padding: 15px;
+}
+.fixSearch .ant-btn {
+  height: 55px;
+}
+.fixSearch .desc {
+  text-align: center;
+  margin-top: 40px;
+}
+.fixSearch .ant-typography {
+  font-size: 16px;
+  line-height: 2em;
 }
 
 ul li:nth-child(odd) {

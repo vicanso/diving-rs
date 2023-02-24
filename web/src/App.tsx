@@ -323,6 +323,7 @@ const App: FC = () => {
     {} as FileTreeViewOption
   );
   const [wastedList, setWastedList] = useState([] as FileWastedSummary[]);
+  const [imageName, setImageName] = useState("");
 
   const onToggleExpand = (key: string) => {
     const opt = Object.assign({}, fileTreeViewOption);
@@ -338,6 +339,10 @@ const App: FC = () => {
   };
 
   const onSearch = async (image: string) => {
+    if (!image) {
+      return;
+    }
+    setImageName(image);
     setLoading(true);
     try {
       const { data } = await axios.get<ImageAnalyzeResult>(
@@ -567,17 +572,20 @@ const App: FC = () => {
       </div>
     );
   };
-  const searchView = (
-    <Search
-      autoFocus={true}
-      loading={loading}
-      placeholder="input the name of image"
-      allowClear
-      enterButton="Analyze"
-      size="large"
-      onSearch={onSearch}
-    />
-  );
+  const getSearchView = () => {
+    return (
+      <Search
+        defaultValue={imageName}
+        autoFocus={true}
+        loading={loading}
+        placeholder="input the name of image"
+        allowClear
+        enterButton="Analyze"
+        size="large"
+        onSearch={onSearch}
+      />
+    );
+  };
 
   return (
     <ConfigProvider
@@ -587,16 +595,33 @@ const App: FC = () => {
     >
       {contextHolder}
       <Layout>
-        <Header>
+        <Header className="header">
           <div className="contentWrapper">
             <div className="logo">
               <img src={logo} />
               Diving
             </div>
-            {gotResult && <div className="search">{searchView}</div>}
+            {gotResult && <div className="search">{getSearchView()}</div>}
           </div>
         </Header>
-        {!gotResult && <div className="fixSearch">{searchView}</div>}
+        {!gotResult && (
+          <div className="fixSearch">
+            {getSearchView()}
+            <div className="desc">
+              <Paragraph>
+                Input the name of image to explore each layer in a docker image
+                <br />
+                Docker hub: redis:alpine
+                <br />
+                Quay.io: quay.io/prometheus/node-exporter
+                <br />
+                Gcr.io: gcr.io/google_containers/kube-state-metrics
+                <br />
+                Other: xxx.com/user/image:tag
+              </Paragraph>
+            </div>
+          </div>
+        )}
         {gotResult && (
           <Content>
             <div className="contentWrapper">
