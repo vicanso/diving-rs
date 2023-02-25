@@ -4,6 +4,11 @@ lint:
 fmt:
 	cargo fmt
 
+build-web:
+	cd web \
+	&& yarn install && yarn build \
+	&& cp -rf dist ../
+
 dev:
 	cargo run -- mongo
 dev-web:
