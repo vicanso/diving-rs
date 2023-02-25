@@ -16,3 +16,4 @@ dev-web:
 
 release:
 	cargo build --release
+	ls -lh target/release

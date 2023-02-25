@@ -21,6 +21,4 @@ jobs:
       - name: build-web
         run: make build-web
       - name: release
-        run: 
-        - make release
-        - ls -lh target/release
+        run: make release
