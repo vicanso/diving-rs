@@ -613,9 +613,9 @@ const App: FC = () => {
                 <br />
                 Docker hub: redis:alpine
                 <br />
-                Quay.io: quay.io/prometheus/node-exporter
+                Quay: quay.io/prometheus/node-exporter
                 <br />
-                Gcr.io: gcr.io/google_containers/kube-state-metrics
+                Gcr: gcr.io/google_containers/kube-state-metrics
                 <br />
                 Other: xxx.com/user/image:tag
               </Paragraph>
