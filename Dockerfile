@@ -11,7 +11,7 @@ FROM rust:alpine as builder
 COPY --from=webbuilder /diving-rs /diving-rs
 
 RUN apk update \
-  && apk add git make \
+  && apk add git make gcc \
   && cd /diving-rs \
   && make release 
 
