@@ -13,7 +13,8 @@ bearer=$2
 echo "Starting asset upload from $file_path to $repo."
 
 # Get the release for this tag.
-tag="$(git describe --tags --abbrev=0)"
+# tag="$(git describe --tags --abbrev=0)"
+tag="0.0.1"
 
 # Make sure the git tag could be determined.
 if [ -z "$tag" ]; then
