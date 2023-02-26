@@ -29,13 +29,11 @@ jobs:
       - name: release
         run: |
           cargo build --release --target=aarch64-apple-darwin
-          ls -lh target/release
-          mv target/release/diving ./diving-darwin-aarch64
+          mv target/aarch64-apple-darwin/release/diving ./diving-darwin-aarch64
           ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
 
           cargo build --release --target=x86_64-apple-darwin
-          ls -lh target/release
-          mv target/release/diving ./diving-darwin-x86
+          mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86
           ./.github/workflows/upload_asset.sh ./diving-darwin-x86 $GITHUB_TOKEN
 
   windows:
