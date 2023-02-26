@@ -1,16 +1,16 @@
 name: "publish"
 on:
   push:
-    branches:
-      - main 
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+  CARGO_TERM_COLOR: always
 
 jobs:
-  publish-diving:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest, ubuntu-20.04, windows-latest]
-    runs-on: ${{ matrix.platform }}
+  linux:
+    runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
       - name: setup node
@@ -22,3 +22,7 @@ jobs:
         run: make build-web
       - name: release
         run: make release
+      - name: Upload Assets
+        run: |
+          mv target/release/diving ./diving-linux
+          ./.github/workflows/upload_asset.sh ./diving-linux $GITHUB_TOKEN

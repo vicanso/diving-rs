@@ -1,17 +1,19 @@
 FROM node:18-alpine as webbuilder
 
 COPY . /diving-rs
-RUN cd /diving-rs/web \
-  && yarn install \
-  && yarn build \
-  && rm -rf node_module
+RUN apk update \
+  && apk add git make \
+  && cd /diving-rs \
+  && make build-web
 
 FROM rust:alpine as builder
 
 COPY --from=webbuilder /diving-rs /diving-rs
 
-RUN cd /diving-rs \
-  && cargo build --release
+RUN apk update \
+  && apk add git make \
+  && cd /diving-rs \
+  && make release 
 
 FROM alpine 
 
