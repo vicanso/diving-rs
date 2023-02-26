@@ -109,7 +109,7 @@ async fn main() {
             .layer(from_fn(access_log))
             .layer(from_fn(entry))
             .layer(SecureClientIpSource::ConnectInfo.into_extension());
-        let addr = "127.0.0.1:7000".parse().unwrap();
+        let addr = "127.0.0.1:7001".parse().unwrap();
         info!("listening on http://{addr}");
         axum::Server::bind(&addr)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())

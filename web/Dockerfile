@@ -17,7 +17,7 @@ RUN apk update \
 
 FROM alpine 
 
-EXPOSE 7000
+EXPOSE 7001
 
 # tzdata 安装所有时区配置或可根据需要只添加所需时区
 
@@ -32,7 +32,7 @@ USER rust
 
 WORKDIR /home/rust
 
-HEALTHCHECK --timeout=10s --interval=10s CMD [ "wget", "http://127.0.0.1:7000/ping", "-q", "-O", "-"]
+HEALTHCHECK --timeout=10s --interval=10s CMD [ "wget", "http://127.0.0.1:7001/ping", "-q", "-O", "-"]
 
 CMD ["diving", "--mode", "web"]
 
