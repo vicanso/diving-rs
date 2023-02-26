@@ -10,6 +10,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: release
+        run: make release
+      - name: Upload Assets
+        run: |
+          mv target/release/diving ./diving-darwin
+          ./.github/workflows/upload_asset.sh ./diving-darwin $GITHUB_TOKEN
+
   linux:
     runs-on: ubuntu-latest
 
