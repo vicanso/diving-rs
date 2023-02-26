@@ -28,11 +28,12 @@ use crate::{
     store::clear_blob_files,
 };
 
-/// Simple program to greet a person
+/// A tool for exploring each layer in a docker image.
+/// It can run in terminal or as a web service.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Running mode of diving
+    /// Running mode of diving, terminal or web
     #[arg(short, long, default_value = "terminal")]
     mode: String,
     image: Option<String>,
