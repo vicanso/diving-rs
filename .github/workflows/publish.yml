@@ -78,6 +78,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 1800
     steps:
       - name: Set up Docker Buildx
         id: buildx
@@ -93,7 +94,7 @@ jobs:
         id: docker_build
         uses: docker/build-push-action@v3
         with:
-          platforms: linux/amd64
+          platforms: linux/arm64
           push: true
           tags: vicanso/diving
       - name: Image digest
