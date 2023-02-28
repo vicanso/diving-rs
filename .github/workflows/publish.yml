@@ -84,14 +84,27 @@ jobs:
         run: |
           swapon --show=NAME | tail -n 1
           df -lh
+          du -sh /usr/share/dotnet
+          sudo rm -rf /usr/share/dotnet
+          du -sh /usr/local/lib/android
+          sudo rm -rf /usr/local/lib/android 
           export SWAP_FILE=$(swapon --show=NAME | tail -n 1)
           sudo swapoff $SWAP_FILE
           sudo rm $SWAP_FILE
           export SWAP_FILE=/swapfile
-          sudo fallocate -l 16G $SWAP_FILE
+          sudo fallocate -l 32G $SWAP_FILE
           sudo chmod 600 $SWAP_FILE
           sudo mkswap $SWAP_FILE
           sudo swapon $SWAP_FILE
+      - name: Swap space report after modification
+        shell: bash
+        run: |
+          echo "Memory and swap:"
+          free -h
+          echo
+          swapon --show
+          df -lh
+          echo
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v2
@@ -106,7 +119,7 @@ jobs:
         id: docker_build
         uses: docker/build-push-action@v3
         with:
-          platforms: linux/amd64
+          platforms: linux/arm64, linux/amd64
           push: true
           tags: vicanso/diving
       - name: Image digest
