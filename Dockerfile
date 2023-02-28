@@ -27,6 +27,8 @@ RUN addgroup -g 1000 rust \
 
 COPY --from=builder /diving-rs/target/release/diving /usr/local/bin/diving
 COPY --from=builder /diving-rs/entrypoint.sh /entrypoint.sh
+COPY --from=builder /usr/lib/libssl.so.53 /lib/libssl.so.53
+COPY --from=builder /usr/lib/libcrypto.so.50 /lib/libcrypto.so.50
 
 USER rust
 
