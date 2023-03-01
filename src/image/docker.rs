@@ -148,6 +148,12 @@ pub struct DockerTokenInfo {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageManifestCacheInfo {
+    expired_at: i64,
+    manifest: ImageManifest,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerAnalyzeResult {
     // 镜像名称
@@ -189,7 +195,7 @@ fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>>
 }
 
 // 从缓存中获取docker token
-async fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
+fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         if let Some(info) = cache.get(key) {
             return Some(info.clone());
@@ -199,10 +205,46 @@ async fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
 }
 
 // 将docker token写入缓存
-async fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
+fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
     // 失败忽略
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         cache.put(key.to_string(), info);
+    }
+}
+
+// 获取manifest缓存实例
+fn get_manifest_cache() -> &'static Mutex<LruCache<String, ImageManifestCacheInfo>> {
+    static MANIFEST_CACHE: OnceCell<Mutex<LruCache<String, ImageManifestCacheInfo>>> =
+        OnceCell::new();
+    MANIFEST_CACHE.get_or_init(|| {
+        let c = LruCache::new(NonZeroUsize::new(100).unwrap());
+        Mutex::new(c)
+    })
+}
+
+fn get_manifest_from_cache(key: &String) -> Option<ImageManifest> {
+    if let Ok(mut cache) = get_manifest_cache().lock() {
+        if let Some(info) = cache.get(key) {
+            // 数据未过期
+            if info.expired_at > Utc::now().timestamp() {
+                return Some(info.manifest.clone());
+            }
+        }
+    }
+    Option::None
+}
+
+fn set_manifest_to_cache(key: &String, manifest: ImageManifest, ttl_seconds: i64) {
+    // 失败忽略
+    if let Ok(mut cache) = get_manifest_cache().lock() {
+        // 设置5分钟有效
+        cache.push(
+            key.to_string(),
+            ImageManifestCacheInfo {
+                expired_at: Utc::now().timestamp() + ttl_seconds,
+                manifest,
+            },
+        );
     }
 }
 
@@ -319,6 +361,10 @@ impl DockerClient {
 
         // 根据tag获取manifest
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        // 如果缓存中有，直接读取缓存
+        if let Some(manifest) = get_manifest_from_cache(&url) {
+            return Ok(manifest)
+        }
         info!(url = url, "Getting manifest");
         let mut headers = HashMap::new();
         if !token.is_empty() {
@@ -334,7 +380,7 @@ impl DockerClient {
         headers.insert("Accept".to_string(), accepts.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
         let media_type = get_value_from_json(&data, "mediaType")?;
-        let resp = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
+        let resp:ImageManifest = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
             // docker的版本则可直接返回
             serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         } else {
@@ -355,6 +401,9 @@ impl DockerClient {
             let data = self.get_bytes(url.clone(), headers).await?;
             serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         };
+        // 暂时有效期全部设置为5分钟
+        // 后续考虑是否根据tag使用不同有效期
+        set_manifest_to_cache(&url, resp.clone(), 5 * 60);
         info!(url = url, "Got manifest");
         Ok(resp)
     }
@@ -471,7 +520,7 @@ impl DockerClient {
                     auth_info.auth, auth_info.service, auth_info.scope
                 );
                 let key = &url.clone();
-                if let Some(info) = get_docker_token_from_cache(&url).await {
+                if let Some(info) = get_docker_token_from_cache(&url) {
                     if !info.expired() {
                         return Ok(info.token);
                     }
@@ -484,7 +533,7 @@ impl DockerClient {
                     resp.issued_at = Some(Utc::now().to_rfc3339());
                 }
                 // 将token缓存，方便后续使用
-                set_docker_token_to_cache(key, resp.clone()).await;
+                set_docker_token_to_cache(key, resp.clone());
                 info!(url = url, "Got token");
                 return Ok(resp.token);
             }
