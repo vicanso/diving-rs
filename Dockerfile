@@ -11,7 +11,7 @@ FROM rust:alpine as builder
 COPY --from=webbuilder /diving-rs /diving-rs
 
 RUN apk update \
-  && apk add git make build-base pkgconfig libressl-dev \
+  && apk add git make build-base pkgconfig openssl-dev \
   && cd /diving-rs \
   && make release 
 
@@ -27,8 +27,6 @@ RUN addgroup -g 1000 rust \
 
 COPY --from=builder /diving-rs/target/release/diving /usr/local/bin/diving
 COPY --from=builder /diving-rs/entrypoint.sh /entrypoint.sh
-COPY --from=builder /usr/lib/libssl.so.53 /lib/libssl.so.53
-COPY --from=builder /usr/lib/libcrypto.so.50 /lib/libcrypto.so.50
 
 USER rust
 
