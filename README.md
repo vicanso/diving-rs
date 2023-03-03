@@ -1,6 +1,7 @@
 # diving-rs
 
-Exploring each layer in a docker image, it's fast and simple. There are two modes: terminal(default) and web.
+Exploring each layer in a docker image, it's fast and simple. There are two modes: terminal(default) and web. 
+It does not depend on anything, including docker.
 
 ## config
 
