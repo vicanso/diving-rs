@@ -1,0 +1,4 @@
+# default is ~/.diving/layers
+layer_path: /opt/diving/layers
+# default is 90d
+layer_ttl: 180d

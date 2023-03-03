@@ -2,6 +2,13 @@
 
 Exploring each layer in a docker image, it's fast and simple. There are two modes: terminal(default) and web.
 
+## config
+
+The config file is `~/.diving/config.yml`, the options:
+
+- `layer_path`: The path of layer cache, default is `~/.diving/layers`
+- `layer_ttl`: The ttl of layer, default is `90d`
+
 ## terminal
 
 ```bash
