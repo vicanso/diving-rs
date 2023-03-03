@@ -2,7 +2,7 @@
 
 [中文](./README-zh.md)
 
-Exploring each layer in a docker image, it's fast and simple, develop with Rust.There are two modes: terminal(default) and web. 
+Exploring each layer in a docker image, it's fast and simple, developed with Rust. There are two modes: terminal(default) and web. 
 
 It does not depend on anything, including docker client.
 
