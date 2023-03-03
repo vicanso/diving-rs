@@ -28,7 +28,11 @@ diving quay.io/prometheus/node-exporter
 ## web
 
 ```bash
-docker run -d --restart=always -p 7001:7001 vicanso/diving
+docker run -d --restart=always \
+  -p 7001:7001 \
+  -v $PWD/diving:/home/rust/.diving \
+  --name diving \
+  vicanso/diving
 ```
 
 Open `http://127.0.0.1:7001/` in the browser.
