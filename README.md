@@ -1,6 +1,6 @@
 # diving-rs
 
-Exploring each layer in a docker image, it's fast and simple. There ary two modes: terminal(default) and web.
+Exploring each layer in a docker image, it's fast and simple. There are two modes: terminal(default) and web.
 
 ## terminal
 
@@ -22,5 +22,7 @@ diving quay.io/prometheus/node-exporter
 ```bash
 docker run -d --restart=always -p 7001:7001 vicanso/diving
 ```
+
+Open `http://127.0.0.1:7001/` in the browser.
 
 ![](./assets/diving-web.png)

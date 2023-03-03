@@ -11,8 +11,9 @@ FROM rust:alpine as builder
 COPY --from=webbuilder /diving-rs /diving-rs
 
 RUN apk update \
-  && apk add git make build-base pkgconfig openssl-dev \
-  && cd /diving-rs \
+  && apk add git make build-base pkgconfig
+RUN rustup target list --installed
+RUN cd /diving-rs \
   && make release 
 
 FROM alpine 
