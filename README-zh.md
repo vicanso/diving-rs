@@ -1,6 +1,7 @@
 # diving-rs
 
 用于展示docker镜像的每一层文件列表，它更快更简单。它支持两种模式：命令行（默认模式）以及web模式。它无需依赖任何东西，包括docker客户端。
+`diving-rs`支持多个平台，包括：linux，windows，macos，可以在[release page](https://github.com/vicanso/diving-rs/releases)下载获取。
 
 ## config
 
