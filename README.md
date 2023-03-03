@@ -2,8 +2,10 @@
 
 [中文](./README-zh.md)
 
-Exploring each layer in a docker image, it's fast and simple. There are two modes: terminal(default) and web. 
+Exploring each layer in a docker image, it's fast and simple, develop with Rust.There are two modes: terminal(default) and web. 
+
 It does not depend on anything, including docker client.
+
 It supports multiple platforms: linux, windows and macos, you can get it from [release page](https://github.com/vicanso/diving-rs/releases).
 
 ## config
