@@ -526,6 +526,11 @@ const App: FC = () => {
     </Row>
   );
 
+  const formatCmd = (cmd: string) => {
+    const arr = cmd.split("&&").map((str) => str.trim());
+    return arr.join("\n&&  ");
+  };
+
   const getLayerContentView = () => {
     let fileTreeListClassName = "fileTree";
     if (isDarkMode) {
@@ -534,12 +539,16 @@ const App: FC = () => {
 
     const layerInfo = layers[currentLayer];
 
+    const arr = [
+      "Created: " + new Date(layerInfo.created).toLocaleString(),
+      "",
+      "Command: " + formatCmd(layerInfo.cmd),
+    ];
     const cmd = (
       <>
-        <Paragraph code={true}>
-          Created: {new Date(layerInfo.created).toLocaleString()}
-        </Paragraph>
-        <Paragraph code={true}>Command: {layerInfo.cmd}</Paragraph>
+        <Card className="command">
+          <pre>{arr.join("\n")}</pre>
+        </Card>
       </>
     );
     return (

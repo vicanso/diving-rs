@@ -114,3 +114,13 @@ ul li {
   width: 60px;
   margin-right: 30px;
 }
+
+.command {
+  margin-bottom: 15px;
+}
+.command pre {
+  margin: 0;
+}
+.command .ant-card-body {
+  padding: 10px;
+}
