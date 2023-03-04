@@ -14,7 +14,7 @@ import {
   Checkbox,
   Typography,
 } from "antd";
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
 import { nanoid } from "nanoid";
 
@@ -382,6 +382,13 @@ const App: FC = () => {
       setGotResult(true);
     } catch (err: any) {
       let message = err?.message as string;
+      let axiosErr = err as AxiosError;
+      if (axiosErr?.response?.data) {
+        let data = axiosErr.response.data as {
+          message: string;
+        };
+        message = data.message || "";
+      }
       messageApi.error(message || "analyze image fail");
     } finally {
       setLoading(false);
