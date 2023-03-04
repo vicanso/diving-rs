@@ -649,7 +649,7 @@ const App: FC = () => {
               <Paragraph>
                 Input the name of image to explore each layer in a docker image
                 <br />
-                Docker hub: redis:alpine
+                Docker hub: redis:alpine, vicanso/diving
                 <br />
                 Quay: quay.io/prometheus/node-exporter
                 <br />
