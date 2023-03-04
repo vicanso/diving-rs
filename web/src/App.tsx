@@ -13,6 +13,7 @@ import {
   Row,
   Checkbox,
   Typography,
+  Space,
 } from "antd";
 import axios, { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
@@ -533,11 +534,6 @@ const App: FC = () => {
     </Row>
   );
 
-  const formatCmd = (cmd: string) => {
-    const arr = cmd.split("&&").map((str) => str.trim());
-    return arr.join("\n&&  ");
-  };
-
   const getLayerContentView = () => {
     let fileTreeListClassName = "fileTree";
     if (isDarkMode) {
@@ -546,15 +542,19 @@ const App: FC = () => {
 
     const layerInfo = layers[currentLayer];
 
-    const arr = [
-      "Created: " + new Date(layerInfo.created).toLocaleString(),
-      "",
-      "Command: " + formatCmd(layerInfo.cmd),
-    ];
     const cmd = (
       <>
         <Card className="command">
-          <pre>{arr.join("\n")}</pre>
+          <Space direction="vertical">
+            <span>
+              <span className="bold">Created: </span>
+              {new Date(layerInfo.created).toLocaleString()}
+            </span>
+            <span>
+              <span className="bold">Command: </span>
+              {layerInfo.cmd}
+            </span>
+          </Space>
         </Card>
       </>
     );

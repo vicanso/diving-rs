@@ -118,9 +118,10 @@ ul li {
 .command {
   margin-bottom: 15px;
 }
-.command pre {
-  margin: 0;
-}
 .command .ant-card-body {
-  padding: 10px;
+  padding: 15px;
+}
+.command .bold {
+  font-weight: 900;
+  margin-right: 5px;
 }
