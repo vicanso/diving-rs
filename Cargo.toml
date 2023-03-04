@@ -1,12 +1,12 @@
 [package]
 name = "diving"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-axum = "0.6.9"
+axum = "0.6.10"
 axum-client-ip = "0.4.0"
 bytes = "1.4.0"
 bytesize = "1.2.0"
