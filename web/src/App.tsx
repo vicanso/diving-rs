@@ -681,13 +681,11 @@ const App: FC = () => {
               <Paragraph>
                 Input the name of image to explore each layer in a docker image
                 <br />
-                Docker hub: redis:alpine, vicanso/diving
+                redis:alpine, vicanso/diving
                 <br />
-                Quay: quay.io/prometheus/node-exporter
+                quay.io/prometheus/node-exporter
                 <br />
-                Gcr: gcr.io/google_containers/kube-state-metrics
-                <br />
-                Other: xxx.com/user/image:tag
+                xxx.com/user/image:tag
               </Paragraph>
             </div>
           </div>
