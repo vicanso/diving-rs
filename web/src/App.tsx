@@ -386,7 +386,8 @@ const App: FC = () => {
     setFileTreeViewOption(opt);
   };
 
-  const onSearch = async (image: string) => {
+  const onSearch = async (value: string) => {
+    const image = value.trim();
     if (!image) {
       return;
     }
@@ -668,7 +669,7 @@ const App: FC = () => {
             <div className="logo">
               <Space>
                 {getLogoIcon(isDarkMode)}
-                Diving
+                <span>Diving</span>
               </Space>
             </div>
             {gotResult && <div className="search">{getSearchView()}</div>}
@@ -679,7 +680,7 @@ const App: FC = () => {
             {getSearchView()}
             <div className="desc">
               <Paragraph>
-                Input the name of image to explore each layer in a docker image
+                Input the name of image to explore each layer in a docker image, for example:
                 <br />
                 redis:alpine, vicanso/diving
                 <br />
