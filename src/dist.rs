@@ -3,6 +3,7 @@ use axum::body::Full;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use rust_embed::{EmbeddedFile, RustEmbed};
+use hex::encode;
 
 #[derive(RustEmbed)]
 #[folder = "dist/"]
@@ -20,6 +21,8 @@ impl IntoResponse for ServeFile {
                 "Content-Type",
                 guess.first_or_octet_stream().as_ref(),
             );
+            let e_tag = encode(file.metadata.sha256_hash());
+            let _ = set_header_if_not_exist(headers, "ETag", &e_tag);
             if let Some(max_age) = self.max_age {
                 let _ = set_header_if_not_exist(
                     headers,
