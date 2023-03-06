@@ -363,7 +363,7 @@ impl DockerClient {
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         // 如果缓存中有，直接读取缓存
         if let Some(manifest) = get_manifest_from_cache(&url) {
-            return Ok(manifest)
+            return Ok(manifest);
         }
         info!(url = url, "Getting manifest");
         let mut headers = HashMap::new();
@@ -380,7 +380,7 @@ impl DockerClient {
         headers.insert("Accept".to_string(), accepts.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
         let media_type = get_value_from_json(&data, "mediaType")?;
-        let resp:ImageManifest = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
+        let resp: ImageManifest = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
             // docker的版本则可直接返回
             serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
         } else {

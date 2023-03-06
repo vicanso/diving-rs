@@ -1,9 +1,9 @@
 use axum::{http::Request, middleware::Next, response::Response};
 use axum_client_ip::SecureClientIp;
-
-use crate::util::set_no_cache_if_not_exist;
 use chrono::Utc;
 use tracing::{event, Level};
+
+use crate::util::set_no_cache_if_not_exist;
 
 pub async fn access_log<B>(
     SecureClientIp(ip): SecureClientIp,

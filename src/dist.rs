@@ -14,10 +14,12 @@ impl IntoResponse for ServeFile {
             let mut res = Full::from(file.data).into_response();
             let guess = mime_guess::from_path(&self.filename);
             let headers = res.headers_mut();
-            if let Some(value) = guess.first() {
-                // 忽略出错
-                let _ = set_header_if_not_exist(headers, "Content-Type", value.as_ref());
-            }
+            // 忽略出错
+            let _ = set_header_if_not_exist(
+                headers,
+                "Content-Type",
+                guess.first_or_octet_stream().as_ref(),
+            );
             if let Some(max_age) = self.max_age {
                 let _ = set_header_if_not_exist(
                     headers,
