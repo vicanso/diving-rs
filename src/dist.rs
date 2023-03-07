@@ -1,9 +1,8 @@
-use crate::util::set_header_if_not_exist;
-use axum::body::Full;
 use axum::response::{IntoResponse, Response};
+use hex::encode;
+use http::header;
 use http::StatusCode;
 use rust_embed::{EmbeddedFile, RustEmbed};
-use hex::encode;
 
 #[derive(RustEmbed)]
 #[folder = "dist/"]
@@ -12,26 +11,26 @@ struct Asset;
 impl IntoResponse for ServeFile {
     fn into_response(self) -> Response {
         if let Some(file) = self.file {
-            let mut res = Full::from(file.data).into_response();
+            let str = &encode(file.metadata.sha256_hash())[0..8];
+            let e_tag = format!("{:x}-{str}", file.data.len());
             let guess = mime_guess::from_path(&self.filename);
-            let headers = res.headers_mut();
-            // 忽略出错
-            let _ = set_header_if_not_exist(
-                headers,
-                "Content-Type",
-                guess.first_or_octet_stream().as_ref(),
-            );
-            let e_tag = encode(file.metadata.sha256_hash());
-            let _ = set_header_if_not_exist(headers, "ETag", &e_tag);
-            if let Some(max_age) = self.max_age {
-                let _ = set_header_if_not_exist(
-                    headers,
-                    "Cache-Control",
-                    &format!("public, max-age={max_age}"),
-                );
-            }
-
-            res
+            (
+                [
+                    // content type
+                    (header::CONTENT_TYPE, guess.first_or_octet_stream().as_ref()),
+                    // 为啥不设置Last-Modified
+                    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching#heuristic_caching
+                    // e tag
+                    (header::ETAG, e_tag.as_str()),
+                    // max age
+                    (
+                        header::CACHE_CONTROL,
+                        format!("public, max-age={}", self.max_age.unwrap_or_default()).as_str(),
+                    ),
+                ],
+                file.data,
+            )
+                .into_response()
         } else {
             // 404
             StatusCode::NOT_FOUND.into_response()
