@@ -417,7 +417,7 @@ const App: FC = () => {
         };
         message = data.message || "";
       }
-      messageApi.error(message || "analyze image fail");
+      messageApi.error(message || "analyze image fail", 10);
     } finally {
       setLoading(false);
     }
