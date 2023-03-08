@@ -61,11 +61,13 @@ async fn clear_blob(file: PathBuf, expired: i64) -> Result<()> {
     let meta = fs::metadata(file.clone()).await.context(IOSnafu {
         file: file.to_string_lossy(),
     })?;
-    let modified = meta.modified().context(IOSnafu {
+    // 优先用访问时间，再取修改时间
+    let time = meta.accessed().or(meta.modified()).context(IOSnafu {
         file: file.to_string_lossy(),
     })?;
+
     // 未过期
-    let t: DateTime<Utc> = DateTime::from(modified);
+    let t: DateTime<Utc> = DateTime::from(time);
     if t.timestamp() > expired {
         return Ok(());
     }

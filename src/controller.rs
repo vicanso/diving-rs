@@ -68,7 +68,7 @@ impl IntoResponse for DownloadFile {
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
     let buf = get_blob_from_file(&params.digest).await?;
     let content = get_file_content_from_layer(&buf, &params.media_type, &params.file).await?;
-    let name = params.file.split("/").last().unwrap_or_default();
+    let name = params.file.split('/').last().unwrap_or_default();
     Ok(DownloadFile {
         name: name.to_string(),
         content,
