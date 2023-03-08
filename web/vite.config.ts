@@ -11,7 +11,6 @@ export default defineConfig({
         manualChunks: {
           common: [
             "axios",
-            "nanoid",
             "pretty-bytes",
           ],
           ui: [

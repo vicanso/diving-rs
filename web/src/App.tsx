@@ -17,7 +17,6 @@ import {
 } from "antd";
 import axios, { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
-import { nanoid } from "nanoid";
 
 import "./App.css";
 
@@ -193,10 +192,14 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
   };
 };
 
-const addKeyToFileTreeItem = (items: FileTreeList[]) => {
+const addKeyToFileTreeItem = (items: FileTreeList[], prefix: string) => {
   items.forEach((item) => {
-    item.key = nanoid();
-    addKeyToFileTreeItem(item.children);
+    let key = item.name;
+    if (prefix) {
+      key = `${prefix}/${key}`;
+    }
+    item.key = key;
+    addKeyToFileTreeItem(item.children, key);
   });
 };
 
@@ -398,7 +401,9 @@ const App: FC = () => {
         `/api/analyze?image=${image}`
       );
       // 为每个file tree item增加key
-      data.fileTreeList.forEach(addKeyToFileTreeItem);
+      data.fileTreeList.forEach((fileTree) => {
+        addKeyToFileTreeItem(fileTree, "");
+      });
 
       const result = getImageSummary(data);
       setImageDescriptions(result.imageDescriptions);
@@ -680,7 +685,8 @@ const App: FC = () => {
             {getSearchView()}
             <div className="desc">
               <Paragraph>
-                Input the name of image to explore each layer in a docker image, for example:
+                Input the name of image to explore each layer in a docker image,
+                for example:
                 <br />
                 redis:alpine, vicanso/diving
                 <br />

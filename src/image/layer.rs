@@ -1,3 +1,4 @@
+use crate::error::HTTPError;
 use bytes::Bytes;
 use libflate::gzip::Decoder;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,13 @@ pub enum Error {
     ZstdDecode { source: std::io::Error },
     #[snafu(display("Tar fail: {}", source))]
     Tar { source: std::io::Error },
+}
+
+impl From<Error> for HTTPError {
+    fn from(err: Error) -> Self {
+        // 对于部分error单独转换
+        HTTPError::new_with_category(&err.to_string(), "layer")
+    }
 }
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -83,12 +91,6 @@ pub struct ImageLayerInfo {
     // 文件列表
     pub files: Vec<ImageFileInfo>,
 }
-
-// impl ImageLayerInfo {
-//     pub fn to_file_tree(&self) -> Vec<FileTreeItem> {
-//         convert_files_to_file_tree(&self.files)
-//     }
-// }
 
 // 从分层数据中读取所有文件信息
 // "application/vnd.oci.image.layer.v1.tar+gzip",

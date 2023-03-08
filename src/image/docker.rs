@@ -567,6 +567,7 @@ impl DockerClient {
             let mut info = &ImageLayerInfo {
                 ..Default::default()
             };
+            let mut media_type = "".to_string();
             let mut size = 0;
             let mut file_tree = vec![];
             // 只有非空的layer需要获取files
@@ -576,6 +577,7 @@ impl DockerClient {
                     info = info_list.get(index).unwrap();
                     size = value.size;
                     digest = value.digest.clone();
+                    media_type = value.media_type.clone();
                     if layer_index != 0 {
                         add_to_file_summary(
                             &mut file_summary_list,
@@ -597,6 +599,7 @@ impl DockerClient {
                 cmd: history.created_by.clone(),
                 empty,
                 digest,
+                media_type,
                 unpack_size: info.unpack_size,
                 size,
             });

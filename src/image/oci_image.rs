@@ -35,6 +35,8 @@ pub struct ImageLayer {
     pub cmd: String,
     // layer的大小
     pub size: u64,
+    // 类型
+    pub media_type: String,
     // layer解压之后的文件大小
     pub unpack_size: u64,
     // 该层是否为空（无文件操作）

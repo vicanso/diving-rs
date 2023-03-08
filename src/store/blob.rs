@@ -6,6 +6,7 @@ use std::{path::PathBuf, time::Duration};
 use tokio::fs;
 
 use crate::config::{get_layer_path, load_config};
+use crate::error::HTTPError;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -31,6 +32,13 @@ pub enum Error {
         source: std::io::Error,
         file: String,
     },
+}
+
+impl From<Error> for HTTPError {
+    fn from(err: Error) -> Self {
+        // 对于部分error单独转换
+        HTTPError::new_with_category(&err.to_string(), "blob")
+    }
 }
 
 // 将blob数据保存至文件
