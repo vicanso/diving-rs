@@ -37,6 +37,7 @@ interface ImageAnalyzeResult {
 interface Layer {
   created: string;
   digest: string;
+  mediaType: string;
   cmd: string;
   size: number;
   unpackSize: number;
@@ -101,6 +102,9 @@ const minusOutlined = (
   </svg>
 );
 
+const isDarkMode = () =>
+  window.matchMedia("(prefers-color-scheme: dark)").matches;
+
 const getLogoIcon = (isDarkMode: boolean) => {
   let color = `rgb(0, 0, 0)`;
   if (isDarkMode) {
@@ -149,6 +153,40 @@ const getGithubIcon = (isDarkMode: boolean) => {
         <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
       </svg>
     </a>
+  );
+};
+
+const getDownloadIcon = () => {
+  const color = `#646cff`;
+  return (
+    <svg
+      width="16px"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M12 16L12 8"
+        stroke={color}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9 13L11.913 15.913V15.913C11.961 15.961 12.039 15.961 12.087 15.913V15.913L15 13"
+        stroke={color}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M3 15L3 16L3 19C3 20.1046 3.89543 21 5 21L19 21C20.1046 21 21 20.1046 21 19L21 16L21 15"
+        stroke={color}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 };
 
@@ -245,6 +283,7 @@ const isMatchKeyword = (item: FileTreeList, keyword: string) => {
 
 const addToFileTreeView = (
   onToggleExpand: (key: string) => void,
+  layer: Layer,
   list: JSX.Element[],
   items: FileTreeList[],
   isLastList: boolean[],
@@ -312,6 +351,17 @@ const addToFileTreeView = (
         </a>
       );
     }
+    let downloadIcon: JSX.Element = <></>;
+    if (item.children.length === 0 && item.size > 0) {
+      downloadIcon = (
+        <a
+          className="download"
+          href={`/api/file?digest=${layer.digest}&mediaType=${layer.mediaType}&file=${item.key}`}
+        >
+          {getDownloadIcon()}
+        </a>
+      );
+    }
     list.push(
       <li key={item.key}>
         <span>{item.mode}</span>
@@ -325,6 +375,7 @@ const addToFileTreeView = (
         >
           {icon}
           {name}
+          {downloadIcon}
         </span>
       </li>
     );
@@ -334,6 +385,7 @@ const addToFileTreeView = (
       tmp.push(isLast);
       const childAppendCount = addToFileTreeView(
         onToggleExpand,
+        layer,
         list,
         item.children,
         tmp,
@@ -352,9 +404,6 @@ const addToFileTreeView = (
 };
 
 const App: FC = () => {
-  const isDarkMode = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  // const isDarkMode = false;
-
   const [messageApi, contextHolder] = message.useMessage();
 
   const [gotResult, setGotResult] = useState(false);
@@ -491,6 +540,7 @@ const App: FC = () => {
   const fileTreeViewList = [] as JSX.Element[];
   addToFileTreeView(
     onToggleExpand,
+    layers[currentLayer],
     fileTreeViewList,
     fileTreeList[currentLayer],
     [],
@@ -568,7 +618,7 @@ const App: FC = () => {
 
   const getLayerContentView = () => {
     let fileTreeListClassName = "fileTree";
-    if (isDarkMode) {
+    if (isDarkMode()) {
       fileTreeListClassName += " dark";
     }
 
@@ -623,7 +673,7 @@ const App: FC = () => {
       );
     });
     let className = "wastedList";
-    if (isDarkMode) {
+    if (isDarkMode()) {
       className += " dark";
     }
     return (
@@ -656,24 +706,24 @@ const App: FC = () => {
     );
   };
   let headerClass = "header";
-  if (isDarkMode) {
+  if (isDarkMode()) {
     headerClass += " dark";
   }
 
   return (
     <ConfigProvider
       theme={{
-        algorithm: isDarkMode ? darkAlgorithm : defaultAlgorithm,
+        algorithm: isDarkMode() ? darkAlgorithm : defaultAlgorithm,
       }}
     >
       {contextHolder}
       <Layout>
-        {getGithubIcon(isDarkMode)}
+        {getGithubIcon(isDarkMode())}
         <Header className={headerClass}>
           <div className="contentWrapper">
             <div className="logo">
               <Space>
-                {getLogoIcon(isDarkMode)}
+                {getLogoIcon(isDarkMode())}
                 <span>Diving</span>
               </Space>
             </div>

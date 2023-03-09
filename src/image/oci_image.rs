@@ -168,7 +168,7 @@ pub struct ImageConfig {
 pub struct ImageHistory {
     pub created: String,
     #[serde(rename = "created_by")]
-    pub created_by: String,
+    pub created_by: Option<String>,
     #[serde(rename = "empty_layer")]
     pub empty_layer: Option<bool>,
     pub comment: Option<String>,

@@ -83,6 +83,13 @@ ul li {
 .fileTree .removed {
   color: #ff4d4f;
 }
+.fileTree .download {
+  display: none;
+}
+.fileTree li:hover .download {
+  display: inline;
+  margin-left: 10px;
+}
 .fileTree li span {
   display: inline-block;
 }

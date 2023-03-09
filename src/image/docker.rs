@@ -594,9 +594,15 @@ impl DockerClient {
                 index += 1;
             }
 
+            let created_by = if let Some (ref value) = history.created_by {
+                value.clone()
+            } else {
+                "".to_string()
+            };
+
             layers.push(ImageLayer {
                 created: history.created.clone(),
-                cmd: history.created_by.clone(),
+                cmd: created_by,
                 empty,
                 digest,
                 media_type,
