@@ -594,7 +594,7 @@ impl DockerClient {
                 index += 1;
             }
 
-            let created_by = if let Some (ref value) = history.created_by {
+            let created_by = if let Some(ref value) = history.created_by {
                 value.clone()
             } else {
                 "".to_string()
