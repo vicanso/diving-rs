@@ -65,7 +65,7 @@ pub fn get_static_file(file_path: &str) -> StaticFile {
     let max_age = if file_path.ends_with(".html") {
         0
     } else {
-        3600
+        365 * 24 * 3600
     };
 
     // 缓存服务器的有效期设置为较短的值

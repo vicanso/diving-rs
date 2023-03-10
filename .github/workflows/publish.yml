@@ -115,12 +115,18 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Set version
+        run: |
+          export TAG=$(git describe --tags --abbrev=0)
+          echo $TAG
       - name: Build and push
         id: docker_build
         uses: docker/build-push-action@v3
         with:
           platforms: linux/amd64, linux/arm64
           push: true
-          tags: vicanso/diving
+          tags: |
+            vicanso/diving:latest
+            vicanso/diving:$TAG
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}
