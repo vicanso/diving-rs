@@ -743,6 +743,8 @@ const App: FC = () => {
                 quay.io/prometheus/node-exporter
                 <br />
                 xxx.com/user/image:tag
+                <br />
+                The first time may be slow(more than 10 minutes) because download the layer data
               </Paragraph>
             </div>
           </div>
