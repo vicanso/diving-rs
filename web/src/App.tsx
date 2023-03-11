@@ -721,7 +721,12 @@ const App: FC = () => {
         {getGithubIcon(isDarkMode())}
         <Header className={headerClass}>
           <div className="contentWrapper">
-            <div className="logo">
+            <div
+              className="logo"
+              onClick={() => {
+                window.location.reload();
+              }}
+            >
               <Space>
                 {getLogoIcon(isDarkMode())}
                 <span>Diving</span>
@@ -744,7 +749,8 @@ const App: FC = () => {
                 <br />
                 xxx.com/user/image:tag
                 <br />
-                The first time may be slow(more than 10 minutes) because download the layer data
+                The first time may be slow(more than 10 minutes) because
+                download the layer data
               </Paragraph>
             </div>
           </div>

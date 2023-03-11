@@ -21,6 +21,7 @@
   margin: 16px 24px 16px 0;
   line-height: 18px;
   font-weight: 900;
+  cursor: pointer;
 }
 .logo span {
   font-size: 18px;
