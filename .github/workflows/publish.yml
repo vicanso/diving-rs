@@ -126,9 +126,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-      - name: Echo tags
-        run: |
-          echo ${{ steps.meta.outputs.tags }}
       - name: Build and push
         id: docker_build
         uses: docker/build-push-action@v4
