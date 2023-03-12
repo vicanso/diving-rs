@@ -15,7 +15,7 @@ Note: Since the layer data needs to be downloaded from the source, such as Docke
 The config file is `~/.diving/config.yml`, the options:
 
 - `layer_path`: The path of layer cache, default is `~/.diving/layers`
-- `layer_ttl`: The ttl of layer, default is `90d`
+- `layer_ttl`: The ttl of layer, default is `90d`. The layer will be purged if it is not accessed again for 90 days
 
 ## terminal
 

@@ -11,7 +11,7 @@
 默认配置文件为`~/.diving/config.yml`，其配置选项如下：
 
 - `layer_path`: 分层数据缓存的目录，默认为`~/.diving/layers`
-- `layer_ttl`: 分层数据缓存的有效期, 默认为`90d`
+- `layer_ttl`: 分层数据缓存的有效期, 默认为`90d`，如果90天未再访问则该layer被清除
 
 ## terminal
 
