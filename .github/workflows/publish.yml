@@ -78,10 +78,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v3
+    steps: 
       - name: Change Swap Space
         run: |
           swapon --show=NAME | tail -n 1
@@ -107,6 +104,16 @@ jobs:
           swapon --show
           df -lh
           echo
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            vicanso/diving
+          tags: |
+            type=semver,pattern={{version}}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
       - name: Set up Docker Buildx
@@ -129,8 +136,8 @@ jobs:
         with:
           platforms: linux/amd64, linux/arm64
           push: true
-          tags: |
-            vicanso/diving:latest
-            vicanso/diving:$TAG
+          tags: ${{ steps.meta.outputs.tags }}
       - name: Image digest
-        run: echo ${{ steps.docker_build.outputs.digest }}
+        run: |
+          echo ${{ steps.docker_build.outputs.digest }}
+          echo ${{ steps.meta.outputs.tags }}
