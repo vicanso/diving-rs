@@ -17,3 +17,6 @@ dev-web:
 release:
 	cargo build --release
 	ls -lh target/release
+
+hooks:
+	cp hooks/* .git/hooks/

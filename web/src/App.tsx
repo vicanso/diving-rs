@@ -294,8 +294,15 @@ const addToFileTreeView = (
   }
   const max = items.length;
   let count = 0;
+  const isExpandAll = () => {
+    if (opt.expandAll || opt.keyword) {
+      return true;
+    }
+    return false;
+  };
+
   const shouldExpand = (key: string) => {
-    if (opt.expandAll) {
+    if (isExpandAll()) {
       return true;
     }
     if (opt.expandItems?.includes(key)) {
@@ -333,7 +340,7 @@ const addToFileTreeView = (
     let icon: JSX.Element = <></>;
     if (item.children.length) {
       const { key } = item;
-      if (opt.expandAll || opt.expandItems?.includes(key)) {
+      if (isExpandAll() || opt.expandItems?.includes(key)) {
         icon = minusOutlined;
       } else {
         icon = plusOutlined;
