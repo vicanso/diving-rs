@@ -1,79 +1,79 @@
 name: "publish"
 on:
   push:
-    # tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
-    branches: [ main ]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    # branches: [ main ]
 
 env:
   GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
   CARGO_TERM_COLOR: always
 
 jobs:
-  # macos:
-  #   runs-on: macos-latest
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - name: setup node
-  #       uses: actions/setup-node@v3
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - name: build-web
-  #       run: make build-web
-  #     - name: Install target
-  #       run: |
-  #         rustup update
-  #         rustup target add aarch64-apple-darwin
-  #         rustup target add x86_64-apple-darwin
-  #     - name: release
-  #       run: |
-  #         cargo build --release --target=aarch64-apple-darwin
-  #         mv target/aarch64-apple-darwin/release/diving ./diving-darwin-aarch64
-  #         ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: Install target
+        run: |
+          rustup update
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+      - name: release
+        run: |
+          cargo build --release --target=aarch64-apple-darwin
+          mv target/aarch64-apple-darwin/release/diving ./diving-darwin-aarch64
+          ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
 
-  #         cargo build --release --target=x86_64-apple-darwin
-  #         mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86
-  #         ./.github/workflows/upload_asset.sh ./diving-darwin-x86 $GITHUB_TOKEN
+          cargo build --release --target=x86_64-apple-darwin
+          mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86
+          ./.github/workflows/upload_asset.sh ./diving-darwin-x86 $GITHUB_TOKEN
 
-  # windows:
-  #   runs-on: windows-latest
-  #   defaults:
-  #     run:
-  #       shell: bash
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - name: setup node
-  #       uses: actions/setup-node@v3
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - name: build-web
-  #       run: make build-web
-  #     - name: release
-  #       run: make release
-  #     - name: Upload Assets
-  #       run: |
-  #         mv target/release/diving.exe ./diving-windows.exe
-  #         ./.github/workflows/upload_asset.sh ./diving-windows.exe $GITHUB_TOKEN
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: release
+        run: make release
+      - name: Upload Assets
+        run: |
+          mv target/release/diving.exe ./diving-windows.exe
+          ./.github/workflows/upload_asset.sh ./diving-windows.exe $GITHUB_TOKEN
 
-  # linux:
-  #   runs-on: ubuntu-latest
+  linux:
+    runs-on: ubuntu-latest
 
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - name: setup node
-  #       uses: actions/setup-node@v3
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - name: build-web
-  #       run: make build-web
-  #     - name: release
-  #       run: make release
-  #     - name: Upload Assets
-  #       run: |
-  #         mv target/release/diving ./diving-linux
-  #         ./.github/workflows/upload_asset.sh ./diving-linux $GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: release
+        run: make release
+      - name: Upload Assets
+        run: |
+          mv target/release/diving ./diving-linux
+          ./.github/workflows/upload_asset.sh ./diving-linux $GITHUB_TOKEN
 
   docker:
     runs-on: ubuntu-latest
@@ -126,10 +126,9 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-      - name: Set version
+      - name: Echo tags
         run: |
-          export TAG=$(git describe --tags --abbrev=0)
-          echo $TAG
+          echo ${{ steps.meta.outputs.tags }}
       - name: Build and push
         id: docker_build
         uses: docker/build-push-action@v4
