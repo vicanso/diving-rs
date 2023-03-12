@@ -517,8 +517,12 @@ const App: FC = () => {
       digest = "none";
     }
     const size = item.size || 0;
+    let sizeDesc = "";
+    if (size > 0) {
+      sizeDesc = ` (${prettyBytes(size)})`;
+    }
 
-    let label = `${index + 1}: ${digest.toUpperCase()}(${prettyBytes(size)})`;
+    let label = `${index + 1}: ${digest.toUpperCase()}${sizeDesc}`;
     return {
       value: index,
       label,
