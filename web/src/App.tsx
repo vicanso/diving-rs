@@ -220,7 +220,7 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
 
   const imageDescriptions = {
     score: `${score}%`,
-    size: prettyBytes(result.totalSize),
+    size: `${prettyBytes(result.totalSize)} / ${prettyBytes(result.size)}`,
     otherSize: prettyBytes(otherLayerSize),
     wastedSize: prettyBytes(wastedSize),
   };
