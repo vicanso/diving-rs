@@ -1,5 +1,4 @@
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
-use axum_client_ip::SecureClientIpSource;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -104,11 +103,9 @@ async fn main() {
                     .layer(HandleErrorLayer::new(error::handle_error))
                     .timeout(Duration::from_secs(10 * 60)),
             )
-            // TODO 添加compression
             // 后面的layer先执行
             .layer(from_fn(access_log))
-            .layer(from_fn(entry))
-            .layer(SecureClientIpSource::ConnectInfo.into_extension());
+            .layer(from_fn(entry));
         let addr = "0.0.0.0:7001".parse().unwrap();
         info!("listening on http://{addr}");
         axum::Server::bind(&addr)
