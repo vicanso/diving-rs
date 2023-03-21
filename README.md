@@ -42,7 +42,7 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-It should be noted that the image does not run with root, so the mounted directory needs to add the permissions, otherwise it will fail to start.
+It should be noted that it does not run as root, so the mounted directory needs to add the permission(r+w), otherwise it will fail to start.
 
 Open `http://127.0.0.1:7001/` in the browser.
 
