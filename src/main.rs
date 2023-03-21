@@ -20,12 +20,10 @@ mod store;
 mod ui;
 mod util;
 
-use crate::{
-    controller::new_router,
-    image::{analyze_docker_image, parse_image_info},
-    middleware::{access_log, entry},
-    store::clear_blob_files,
-};
+use controller::new_router;
+use image::{analyze_docker_image, parse_image_info};
+use middleware::{access_log, entry};
+use store::clear_blob_files;
 
 /// A tool for exploring each layer in a docker image.
 /// It can run in terminal or as a web service.
@@ -81,6 +79,8 @@ async fn start_scheduler() {
 async fn main() {
     init_logger();
 
+    // 启动时确保可以读取配置
+    config::must_load_config();
     let args = Args::parse();
     if args.is_terminal_type() {
         // 命令行模式下清除过期数据

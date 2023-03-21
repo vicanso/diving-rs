@@ -38,6 +38,8 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
+需要注意，镜像非使用root运行，因此挂载的目录需要添加对应的读写权限，否则会启动失败。
+
 在浏览器中打开`http://127.0.0.1:7001/`即可。
 
 ![](./assets/diving-web.png)

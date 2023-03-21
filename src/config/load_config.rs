@@ -10,7 +10,7 @@ pub struct DivingConfig {
     pub layer_ttl: Option<String>,
 }
 
-pub fn load_config() -> &'static DivingConfig {
+pub fn must_load_config() -> &'static DivingConfig {
     static DIVING_CONFIG: OnceCell<DivingConfig> = OnceCell::new();
     DIVING_CONFIG.get_or_init(|| {
         let config_file = get_config_path().join("config.yml");
@@ -43,7 +43,7 @@ pub fn get_layer_path() -> &'static PathBuf {
     static LAYER_PATH: OnceCell<PathBuf> = OnceCell::new();
     LAYER_PATH.get_or_init(|| {
         let config_path = get_config_path();
-        let config = load_config();
+        let config = must_load_config();
         let file = config
             .layer_path
             .clone()

@@ -5,7 +5,7 @@ use snafu::{ResultExt, Snafu};
 use std::{path::PathBuf, time::Duration};
 use tokio::fs;
 
-use crate::config::{get_layer_path, load_config};
+use crate::config::{get_layer_path, must_load_config};
 use crate::error::HTTPError;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -83,7 +83,7 @@ pub async fn clear_blob_files() -> Result<()> {
     if path.is_none() {
         return Ok(());
     }
-    let layer_ttl = load_config()
+    let layer_ttl = must_load_config()
         .layer_ttl
         .clone()
         .unwrap_or_else(|| "90d".to_string());
