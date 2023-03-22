@@ -3,17 +3,66 @@ use hex::encode;
 use http::header;
 use http::StatusCode;
 use rust_embed::{EmbeddedFile, RustEmbed};
+use std::convert::From;
+use substring::Substring;
 
 #[derive(RustEmbed)]
 #[folder = "dist/"]
 struct Assets;
 
+#[derive(Default)]
 pub struct StaticFile {
     content_type: String,
-    hash: String,
+    entity_tag: String,
     max_age: u32,
     s_max_age: Option<u32>,
     file: Option<EmbeddedFile>,
+}
+
+// TODO 后续使用EmbeddedFile获取mime
+impl From<(String, Option<EmbeddedFile>)> for StaticFile {
+    fn from(data: (String, Option<EmbeddedFile>)) -> Self {
+        if let Some(value) = data.1 {
+            let str = if let Some(last_modified) = value.metadata.last_modified() {
+                let value = last_modified as u32;
+                encode(value.to_be_bytes())
+            } else {
+                encode(value.metadata.sha256_hash())
+                    .substring(0, 8)
+                    .to_string()
+            };
+            // 长度+hash
+            let entity_tag = format!("\"{:x}-{str}\"", value.data.len());
+            // 因为html对于网页是入口，避免缓存后更新不及时
+            // 因此设置为0
+            // 其它js,css会添加版本号，因此无影响
+            let max_age = if data.0.ends_with(".html") {
+                0
+            } else {
+                365 * 24 * 3600
+            };
+
+            // 缓存服务器的有效期设置为较短的值
+            let server_max_age = 600;
+            let s_max_age = if max_age > server_max_age {
+                Some(server_max_age)
+            } else {
+                None
+            };
+
+            StaticFile {
+                max_age,
+                content_type: mime_guess::from_path(data.0)
+                    .first_or_octet_stream()
+                    .to_string(),
+                entity_tag,
+                s_max_age,
+                file: Some(value),
+            }
+        } else {
+            StaticFile::default()
+        }
+    }
 }
 
 impl IntoResponse for StaticFile {
@@ -31,7 +80,7 @@ impl IntoResponse for StaticFile {
                     // 为啥不设置Last-Modified
                     // https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching#heuristic_caching
                     // e tag
-                    (header::ETAG, self.hash.as_str()),
+                    (header::ETAG, self.entity_tag.as_str()),
                     // max age
                     (header::CACHE_CONTROL, max_age.as_str()),
                 ],
@@ -52,37 +101,5 @@ fn get_asset(file_path: &str) -> Option<EmbeddedFile> {
 // 获取静态资源文件
 pub fn get_static_file(file_path: &str) -> StaticFile {
     let file = get_asset(file_path);
-    let hash = if let Some(ref value) = file {
-        let str = &encode(value.metadata.sha256_hash())[0..8];
-        // 长度+hash一部分
-        format!("{:x}-{str}", value.data.len())
-    } else {
-        "".to_string()
-    };
-    // 因为html对于网页是入口，避免缓存后更新不及时
-    // 因此设置为0
-    // 其它js,css会添加版本号，因此无影响
-    let max_age = if file_path.ends_with(".html") {
-        0
-    } else {
-        365 * 24 * 3600
-    };
-
-    // 缓存服务器的有效期设置为较短的值
-    let server_max_age = 600;
-    let s_max_age = if max_age > server_max_age {
-        Some(server_max_age)
-    } else {
-        None
-    };
-
-    StaticFile {
-        max_age,
-        content_type: mime_guess::from_path(file_path)
-            .first_or_octet_stream()
-            .to_string(),
-        hash,
-        s_max_age,
-        file,
-    }
+    (file_path.to_string(), file).into()
 }
