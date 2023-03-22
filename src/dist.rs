@@ -4,7 +4,6 @@ use http::header;
 use http::StatusCode;
 use rust_embed::{EmbeddedFile, RustEmbed};
 use std::convert::From;
-use substring::Substring;
 
 #[derive(RustEmbed)]
 #[folder = "dist/"]
@@ -27,9 +26,7 @@ impl From<(String, Option<EmbeddedFile>)> for StaticFile {
                 let value = last_modified as u32;
                 encode(value.to_be_bytes())
             } else {
-                encode(value.metadata.sha256_hash())
-                    .substring(0, 8)
-                    .to_string()
+                encode(value.metadata.sha256_hash())[0..8].to_string()
             };
             // 长度+hash
             let entity_tag = format!("\"{:x}-{str}\"", value.data.len());
