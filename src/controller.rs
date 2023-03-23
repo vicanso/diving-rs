@@ -8,7 +8,11 @@ use axum::response::{IntoResponse, Response};
 use axum::{extract::Query, routing::get, Json, Router};
 use http::header;
 use http::Uri;
+use lru::LruCache;
+use once_cell::sync::OnceCell;
 use serde::Deserialize;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
 type JSONResult<T> = HTTPResult<Json<T>>;
 
@@ -17,6 +21,7 @@ pub fn new_router() -> Router {
         .route("/ping", get(ping))
         .route("/api/analyze", get(analyze))
         .route("/api/file", get(get_file))
+        .route("/api/latest-images", get(get_latest_images))
         .fallback(get(serve))
 }
 
@@ -30,10 +35,35 @@ struct AnalyzeParams {
     image: String,
 }
 
+fn get_latest_image_cache() -> &'static Mutex<LruCache<String, String>> {
+    static LATEST_IMAGE_CACHE: OnceCell<Mutex<LruCache<String, String>>> = OnceCell::new();
+    LATEST_IMAGE_CACHE.get_or_init(|| {
+        let c = LruCache::new(NonZeroUsize::new(10).unwrap());
+        Mutex::new(c)
+    })
+}
+fn add_to_latest_image_cache(name: &String) {
+    if let Ok(mut cache) = get_latest_image_cache().lock() {
+        cache.put(name.to_string(), "".to_string());
+    }
+}
+
 async fn analyze(Query(params): Query<AnalyzeParams>) -> JSONResult<DockerAnalyzeResult> {
     let image_info = parse_image_info(&params.image);
+    let name = image_info.name.clone();
     let result = analyze_docker_image(image_info).await?;
+    add_to_latest_image_cache(&name);
     Ok(Json(result))
+}
+
+async fn get_latest_images() -> JSONResult<Vec<String>> {
+    let mut image_list = vec![];
+    if let Ok(cache) = get_latest_image_cache().lock() {
+        for (name, _) in cache.iter() {
+            image_list.push(name.clone());
+        }
+    }
+    Ok(Json(image_list))
 }
 
 #[derive(Debug, Deserialize)]
