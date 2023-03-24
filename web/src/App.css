@@ -59,13 +59,13 @@
   line-height: 2em;
 }
 
-ul li:nth-child(odd) {
+ul.fileTree li:nth-child(odd) {
   background-color: rgb(241, 245, 249);
 }
-ul.dark li:nth-child(odd) {
+ul.fileTree.dark li:nth-child(odd) {
   background-color: rgba(0, 0, 0, 0.6);
 }
-ul li {
+ul.fileTree li {
   list-style: none;
   padding: 8px 10px;
 }
@@ -111,6 +111,17 @@ ul li {
   padding: 0;
 }
 
+ul.wastedList li:nth-child(odd) {
+  background-color: rgb(241, 245, 249);
+}
+ul.wastedList.dark li:nth-child(odd) {
+  background-color: rgba(0, 0, 0, 0.6);
+}
+ul.wastedList li {
+  list-style: none;
+  padding: 8px 10px;
+}
+
 .wastedList li span {
   display: inline-block;
 }
@@ -133,4 +144,10 @@ ul li {
 .command .bold {
   font-weight: 900;
   margin-right: 5px;
+}
+
+.analyzeImages {
+  position: fixed;
+  bottom: 0;
+  right: 0;
 }

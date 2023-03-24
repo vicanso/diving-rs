@@ -50,9 +50,8 @@ fn add_to_latest_image_cache(name: &String) {
 
 async fn analyze(Query(params): Query<AnalyzeParams>) -> JSONResult<DockerAnalyzeResult> {
     let image_info = parse_image_info(&params.image);
-    let name = image_info.name.clone();
     let result = analyze_docker_image(image_info).await?;
-    add_to_latest_image_cache(&name);
+    add_to_latest_image_cache(&params.image);
     Ok(Json(result))
 }
 

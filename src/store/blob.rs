@@ -79,8 +79,8 @@ async fn clear_blob(file: PathBuf, expired: i64) -> Result<()> {
 
 // 启动时清除较早下载的blob
 pub async fn clear_blob_files() -> Result<()> {
-    let path = get_layer_path().to_str();
-    if path.is_none() {
+    let path = get_layer_path().to_str().unwrap_or_default();
+    if path.is_empty() {
         return Ok(());
     }
     let layer_ttl = must_load_config()
@@ -93,8 +93,7 @@ pub async fn clear_blob_files() -> Result<()> {
 
     let expired = Utc::now().timestamp() - ttl.as_secs() as i64;
 
-    // 已判断不为空
-    let value = path.unwrap().to_string() + "/*";
+    let value = path.to_string() + "/*";
     for entry in (glob(value.as_str()).context(PatternSnafu {
         path: value.to_string(),
     })?)

@@ -1,4 +1,4 @@
-import { useState, FC } from "react";
+import { Component, ReactNode } from "react";
 import {
   ConfigProvider,
   theme,
@@ -14,9 +14,11 @@ import {
   Checkbox,
   Typography,
   Space,
+  List,
 } from "antd";
 import axios, { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
+import i18nGet from "./i18n";
 
 import "./App.css";
 
@@ -410,374 +412,457 @@ const addToFileTreeView = (
   return count;
 };
 
-const App: FC = () => {
-  const [messageApi, contextHolder] = message.useMessage();
+interface ImageDescriptions {
+  score: string;
+  size: string;
+  otherSize: string;
+  wastedSize: string;
+}
+interface AppState {
+  gotResult: boolean;
+  loading: boolean;
+  imageDescriptions: ImageDescriptions;
+  layers: Layer[];
+  currentLayer: number;
+  fileTreeList: FileTreeList[][];
+  fileTreeViewOption: FileTreeViewOption;
+  wastedList: FileWastedSummary[];
+  imageName: string;
+  latestAnalyzeImages: string[];
+}
+interface App {
+  state: AppState;
+}
 
-  const [gotResult, setGotResult] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [imageDescriptions, setImageDescriptions] = useState(
-    {} as {
-      score: string;
-      size: string;
-      otherSize: string;
-      wastedSize: string;
-    }
-  );
-  const [layers, setLayers] = useState([] as Layer[]);
-  const [currentLayer, setCurrentLayer] = useState(0);
-  const [fileTreeList, setFileTreeList] = useState([] as FileTreeList[][]);
-  const [fileTreeViewOption, setFileTreeViewOption] = useState(
-    {} as FileTreeViewOption
-  );
-  const [wastedList, setWastedList] = useState([] as FileWastedSummary[]);
-  const [imageName, setImageName] = useState("");
-
-  const onToggleExpand = (key: string) => {
-    const opt = Object.assign({}, fileTreeViewOption);
-    const items = opt.expandItems || [];
-    const index = items.indexOf(key);
-    if (index === -1) {
-      items.push(key);
-    } else {
-      items.splice(index, 1);
-    }
-    opt.expandItems = items;
-    setFileTreeViewOption(opt);
-  };
-
-  const onSearch = async (value: string) => {
-    const image = value.trim();
-    if (!image) {
-      return;
-    }
-    setImageName(image);
-    setLoading(true);
-    try {
-      const { data } = await axios.get<ImageAnalyzeResult>(
-        `/api/analyze?image=${image}`
-      );
-      // 为每个file tree item增加key
-      data.fileTreeList.forEach((fileTree) => {
-        addKeyToFileTreeItem(fileTree, "");
-      });
-
-      const result = getImageSummary(data);
-      setImageDescriptions(result.imageDescriptions);
-      setWastedList(result.wastedList);
-      setFileTreeList(data.fileTreeList);
-      setLayers(data.layers);
-      setCurrentLayer(0);
-      // 设置已获取结果
-      setGotResult(true);
-    } catch (err: any) {
-      let message = err?.message as string;
-      let axiosErr = err as AxiosError;
-      if (axiosErr?.response?.data) {
-        let data = axiosErr.response.data as {
-          message: string;
-        };
-        message = data.message || "";
-      }
-      messageApi.error(message || "analyze image fail", 10);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const selectLayer = (index: number) => {
-    setCurrentLayer(index);
-  };
-
-  const getImageSummaryView = () => {
-    const imageSummary = (
-      <Descriptions title="Image Summary">
-        <Descriptions.Item label="Efficiency Score">
-          {imageDescriptions["score"]}
-        </Descriptions.Item>
-        <Descriptions.Item label="Image Size">
-          {imageDescriptions["size"]}
-        </Descriptions.Item>
-        <Descriptions.Item label="Other Layer Size">
-          {imageDescriptions["otherSize"]}
-        </Descriptions.Item>
-        <Descriptions.Item label="Wasted Size">
-          {imageDescriptions["wastedSize"]}
-        </Descriptions.Item>
-      </Descriptions>
-    );
-    return <div className="imageSummary mtop30">{imageSummary}</div>;
-  };
-
-  const layerOptions = layers.map((item, index) => {
-    let { digest } = item;
-    if (digest) {
-      digest = digest.replace("sha256:", "").substring(0, 8);
-    }
-    if (!digest) {
-      digest = "none";
-    }
-    const size = item.size || 0;
-    let sizeDesc = "";
-    if (size > 0) {
-      sizeDesc = ` (${prettyBytes(size)})`;
-    }
-
-    let label = `${index + 1}: ${digest.toUpperCase()}${sizeDesc}`;
-    return {
-      value: index,
-      label,
+class App extends Component {
+  constructor(props: any) {
+    super(props);
+    this.state = {
+      gotResult: false,
+      loading: false,
+      imageDescriptions: {} as ImageDescriptions,
+      layers: [],
+      currentLayer: 0,
+      fileTreeList: [],
+      fileTreeViewOption: {} as FileTreeViewOption,
+      wastedList: [],
+      imageName: "",
+      latestAnalyzeImages: [],
     };
-  });
-
-  const sizeOptions = [
-    0,
-    10 * 1000,
-    30 * 1000,
-    100 * 1000,
-    500 * 1000,
-    1000 * 1000,
-    10 * 1000 * 1000,
-  ].map((size) => {
-    let label = `>= ${prettyBytes(size)}`;
-    if (size === 0) {
-      label = "No Limit";
-    }
-    return {
-      value: size,
-      label,
-    };
-  });
-
-  const fileTreeViewList = [] as JSX.Element[];
-  addToFileTreeView(
-    onToggleExpand,
-    layers[currentLayer],
-    fileTreeViewList,
-    fileTreeList[currentLayer],
-    [],
-    fileTreeViewOption
-  );
-
-  const layerFilter = (
-    <Row gutter={20}>
-      <Col span={6}>
-        <Form.Item label="Layer">
-          <Select
-            defaultValue={0}
-            style={{
-              width: "100%",
-            }}
-            onChange={selectLayer}
-            options={layerOptions}
-          />
-        </Form.Item>
-      </Col>
-      <Col span={4}>
-        <Form.Item label="Size">
-          <Select
-            defaultValue={0}
-            options={sizeOptions}
-            onChange={(limit: number) => {
-              const opt = Object.assign({}, fileTreeViewOption);
-              opt.sizeLimit = limit;
-              setFileTreeViewOption(opt);
-            }}
-          />
-        </Form.Item>
-      </Col>
-      <Col span={3}>
-        <Form.Item>
-          <Checkbox
-            onChange={(e) => {
-              const opt = Object.assign({}, fileTreeViewOption);
-              opt.onlyModifiedRemoved = e.target.checked;
-              setFileTreeViewOption(opt);
-            }}
-          >
-            Modifications
-          </Checkbox>
-        </Form.Item>
-      </Col>
-      <Col span={3}>
-        <Form.Item>
-          <Checkbox
-            onChange={(e) => {
-              const opt = Object.assign({}, fileTreeViewOption);
-              opt.expandAll = e.target.checked;
-              setFileTreeViewOption(opt);
-            }}
-          >
-            Expand
-          </Checkbox>
-        </Form.Item>
-      </Col>
-      <Col span={8}>
-        <Form.Item>
-          <Input
-            addonBefore="Keywords"
-            allowClear
-            onChange={(e) => {
-              const opt = Object.assign({}, fileTreeViewOption);
-              opt.keyword = e.target.value.trim();
-              setFileTreeViewOption(opt);
-            }}
-          />
-        </Form.Item>
-      </Col>
-    </Row>
-  );
-
-  const getLayerContentView = () => {
-    let fileTreeListClassName = "fileTree";
-    if (isDarkMode()) {
-      fileTreeListClassName += " dark";
-    }
-
-    const layerInfo = layers[currentLayer];
-
-    const cmd = (
-      <>
-        <Card className="command">
-          <Space direction="vertical">
-            <span>
-              <span className="bold">Created: </span>
-              {new Date(layerInfo.created).toLocaleString()}
-            </span>
-            <span>
-              <span className="bold">Command: </span>
-              {layerInfo.cmd}
-            </span>
-          </Space>
-        </Card>
-      </>
-    );
-    return (
-      <div className="mtop30">
-        <Card title="Layer Content">
-          {layerFilter}
-          {cmd}
-          <ul className={fileTreeListClassName}>
-            <li>
-              <span>Permission</span>
-              <span>UID:GID</span>
-              <span>Size</span>
-              <span>FileTree</span>
-            </li>
-            {fileTreeViewList}
-          </ul>
-        </Card>
-      </div>
-    );
-  };
-
-  const getWastedSummaryView = () => {
-    if (wastedList.length === 0) {
-      return <></>;
-    }
-    const list = wastedList.map((item) => {
-      return (
-        <li key={item.path}>
-          <span>{prettyBytes(item.totalSize)}</span>
-          <span>{item.count}</span>
-          <span>/{item.path}</span>
-        </li>
-      );
-    });
-    let className = "wastedList";
-    if (isDarkMode()) {
-      className += " dark";
-    }
-    return (
-      <div className="mtop30">
-        <Card title="Wasted Summary">
-          <ul className={className}>
-            <li>
-              <span>Total Size</span>
-              <span>Count</span>
-              <span>Path</span>
-            </li>
-            {list}
-          </ul>
-        </Card>
-      </div>
-    );
-  };
-  const getSearchView = () => {
-    return (
-      <Search
-        defaultValue={imageName}
-        autoFocus={true}
-        loading={loading}
-        placeholder="input the name of image"
-        allowClear
-        enterButton="Analyze"
-        size="large"
-        onSearch={onSearch}
-      />
-    );
-  };
-  let headerClass = "header";
-  if (isDarkMode()) {
-    headerClass += " dark";
   }
+  async componentDidMount() {
+    const { data } = await axios.get<string[]>("/api/latest-images", {
+      timeout: 5 * 1000,
+    });
+    this.setState({
+      latestAnalyzeImages: data,
+    });
+  }
+  render(): ReactNode {
+    const {
+      gotResult,
+      loading,
+      imageDescriptions,
+      layers,
+      currentLayer,
+      fileTreeList,
+      fileTreeViewOption,
+      wastedList,
+      imageName,
+      latestAnalyzeImages,
+    } = this.state;
+    const onToggleExpand = (key: string) => {
+      const opt = Object.assign({}, this.state.fileTreeViewOption);
+      const items = opt.expandItems || [];
+      const index = items.indexOf(key);
+      if (index === -1) {
+        items.push(key);
+      } else {
+        items.splice(index, 1);
+      }
+      opt.expandItems = items;
+      this.setState({
+        fileTreeViewOption: opt,
+      });
+    };
 
-  return (
-    <ConfigProvider
-      theme={{
-        algorithm: isDarkMode() ? darkAlgorithm : defaultAlgorithm,
-      }}
-    >
-      {contextHolder}
-      <Layout>
-        {getGithubIcon(isDarkMode())}
-        <Header className={headerClass}>
-          <div className="contentWrapper">
-            <div
-              className="logo"
-              onClick={() => {
-                window.location.reload();
+    const onSearch = async (value: string) => {
+      const image = value.trim();
+      if (!image) {
+        return;
+      }
+      this.setState({
+        imageName: image,
+        loading: true,
+      });
+      try {
+        const { data } = await axios.get<ImageAnalyzeResult>(
+          `/api/analyze?image=${image}`
+        );
+        // 为每个file tree item增加key
+        data.fileTreeList.forEach((fileTree) => {
+          addKeyToFileTreeItem(fileTree, "");
+        });
+
+        const result = getImageSummary(data);
+        this.setState({
+          imageDescriptions: result.imageDescriptions,
+          wastedList: result.wastedList,
+          fileTreeList: data.fileTreeList,
+          layers: data.layers,
+          currentLayer: 0,
+          gotResult: true,
+        });
+      } catch (err: any) {
+        let msg = err?.message as string;
+        let axiosErr = err as AxiosError;
+        if (axiosErr?.response?.data) {
+          let data = axiosErr.response.data as {
+            message: string;
+          };
+          msg = data.message || "";
+        }
+        message.error(msg || "analyze image fail", 10);
+      } finally {
+        this.setState({
+          loading: false,
+        });
+      }
+    };
+
+    const selectLayer = (index: number) => {
+      this.setState({
+        currentLayer: index,
+      });
+    };
+
+    const getImageSummaryView = () => {
+      const imageSummary = (
+        <Descriptions title={i18nGet("imageSummaryTitle")}>
+          <Descriptions.Item label={i18nGet("imageScoreLabel")}>
+            {imageDescriptions["score"]}
+          </Descriptions.Item>
+          <Descriptions.Item label={i18nGet("imageSizeLabel")}>
+            {imageDescriptions["size"]}
+          </Descriptions.Item>
+          <Descriptions.Item label={i18nGet("otherLayerSizeLabel")}>
+            {imageDescriptions["otherSize"]}
+          </Descriptions.Item>
+          <Descriptions.Item label={i18nGet("wastedSizeLabel")}>
+            {imageDescriptions["wastedSize"]}
+          </Descriptions.Item>
+        </Descriptions>
+      );
+      return <div className="imageSummary mtop30">{imageSummary}</div>;
+    };
+
+    const layerOptions = layers.map((item, index) => {
+      let { digest } = item;
+      if (digest) {
+        digest = digest.replace("sha256:", "").substring(0, 8);
+      }
+      if (!digest) {
+        digest = "none";
+      }
+      const size = item.size || 0;
+      let sizeDesc = "";
+      if (size > 0) {
+        sizeDesc = ` (${prettyBytes(size)})`;
+      }
+
+      let label = `${index + 1}: ${digest.toUpperCase()}${sizeDesc}`;
+      return {
+        value: index,
+        label,
+      };
+    });
+
+    const sizeOptions = [
+      0,
+      10 * 1000,
+      30 * 1000,
+      100 * 1000,
+      500 * 1000,
+      1000 * 1000,
+      10 * 1000 * 1000,
+    ].map((size) => {
+      let label = `>= ${prettyBytes(size)}`;
+      if (size === 0) {
+        label = "No Limit";
+      }
+      return {
+        value: size,
+        label,
+      };
+    });
+
+    const fileTreeViewList = [] as JSX.Element[];
+    addToFileTreeView(
+      onToggleExpand,
+      layers[currentLayer],
+      fileTreeViewList,
+      fileTreeList[currentLayer],
+      [],
+      fileTreeViewOption
+    );
+
+    const layerFilter = (
+      <Row gutter={20}>
+        <Col span={6}>
+          <Form.Item label={i18nGet("layerLabel")}>
+            <Select
+              defaultValue={0}
+              style={{
+                width: "100%",
+              }}
+              onChange={selectLayer}
+              options={layerOptions}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={4}>
+          <Form.Item label={i18nGet("sizeLabel")}>
+            <Select
+              defaultValue={0}
+              options={sizeOptions}
+              onChange={(limit: number) => {
+                const opt = Object.assign({}, this.state.fileTreeViewOption);
+                opt.sizeLimit = limit;
+                this.setState({
+                  fileTreeViewOption: opt,
+                });
+              }}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={3}>
+          <Form.Item>
+            <Checkbox
+              onChange={(e) => {
+                const opt = Object.assign({}, fileTreeViewOption);
+                opt.onlyModifiedRemoved = e.target.checked;
+                this.setState({
+                  fileTreeViewOption: opt,
+                });
               }}
             >
-              <Space>
-                {getLogoIcon(isDarkMode())}
-                <span>Diving</span>
-              </Space>
-            </div>
-            {gotResult && <div className="search">{getSearchView()}</div>}
-          </div>
-        </Header>
-        {!gotResult && (
-          <div className="fixSearch">
-            {getSearchView()}
-            <div className="desc">
-              <Paragraph>
-                Input the name of image to explore each layer in a docker image,
-                for example:
-                <br />
-                redis:alpine, vicanso/diving
-                <br />
-                quay.io/prometheus/node-exporter
-                <br />
-                xxx.com/user/image:tag
-                <br />
-                The first time may be slow(more than 10 minutes) because
-                download the layer data
-              </Paragraph>
-            </div>
-          </div>
-        )}
-        {gotResult && (
-          <Content>
+              {i18nGet("modificationLabel")}
+            </Checkbox>
+          </Form.Item>
+        </Col>
+        <Col span={3}>
+          <Form.Item>
+            <Checkbox
+              onChange={(e) => {
+                const opt = Object.assign({}, fileTreeViewOption);
+                opt.expandAll = e.target.checked;
+                this.setState({
+                  fileTreeViewOption: opt,
+                });
+              }}
+            >
+              {i18nGet("expandLabel")}
+            </Checkbox>
+          </Form.Item>
+        </Col>
+        <Col span={8}>
+          <Form.Item>
+            <Input
+              addonBefore={i18nGet("keywordsLabel")}
+              allowClear
+              onChange={(e) => {
+                const opt = Object.assign({}, fileTreeViewOption);
+                opt.keyword = e.target.value.trim();
+                this.setState({
+                  fileTreeViewOption: opt,
+                });
+              }}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
+    );
+
+    const getLayerContentView = () => {
+      let fileTreeListClassName = "fileTree";
+      if (isDarkMode()) {
+        fileTreeListClassName += " dark";
+      }
+
+      const layerInfo = layers[currentLayer];
+
+      const cmd = (
+        <>
+          <Card className="command">
+            <Space direction="vertical">
+              <span>
+                <span className="bold">Created: </span>
+                {new Date(layerInfo.created).toLocaleString()}
+              </span>
+              <span>
+                <span className="bold">Command: </span>
+                {layerInfo.cmd}
+              </span>
+            </Space>
+          </Card>
+        </>
+      );
+      return (
+        <div className="mtop30">
+          <Card title={i18nGet("layerContentTitle")}>
+            {layerFilter}
+            {cmd}
+            <ul className={fileTreeListClassName}>
+              <li>
+                <span>{i18nGet("permissionLabel")}</span>
+                <span>UID:GID</span>
+                <span>{i18nGet("sizeLabel")}</span>
+                <span>{i18nGet("fileTreeLabel")}</span>
+              </li>
+              {fileTreeViewList}
+            </ul>
+          </Card>
+        </div>
+      );
+    };
+
+    const getWastedSummaryView = () => {
+      if (this.state.wastedList.length === 0) {
+        return <></>;
+      }
+      const list = wastedList.map((item) => {
+        return (
+          <li key={item.path}>
+            <span>{prettyBytes(item.totalSize)}</span>
+            <span>{item.count}</span>
+            <span>/{item.path}</span>
+          </li>
+        );
+      });
+      let className = "wastedList";
+      if (isDarkMode()) {
+        className += " dark";
+      }
+      return (
+        <div className="mtop30">
+          <Card title={i18nGet("wastedSummaryTitle")}>
+            <ul className={className}>
+              <li>
+                <span>{i18nGet("totalSizeLabel")}</span>
+                <span>{i18nGet("countLabel")}</span>
+                <span>{i18nGet("pathLabel")}</span>
+              </li>
+              {list}
+            </ul>
+          </Card>
+        </div>
+      );
+    };
+    const getSearchView = () => {
+      return (
+        <Search
+          defaultValue={imageName}
+          autoFocus={true}
+          loading={loading}
+          placeholder={i18nGet("imageInputPlaceholder")}
+          allowClear
+          enterButton={i18nGet("analyzeButton")}
+          size="large"
+          onSearch={onSearch}
+        />
+      );
+    };
+    let headerClass = "header";
+    if (isDarkMode()) {
+      headerClass += " dark";
+    }
+
+    const getLatestAnalyzeImagesView = () => {
+      if (latestAnalyzeImages.length === 0) {
+        return <></>;
+      }
+      return (
+        <List
+          className="analyzeImages"
+          bordered={true}
+          size={"small"}
+          header={<div>{i18nGet("latestAnalyzeImagesTitle")}</div>}
+          dataSource={latestAnalyzeImages}
+          renderItem={(item) => (
+            <List.Item>
+              <Typography.Text>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    onSearch(item);
+                    e.preventDefault();
+                  }}
+                >
+                  {item}
+                </a>
+              </Typography.Text>{" "}
+            </List.Item>
+          )}
+        />
+      );
+    };
+
+    return (
+      <ConfigProvider
+        theme={{
+          algorithm: isDarkMode() ? darkAlgorithm : defaultAlgorithm,
+        }}
+      >
+        <Layout>
+          {getGithubIcon(isDarkMode())}
+          <Header className={headerClass}>
             <div className="contentWrapper">
-              {getImageSummaryView()}
-              {getLayerContentView()}
-              {getWastedSummaryView()}
+              <div
+                className="logo"
+                onClick={() => {
+                  window.location.reload();
+                }}
+              >
+                <Space>
+                  {getLogoIcon(isDarkMode())}
+                  <span>Diving</span>
+                </Space>
+              </div>
+              {gotResult && <div className="search">{getSearchView()}</div>}
             </div>
-          </Content>
-        )}
-      </Layout>
-    </ConfigProvider>
-  );
-};
+          </Header>
+          {!gotResult && (
+            <div className="fixSearch">
+              {getSearchView()}
+              <div className="desc">
+                <Paragraph>
+                  {i18nGet("imageAnalyzeDesc")}
+                  <br />
+                  redis:alpine, vicanso/diving
+                  <br />
+                  quay.io/prometheus/node-exporter
+                  <br />
+                  xxx.com/user/image:tag
+                  <br />
+                  {i18nGet("imageSlowDesc")}
+                </Paragraph>
+              </div>
+            </div>
+          )}
+          {gotResult && (
+            <Content>
+              <div className="contentWrapper">
+                {getImageSummaryView()}
+                {getLayerContentView()}
+                {getWastedSummaryView()}
+              </div>
+            </Content>
+          )}
+          {getLatestAnalyzeImagesView()}
+        </Layout>
+      </ConfigProvider>
+    );
+  }
+}
 
 export default App;

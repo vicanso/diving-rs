@@ -1,0 +1,26 @@
+export default {
+  analyzeButton: "Analyze",
+  imageInputPlaceholder: "input the name of image",
+  imageAnalyzeDesc:
+    "Input the name of image to explore each layer in a docker image, for example:",
+  imageSlowDesc:
+    "The first time may be slow(more than 10 minutes) because download the layer data",
+  imageSummaryTitle: "Image Summary",
+  imageScoreLabel: "Efficiency Score",
+  imageSizeLabel: "Image Size",
+  otherLayerSizeLabel: "Other Layer Size",
+  wastedSizeLabel: "Wasted Size",
+  layerContentTitle: "Layer Content",
+  permissionLabel: "Permission",
+  sizeLabel: "Size",
+  fileTreeLabel: "FileTree",
+  layerLabel: "Layer",
+  modificationLabel: "Modifications",
+  expandLabel: "Expand",
+  keywordsLabel: "Keywords",
+  wastedSummaryTitle: "Wasted Summary",
+  totalSizeLabel: "Total Size",
+  countLabel: "Count",
+  pathLabel: "Path",
+  latestAnalyzeImagesTitle: "Latest Analyze Images",
+};
