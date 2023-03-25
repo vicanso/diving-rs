@@ -438,6 +438,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
+ "rust-embed-utils",
  "serde",
  "serde_json",
  "serde_repr",
@@ -1440,6 +1441,7 @@ version = "7.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "512b0ab6853f7e14e3c8754acb43d6f748bb9ced66aa5915a6553ac8213f7731"
 dependencies = [
+ "mime_guess",
  "sha2",
  "walkdir",
 ]
