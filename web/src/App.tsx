@@ -726,10 +726,11 @@ class App extends Component {
     };
 
     const getWastedSummaryView = () => {
-      if (this.state.wastedList.length === 0) {
+      const arr = this.state.wastedList.filter(item => item.totalSize > 0);
+      if (arr.length === 0) {
         return <></>;
       }
-      const list = wastedList.map((item) => {
+      const list = arr.map((item) => {
         return (
           <li key={item.path}>
             <span>{prettyBytes(item.totalSize)}</span>
