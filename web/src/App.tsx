@@ -275,8 +275,7 @@ const isMatchKeyword = (item: FileTreeList, keyword: string) => {
   }
   // 如果子元素符合，则也符合
   for (let i = 0; i < item.children.length; i++) {
-    const { name } = item.children[i];
-    if (name.includes(keyword)) {
+    if (isMatchKeyword(item.children[i], keyword)) {
       return true;
     }
   }
