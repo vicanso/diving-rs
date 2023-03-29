@@ -17,6 +17,7 @@ mod error;
 mod image;
 mod middleware;
 mod store;
+mod task_local;
 mod ui;
 mod util;
 
@@ -24,6 +25,7 @@ use controller::new_router;
 use image::{analyze_docker_image, parse_image_info};
 use middleware::{access_log, entry};
 use store::clear_blob_files;
+use task_local::{generate_trace_id, TRACE_ID};
 
 /// A tool for exploring each layer in a docker image.
 /// It can run in terminal or as a web service.
@@ -89,9 +91,13 @@ async fn main() {
             panic!("image cat not be nil")
         }
         if let Some(value) = args.image {
-            let image_info = parse_image_info(&value);
-            let result = analyze_docker_image(image_info).await.unwrap();
-            ui::run_app(result).unwrap();
+            TRACE_ID
+                .scope(generate_trace_id(), async {
+                    let image_info = parse_image_info(&value);
+                    let result = analyze_docker_image(image_info).await.unwrap();
+                    ui::run_app(result).unwrap();
+                })
+                .await;
         }
     } else {
         start_scheduler().await;

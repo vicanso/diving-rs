@@ -1,3 +1,4 @@
+use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
 use http::StatusCode;
 use lru::LruCache;
@@ -8,7 +9,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
-use tracing::info;
 
 use super::{
     get_files_from_layer,
@@ -365,7 +365,7 @@ impl DockerClient {
         if let Some(manifest) = get_manifest_from_cache(&url) {
             return Ok(manifest);
         }
-        info!(url = url, "Getting manifest");
+        tl_info!(url = url, "Getting manifest");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -404,7 +404,7 @@ impl DockerClient {
         // 暂时有效期全部设置为5分钟
         // 后续考虑是否根据tag使用不同有效期
         set_manifest_to_cache(&url, resp.clone(), 5 * 60);
-        info!(url = url, "Got manifest");
+        tl_info!(url = url, "Got manifest");
         Ok(resp)
     }
     // 获取镜像的信息
@@ -437,7 +437,7 @@ impl DockerClient {
             return Ok(data);
         }
         let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
-        info!(url = url, "Getting blob");
+        tl_info!(url = url, "Getting blob");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -447,7 +447,7 @@ impl DockerClient {
         // 出错忽略
         // 写入数据失败不影响后续
         let _ = save_blob_to_file(digest, &resp).await;
-        info!(url = url, "Got blob");
+        tl_info!(url = url, "Got blob");
         Ok(resp.to_vec())
     }
     async fn get_layer_files(
@@ -472,7 +472,9 @@ impl DockerClient {
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
         let s = self.clone();
+        let trace_id = TRACE_ID.with(clone_value_from_task_local);
         let result = std::thread::spawn(move || {
+            // 新的thread需要重新设置trace id
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .thread_name("getAllLayerInfo")
@@ -480,18 +482,22 @@ impl DockerClient {
                 .build()
                 .expect("Creating tokio runtime");
             runtime.block_on(async move {
-                let mut handles = Vec::with_capacity(layers.len());
-                for layer in layers {
-                    handles.push(s.get_layer_files(&user, &img, &token, layer));
-                }
+                TRACE_ID
+                    .scope(trace_id, async {
+                        let mut handles = Vec::with_capacity(layers.len());
+                        for layer in layers {
+                            handles.push(s.get_layer_files(&user, &img, &token, layer));
+                        }
 
-                let arr = futures::future::join_all(handles).await;
-                let mut info_list = vec![];
-                for result in arr {
-                    let info = result?;
-                    info_list.push(info);
-                }
-                Ok::<Vec<ImageLayerInfo>, Error>(info_list)
+                        let arr = futures::future::join_all(handles).await;
+                        let mut info_list = vec![];
+                        for result in arr {
+                            let info = result?;
+                            info_list.push(info);
+                        }
+                        Ok::<Vec<ImageLayerInfo>, Error>(info_list)
+                    })
+                    .await
             })
         })
         .join()
@@ -525,7 +531,7 @@ impl DockerClient {
                         return Ok(info.token);
                     }
                 }
-                info!(url = url, "Getting token");
+                tl_info!(url = url, "Getting token");
                 let mut resp = self
                     .get::<DockerTokenInfo>(url.clone(), HashMap::new())
                     .await?;
@@ -534,7 +540,7 @@ impl DockerClient {
                 }
                 // 将token缓存，方便后续使用
                 set_docker_token_to_cache(key, resp.clone());
-                info!(url = url, "Got token");
+                tl_info!(url = url, "Got token");
                 return Ok(resp.token);
             }
         }
@@ -549,7 +555,7 @@ impl DockerClient {
         let mut file_tree_list: Vec<Vec<FileTreeItem>> = vec![];
         let mut index = 0;
         let mut file_summary_list = vec![];
-        info!(user = user, img = img, tag = tag, "analyzing image",);
+        tl_info!(user = user, img = img, tag = tag, "analyzing image",);
 
         let mut image_size = 0;
         let mut image_total_size = 0;
@@ -612,7 +618,7 @@ impl DockerClient {
             file_tree_list.push(file_tree);
         }
 
-        info!(user = user, img = img, tag = tag, "analyze image done",);
+        tl_info!(user = user, img = img, tag = tag, "analyze image done",);
 
         Ok(DockerAnalyzeResult {
             name: format!("{user}/{img}:{tag}"),

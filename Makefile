@@ -10,7 +10,7 @@ build-web:
 	&& cp -rf dist ../
 
 dev:
-	cargo run -- mongo
+	cargo run -- redis:alpine
 dev-web:
 	cargo watch -w src -x 'run -- --mode=web'
 

@@ -1,8 +1,9 @@
+use crate::{task_local::*, tl_info};
 use axum::{http::Request, middleware::Next, response::Response};
 use axum_client_ip::InsecureClientIp;
 use chrono::Utc;
-use tracing::{event, Level};
 
+use crate::task_local::{generate_trace_id, TRACE_ID};
 use crate::util::set_no_cache_if_not_exist;
 
 pub async fn access_log<B>(
@@ -16,8 +17,7 @@ pub async fn access_log<B>(
     let resp = next.run(req).await;
     let status = resp.status().as_u16();
     let cost = Utc::now().timestamp_millis() - started_at;
-    event!(
-        Level::INFO,
+    tl_info!(
         category = "accessLog",
         ip = ip.to_string(),
         method,
@@ -29,9 +29,13 @@ pub async fn access_log<B>(
 }
 
 pub async fn entry<B>(req: Request<B>, next: Next<B>) -> Response {
-    let mut resp = next.run(req).await;
+    TRACE_ID
+        .scope(generate_trace_id(), async {
+            let mut resp = next.run(req).await;
 
-    let headers = resp.headers_mut();
-    set_no_cache_if_not_exist(headers);
-    resp
+            let headers = resp.headers_mut();
+            set_no_cache_if_not_exist(headers);
+            resp
+        })
+        .await
 }
