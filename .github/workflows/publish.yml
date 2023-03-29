@@ -54,7 +54,7 @@ jobs:
       - name: Upload Assets
         run: |
           mv target/release/diving.exe ./diving-windows.exe
-          gzip ./diving-windows.exe
+          gzip -f ./diving-windows.exe
           ./.github/workflows/upload_asset.sh ./diving-windows.exe.gz $GITHUB_TOKEN
 
   linux:
