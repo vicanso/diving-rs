@@ -38,7 +38,7 @@ struct AnalyzeParams {
 fn get_latest_image_cache() -> &'static Mutex<LruCache<String, String>> {
     static LATEST_IMAGE_CACHE: OnceCell<Mutex<LruCache<String, String>>> = OnceCell::new();
     LATEST_IMAGE_CACHE.get_or_init(|| {
-        let c = LruCache::new(NonZeroUsize::new(10).unwrap());
+        let c = LruCache::new(NonZeroUsize::new(5).unwrap());
         Mutex::new(c)
     })
 }

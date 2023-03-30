@@ -215,8 +215,15 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     return b.totalSize - a.totalSize;
   });
 
-  // 除去第一层layer的大小
-  const otherLayerSize = result.totalSize - result.layers[0].size;
+  // 除去第一个不为0的layer大小
+  let firstNotEmptyLayerSize = 0;
+  result.layers.forEach((item) => {
+    if (firstNotEmptyLayerSize != 0) {
+      return;
+    }
+    firstNotEmptyLayerSize = item.size;
+  });
+  const otherLayerSize = result.totalSize - firstNotEmptyLayerSize;
 
   const score = (100 - (wastedSize * 100) / result.totalSize).toFixed(2);
 
@@ -418,6 +425,7 @@ interface ImageDescriptions {
   wastedSize: string;
 }
 interface AppState {
+  defaultImage: string;
   gotResult: boolean;
   loading: boolean;
   imageDescriptions: ImageDescriptions;
@@ -436,7 +444,10 @@ interface App {
 class App extends Component {
   constructor(props: any) {
     super(props);
+    const urlInfo = new URL(window.location.href);
+    const image = urlInfo.searchParams.get("image");
     this.state = {
+      defaultImage: image || "",
       gotResult: false,
       loading: false,
       imageDescriptions: {} as ImageDescriptions,
@@ -450,6 +461,9 @@ class App extends Component {
     };
   }
   async componentDidMount() {
+    if (this.state.defaultImage) {
+      this.onSearch(this.state.defaultImage);
+    }
     const { data } = await axios.get<string[]>("/api/latest-images", {
       timeout: 5 * 1000,
     });
@@ -457,8 +471,52 @@ class App extends Component {
       latestAnalyzeImages: data,
     });
   }
+  async onSearch(value: String) {
+    const image = value.trim();
+    if (!image) {
+      return;
+    }
+    this.setState({
+      imageName: image,
+      loading: true,
+    });
+    try {
+      const { data } = await axios.get<ImageAnalyzeResult>(
+        `/api/analyze?image=${image}`
+      );
+      // 为每个file tree item增加key
+      data.fileTreeList.forEach((fileTree) => {
+        addKeyToFileTreeItem(fileTree, "");
+      });
+
+      const result = getImageSummary(data);
+      this.setState({
+        imageDescriptions: result.imageDescriptions,
+        wastedList: result.wastedList,
+        fileTreeList: data.fileTreeList,
+        layers: data.layers,
+        currentLayer: 0,
+        gotResult: true,
+      });
+    } catch (err: any) {
+      let msg = err?.message as string;
+      let axiosErr = err as AxiosError;
+      if (axiosErr?.response?.data) {
+        let data = axiosErr.response.data as {
+          message: string;
+        };
+        msg = data.message || "";
+      }
+      message.error(msg || "analyze image fail", 10);
+    } finally {
+      this.setState({
+        loading: false,
+      });
+    }
+  }
   render(): ReactNode {
     const {
+      defaultImage,
       gotResult,
       loading,
       imageDescriptions,
@@ -483,50 +541,6 @@ class App extends Component {
       this.setState({
         fileTreeViewOption: opt,
       });
-    };
-
-    const onSearch = async (value: string) => {
-      const image = value.trim();
-      if (!image) {
-        return;
-      }
-      this.setState({
-        imageName: image,
-        loading: true,
-      });
-      try {
-        const { data } = await axios.get<ImageAnalyzeResult>(
-          `/api/analyze?image=${image}`
-        );
-        // 为每个file tree item增加key
-        data.fileTreeList.forEach((fileTree) => {
-          addKeyToFileTreeItem(fileTree, "");
-        });
-
-        const result = getImageSummary(data);
-        this.setState({
-          imageDescriptions: result.imageDescriptions,
-          wastedList: result.wastedList,
-          fileTreeList: data.fileTreeList,
-          layers: data.layers,
-          currentLayer: 0,
-          gotResult: true,
-        });
-      } catch (err: any) {
-        let msg = err?.message as string;
-        let axiosErr = err as AxiosError;
-        if (axiosErr?.response?.data) {
-          let data = axiosErr.response.data as {
-            message: string;
-          };
-          msg = data.message || "";
-        }
-        message.error(msg || "analyze image fail", 10);
-      } finally {
-        this.setState({
-          loading: false,
-        });
-      }
     };
 
     const selectLayer = (index: number) => {
@@ -726,7 +740,7 @@ class App extends Component {
     };
 
     const getWastedSummaryView = () => {
-      const arr = this.state.wastedList.filter(item => item.totalSize > 0);
+      const arr = wastedList.filter((item) => item.totalSize > 0);
       if (arr.length === 0) {
         return <></>;
       }
@@ -761,14 +775,14 @@ class App extends Component {
     const getSearchView = () => {
       return (
         <Search
-          defaultValue={imageName}
+          defaultValue={defaultImage}
           autoFocus={true}
           loading={loading}
           placeholder={i18nGet("imageInputPlaceholder")}
           allowClear
           enterButton={i18nGet("analyzeButton")}
           size="large"
-          onSearch={onSearch}
+          onSearch={this.onSearch.bind(this)}
         />
       );
     };
@@ -794,7 +808,7 @@ class App extends Component {
                 <a
                   href="#"
                   onClick={(e) => {
-                    onSearch(item);
+                    window.location.href = `/?image=${item}`;
                     e.preventDefault();
                   }}
                 >
@@ -820,7 +834,7 @@ class App extends Component {
               <div
                 className="logo"
                 onClick={() => {
-                  window.location.reload();
+                  window.location.href = "/";
                 }}
               >
                 <Space>
