@@ -476,6 +476,10 @@ class App extends Component {
     if (!image) {
       return;
     }
+    const url = `/?image=${image}`;
+    if (window.location.href !== url) {
+      window.history.pushState(null, "", url);
+    }
     this.setState({
       imageName: image,
       loading: true,
