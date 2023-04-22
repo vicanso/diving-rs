@@ -35,27 +35,27 @@ jobs:
           mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86
           ./.github/workflows/upload_asset.sh ./diving-darwin-x86 $GITHUB_TOKEN
 
-  windows:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: build-web
-        run: make build-web
-      - name: release
-        run: make release
-      - name: Upload Assets
-        run: |
-          mv target/release/diving.exe ./diving-windows.exe
-          tar -czvf diving-windows.tar.gz diving-windows.exe
-          ./.github/workflows/upload_asset.sh ./diving-windows.tar.gz $GITHUB_TOKEN
+  # windows:
+  #   runs-on: windows-latest
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   steps:
+  #     - uses: actions/checkout@v3
+  #     - name: setup node
+  #       uses: actions/setup-node@v3
+  #     - uses: actions-rs/toolchain@v1
+  #       with:
+  #         toolchain: stable
+  #     - name: build-web
+  #       run: make build-web
+  #     - name: release
+  #       run: make release
+  #     - name: Upload Assets
+  #       run: |
+  #         mv target/release/diving.exe ./diving-windows.exe
+  #         tar -czvf diving-windows.tar.gz diving-windows.exe
+  #         ./.github/workflows/upload_asset.sh ./diving-windows.tar.gz $GITHUB_TOKEN
 
   linux:
     runs-on: ubuntu-latest
