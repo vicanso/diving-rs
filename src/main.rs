@@ -51,7 +51,10 @@ fn init_logger() {
             level = value;
         }
     }
-    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+        .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
 
