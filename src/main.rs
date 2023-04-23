@@ -81,9 +81,7 @@ async fn start_scheduler() {
 }
 
 #[tokio::main]
-async fn main() {
-    init_logger();
-
+async fn run() {
     // 启动时确保可以读取配置
     config::must_load_config();
     let args = Args::parse();
@@ -149,4 +147,12 @@ async fn shutdown_signal() {
     }
 
     info!("signal received, starting graceful shutdown");
+}
+
+fn main() {
+    // Because we need to get the local offset before Tokio spawns any threads, our `main`
+    // function cannot use `tokio::main`.
+
+    init_logger();
+    run();
 }
