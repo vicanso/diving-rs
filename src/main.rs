@@ -53,7 +53,10 @@ fn init_logger() {
     }
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
-        .with_timer(tracing_subscriber::fmt::time::OffsetTime::local_rfc_3339().expect("could not get local offset!"))
+        .with_timer(
+            tracing_subscriber::fmt::time::OffsetTime::local_rfc_3339()
+                .expect("could not get local offset!"),
+        )
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
