@@ -51,12 +51,16 @@ fn init_logger() {
             level = value;
         }
     }
+    let timer = tracing_subscriber::fmt::time::OffsetTime::local_rfc_3339().unwrap_or_else(|_| {
+        tracing_subscriber::fmt::time::OffsetTime::new(
+            time::UtcOffset::from_hms(0, 0, 0).unwrap(),
+            time::format_description::well_known::Rfc3339,
+        )
+    });
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
-        .with_timer(
-            tracing_subscriber::fmt::time::OffsetTime::local_rfc_3339()
-                .expect("could not get local offset!"),
-        )
+        .with_timer(timer)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
