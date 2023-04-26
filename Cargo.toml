@@ -1,13 +1,13 @@
 [package]
 name = "diving"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-axum = "0.6.16"
-axum-client-ip = "0.4.0"
+axum = "0.6.17"
+axum-client-ip = "0.4.1"
 bytes = "1.4.0"
 bytesize = "1.2.0"
 chrono = "0.4.24"
@@ -17,7 +17,7 @@ crossterm = "0.26.1"
 futures = "0.3.28"
 glob = "0.3.1"
 hex = "0.4.3"
-home = "0.5.4"
+home = "0.5.5"
 http = "0.2.9"
 humantime = "2.1.0"
 libflate = "1.3.0"
@@ -36,10 +36,10 @@ serde_repr = "0.1.10"
 snafu = "0.7.4"
 tar = "0.4.38"
 time = "0.3.20"
-tokio = { version = "1.27.0", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "fs"] }
+tokio = { version = "1.28.0", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "fs"] }
 tokio-cron-scheduler = "0.9.4"
 tower = { version = "0.4.13", features = ["timeout"]}
-tracing = "0.1.37"
+tracing = "0.1.38"
 tracing-subscriber = { version = "0.3.17", features = [ "local-time"] }
 tui = "0.19.0"
 unicode-width = "0.1.10"
