@@ -3,6 +3,7 @@ use bytes::Bytes;
 use libflate::gzip::Decoder;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
+use std::fs::File;
 use std::{io::Read, path::Path};
 use tar::Archive;
 
@@ -45,6 +46,18 @@ pub fn zstd_decode(data: &[u8]) -> Result<Vec<u8>> {
     let mut buf = vec![];
     zstd::stream::copy_decode(data, &mut buf).context(ZstdDecodeSnafu {})?;
     Ok(buf)
+}
+
+// 从tar中读取文件信息
+pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
+    let media_type = mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .to_string();
+
+    let mut file = File::open(tar).context(TarSnafu {})?;
+    let mut buf = vec![];
+    file.read_to_end(&mut buf).context(TarSnafu {})?;
+    get_file_content_from_layer(&buf, &media_type, filename).await
 }
 
 // 从分层数据中读取文件
