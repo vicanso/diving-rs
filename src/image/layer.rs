@@ -48,16 +48,27 @@ pub fn zstd_decode(data: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-// 从tar中读取文件信息
+// 从tar中读取文件信息 
 pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
-    let media_type = mime_guess::from_path(filename)
-        .first_or_octet_stream()
-        .to_string();
-
-    let mut file = File::open(tar).context(TarSnafu {})?;
-    let mut buf = vec![];
-    file.read_to_end(&mut buf).context(TarSnafu {})?;
-    get_file_content_from_layer(&buf, &media_type, filename).await
+    let file = File::open(tar).context(TarSnafu {})?;
+    let mut a = Archive::new(file);
+    let mut content = vec![];
+    for file in a.entries().context(TarSnafu {})? {
+        let mut file = file.context(TarSnafu {})?;
+        let name = file
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .to_string();
+        if name == filename {
+            file.read_to_end(&mut content).context(ReadSnafu {})?;
+            break;
+        }
+    }
+    if content.is_empty() {
+        return Err(Error::NotFound {});
+    }
+    Ok(content)
 }
 
 // 从分层数据中读取文件
