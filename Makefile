@@ -14,6 +14,9 @@ dev:
 dev-web:
 	cargo watch -w src -x 'run -- --mode=web'
 
+udeps:
+	cargo +nightly udeps
+
 release:
 	cargo build --release
 	ls -lh target/release

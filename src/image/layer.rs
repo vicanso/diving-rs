@@ -48,7 +48,25 @@ pub fn zstd_decode(data: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-// 从tar中读取文件信息 
+// 从tar中读取文件信息
+pub async fn get_file_size_from_tar(tar: &str, filename: &str) -> Result<u64> {
+    let file = File::open(tar).context(TarSnafu {})?;
+    let mut a = Archive::new(file);
+    for file in a.entries().context(TarSnafu {})? {
+        let file = file.context(TarSnafu {})?;
+        let name = file
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .to_string();
+        if name == filename {
+            return Ok(file.size());
+        }
+    }
+    Ok(0)
+}
+
+// 从tar中读取文件信息
 pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
     let file = File::open(tar).context(TarSnafu {})?;
     let mut a = Archive::new(file);

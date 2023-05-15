@@ -10,11 +10,11 @@ use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 
+use super::{get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer};
 use super::{
-    get_files_from_layer,
     layer::ImageLayerInfo,
     oci_image::{ImageFileSummary, ImageManifestLayer},
-    FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, Op,
+    FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
 use crate::{
@@ -60,6 +60,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 static REGISTRY: &str = "https://index.docker.io/v2";
 
+static REGISTRY_LOCAL_FILE: &str = "local-file";
+
 #[derive(Debug, Clone, Default)]
 pub struct ImageInfo {
     // 镜像对应的registry
@@ -72,8 +74,17 @@ pub struct ImageInfo {
     pub tag: String,
 }
 
+static FILE_PROTOCOL: &str = "file://";
+
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
+    if value.starts_with(FILE_PROTOCOL) {
+        return ImageInfo {
+            registry: REGISTRY_LOCAL_FILE.to_string(),
+            name: value.replace(FILE_PROTOCOL, ""),
+            ..Default::default()
+        };
+    }
     if !value.contains(':') {
         value += ":latest";
     }
@@ -301,11 +312,62 @@ fn add_to_file_summary(
     }
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalManifest {
+    #[serde(rename = "Config")]
+    pub config: String,
+    #[serde(rename = "RepoTags")]
+    pub repo_tags: Vec<String>,
+    #[serde(rename = "Layers")]
+    pub layers: Vec<String>,
+}
+
+impl From<LocalManifest> for ImageManifest {
+    fn from(value: LocalManifest) -> Self {
+        let layers = value
+            .layers
+            .iter()
+            .map(|layer| ImageManifestLayer {
+                media_type: "application/vnd.docker.image.rootfs.diff.tar".to_string(),
+                digest: layer.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        ImageManifest {
+            media_type: MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST.to_string(),
+            schema_version: 2,
+            config: ImageManifestConfig {
+                digest: value.config,
+                ..Default::default()
+            },
+            layers,
+        }
+    }
+}
+
 impl DockerClient {
     pub fn new(register: &str) -> Self {
         DockerClient {
             registry: register.to_string(),
         }
+    }
+    fn is_local(&self) -> bool {
+        self.registry == REGISTRY_LOCAL_FILE
+    }
+    async fn get_local_manifest(&self, image: &str) -> Result<LocalManifest> {
+        let data = get_file_content_from_tar(image, "manifest.json")
+            .await
+            .context(LayerSnafu {})?;
+
+        let manifest_list =
+            serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {})?;
+        if manifest_list.is_empty() {
+            return Err(Error::Whatever {
+                message: "Local Manifest Not Found".to_string(),
+            });
+        }
+        Ok(manifest_list[0].clone())
     }
     async fn get_bytes(
         &self,
@@ -356,6 +418,17 @@ impl DockerClient {
         tag: &str,
         token: &str,
     ) -> Result<ImageManifest> {
+        if self.is_local() {
+            let local_manifest = self.get_local_manifest(img).await?;
+            let mut image_manifest: ImageManifest = local_manifest.into();
+            for layer in image_manifest.layers.iter_mut() {
+                let size = get_file_size_from_tar(img, &layer.digest)
+                    .await
+                    .context(LayerSnafu {})?;
+                layer.size = size;
+            }
+            return Ok(image_manifest);
+        }
         // TODO 如果tag非latest，是否可以缓存
         // 需要注意以命令行或以web server执行的程序生命周期的差别
 
@@ -415,11 +488,18 @@ impl DockerClient {
         tag: &str,
         token: &str,
     ) -> Result<ImageConfig> {
-        let manifest = self.get_manifest(user, img, tag, token).await?;
-        // 暂时只获取amd64, linux
-        let data = self
-            .get_blob(user, img, &manifest.config.digest, token)
-            .await?;
+        let data = if self.is_local() {
+            let local_manifest = self.get_local_manifest(img).await?;
+            get_file_content_from_tar(img, &local_manifest.config)
+                .await
+                .context(LayerSnafu {})?
+        } else {
+            let manifest = self.get_manifest(user, img, tag, token).await?;
+            // 暂时只获取amd64, linux
+            self.get_blob(user, img, &manifest.config.digest, token)
+                .await?
+        };
+
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
@@ -457,7 +537,13 @@ impl DockerClient {
         token: &str,
         layer: ImageManifestLayer,
     ) -> Result<ImageLayerInfo> {
-        let buf = self.get_blob(user, img, &layer.digest, token).await?;
+        let buf = if self.is_local() {
+            get_file_content_from_tar(img, &layer.digest)
+                .await
+                .context(LayerSnafu {})?
+        } else {
+            self.get_blob(user, img, &layer.digest, token).await?
+        };
 
         let info = get_files_from_layer(&buf, &layer.media_type)
             .await
@@ -508,6 +594,10 @@ impl DockerClient {
         Ok(infos)
     }
     async fn get_auth_token(&self, user: &str, img: &str, tag: &str) -> Result<String> {
+        // 本地文件无需token
+        if self.is_local() {
+            return Ok("".to_string());
+        }
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         let mut builder = Client::builder()
             .build()
