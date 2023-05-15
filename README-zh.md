@@ -18,6 +18,8 @@
 ```bash
 diving redis:alpine
 
+diving file:///tmp/redis.tar
+
 diving quay.io/prometheus/node-exporter
 ```
 

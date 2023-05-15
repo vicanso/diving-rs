@@ -22,6 +22,8 @@ The config file is `~/.diving/config.yml`, the options:
 ```bash
 diving redis:alpine
 
+diving file:///tmp/redis.tar
+
 diving quay.io/prometheus/node-exporter
 ```
 
