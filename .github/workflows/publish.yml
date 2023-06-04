@@ -80,25 +80,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-      - uses: uraimo/run-on-arch-action@v2
-        name: Run commands
-        id: runcmd
-        with:
-          arch: aarch64
-          distro: ubuntu20.04
-          # Set an output parameter `uname` for use in subsequent steps
-          run: |
-            uname -a
-            echo ::set-output name=uname::$(uname -a)
       - name: setup node
         uses: actions/setup-node@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+          target: aarch64-unknown-linux-gnu
+          override: true
       - name: build-web
         run: make build-web
-      - name: release
-        run: make release
+      - uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --target aarch64-unknown-linux-gnu
       - name: Upload Assets
         run: |
           mv target/release/diving ./diving-linux-aarch64
