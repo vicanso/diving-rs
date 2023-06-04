@@ -154,7 +154,7 @@ pub struct DockerClient {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockerTokenInfo {
     token: String,
-    expires_in: i32,
+    expires_in: Option<i32>,
     issued_at: Option<String>,
 }
 
@@ -188,7 +188,7 @@ impl DockerTokenInfo {
         if let Ok(value) = DateTime::<Utc>::from_str(&issued_at) {
             // 因为后续需要使用token获取数据
             // 因此提交10秒认为过期，避免请求时失效
-            let offset = (self.expires_in - 10) as i64;
+            let offset = (self.expires_in.unwrap_or(600) - 10) as i64;
             let now = Utc::now().timestamp();
             return value.timestamp() + offset <= now;
         }
