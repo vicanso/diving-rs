@@ -54,8 +54,7 @@ jobs:
       - name: Upload Assets
         run: |
           mv target/release/diving.exe ./diving-windows.exe
-          tar -czvf diving-windows.tar.gz diving-windows.exe
-          ./.github/workflows/upload_asset.sh ./diving-windows.tar.gz $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-windows.exe $GITHUB_TOKEN
 
   linux:
     runs-on: ubuntu-latest
@@ -73,9 +72,37 @@ jobs:
         run: make release
       - name: Upload Assets
         run: |
-          mv target/release/diving ./diving-linux
-          ./.github/workflows/upload_asset.sh ./diving-linux $GITHUB_TOKEN
+          mv target/release/diving ./diving-linux-x86
+          ./.github/workflows/upload_asset.sh ./diving-linux-x86 $GITHUB_TOKEN
 
+  linux-aarch64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: uraimo/run-on-arch-action@v2
+        name: Run commands
+        id: runcmd
+        with:
+          arch: aarch64
+          distro: ubuntu20.04
+          # Set an output parameter `uname` for use in subsequent steps
+          run: |
+            uname -a
+            echo ::set-output name=uname::$(uname -a)
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: release
+        run: make release
+      - name: Upload Assets
+        run: |
+          mv target/release/diving ./diving-linux-aarch64
+          ./.github/workflows/upload_asset.sh ./diving-linux=aarch64 $GITHUB_TOKEN
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
