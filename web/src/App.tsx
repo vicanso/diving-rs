@@ -860,6 +860,8 @@ class App extends Component {
                   <br />
                   quay.io/prometheus/node-exporter
                   <br />
+                  dragonwell-registry.cn-hangzhou.cr.aliyuncs.com/dragonwell/dragonwell
+                  <br />
                   xxx.com/user/image:tag
                   <br />
                   {i18nGet("imageSlowDesc")}
