@@ -97,7 +97,7 @@ jobs:
       - name: Upload Assets
         run: |
           mv target/aarch64-unknown-linux-gnu/release/diving ./diving-linux-aarch64
-          ./.github/workflows/upload_asset.sh ./diving-linux=aarch64 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-linux-aarch64 $GITHUB_TOKEN
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
