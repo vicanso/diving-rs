@@ -96,8 +96,7 @@ jobs:
           args: --release --target aarch64-unknown-linux-gnu
       - name: Upload Assets
         run: |
-          ls -lh target/aarch64-unknown-linux-gnu/release
-          ls -lh target/release/build
+          ls -lh target/*
           mv target/release/diving ./diving-linux-aarch64
           ./.github/workflows/upload_asset.sh ./diving-linux=aarch64 $GITHUB_TOKEN
   # docker:
