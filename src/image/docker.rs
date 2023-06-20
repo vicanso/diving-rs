@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
+use substring::Substring;
 
 use super::{get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer};
 use super::{
@@ -72,6 +73,8 @@ pub struct ImageInfo {
     pub name: String,
     // 镜像版本
     pub tag: String,
+    // 镜像架构
+    pub arch: String,
 }
 
 static FILE_PROTOCOL: &str = "file://";
@@ -85,9 +88,21 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
             ..Default::default()
         };
     }
+    let mut arch = "".to_string();
+    if let Some(index) = value.find('?') {
+        let query = value.substring(index + 1, value.len());
+        for item in query.split('&').into_iter() {
+            let arr: Vec<&str> = item.split('=').collect();
+            if arr.len() == 2 && arr[0] == "arch" {
+                arch = arr[1].to_string();
+            }
+        }
+        value = value.substring(0, index).to_string();
+    }
     if !value.contains(':') {
         value += ":latest";
     }
+
     let mut values: Vec<&str> = value.split(&['/', ':']).collect();
     let tag = values.pop().unwrap_or_default().to_string();
     let mut registry = REGISTRY.to_string();
@@ -115,6 +130,7 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
         user,
         name,
         tag,
+        arch,
     }
 }
 
@@ -346,6 +362,20 @@ impl From<LocalManifest> for ImageManifest {
     }
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockerImageParams {
+    // 用户
+    pub user: String,
+    // 镜像
+    pub img: String,
+    // 镜像tag
+    pub tag: String,
+    // docker token
+    pub token: String,
+    // 镜像架构
+    pub arch: String,
+}
+
 impl DockerClient {
     pub fn new(register: &str) -> Self {
         DockerClient {
@@ -411,13 +441,11 @@ impl DockerClient {
         Ok(result)
     }
     // 获取manifest
-    pub async fn get_manifest(
-        &self,
-        user: &str,
-        img: &str,
-        tag: &str,
-        token: &str,
-    ) -> Result<ImageManifest> {
+    pub async fn get_manifest(&self, params: &DockerImageParams) -> Result<ImageManifest> {
+        let img = &params.img;
+        let user = &params.user;
+        let tag = &params.tag;
+        let token = &params.token;
         if self.is_local() {
             let local_manifest = self.get_local_manifest(img).await?;
             let mut image_manifest: ImageManifest = local_manifest.into();
@@ -459,8 +487,7 @@ impl DockerClient {
         } else {
             let manifest = serde_json::from_slice::<ImageIndex>(&data)
                 .context(SerdeJsonSnafu {})?
-                // TODO 后续是否可根据系统或客户自动选择
-                .guess_manifest();
+                .guess_manifest(&params.arch);
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -481,41 +508,32 @@ impl DockerClient {
         Ok(resp)
     }
     // 获取镜像的信息
-    pub async fn get_image_config(
-        &self,
-        user: &str,
-        img: &str,
-        tag: &str,
-        token: &str,
-    ) -> Result<ImageConfig> {
+    pub async fn get_image_config(&self, params: &DockerImageParams) -> Result<ImageConfig> {
+        let img = &params.img;
         let data = if self.is_local() {
             let local_manifest = self.get_local_manifest(img).await?;
             get_file_content_from_tar(img, &local_manifest.config)
                 .await
                 .context(LayerSnafu {})?
         } else {
-            let manifest = self.get_manifest(user, img, tag, token).await?;
             // 暂时只获取amd64, linux
-            self.get_blob(user, img, &manifest.config.digest, token)
-                .await?
+            let manifest = self.get_manifest(params).await?;
+            self.get_blob(params, &manifest.config.digest).await?
         };
 
         let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
         Ok(result)
     }
     // 获取镜像分层的blob
-    pub async fn get_blob(
-        &self,
-        user: &str,
-        img: &str,
-        digest: &str,
-        token: &str,
-    ) -> Result<Vec<u8>> {
+    pub async fn get_blob(&self, params: &DockerImageParams, digest: &str) -> Result<Vec<u8>> {
         // 是否需要加锁避免同时读写
         // 忽略出错，如果出错直接从网络加载
         if let Ok(data) = get_blob_from_file(digest).await {
             return Ok(data);
         }
+        let user = &params.user;
+        let img = &params.img;
+        let token = &params.token;
         let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
         tl_info!(url = url, "Getting blob");
         let mut headers = HashMap::new();
@@ -532,17 +550,16 @@ impl DockerClient {
     }
     async fn get_layer_files(
         &self,
-        user: &str,
-        img: &str,
-        token: &str,
+        params: &DockerImageParams,
         layer: ImageManifestLayer,
     ) -> Result<ImageLayerInfo> {
+        let img = &params.img;
         let buf = if self.is_local() {
             get_file_content_from_tar(img, &layer.digest)
                 .await
                 .context(LayerSnafu {})?
         } else {
-            self.get_blob(user, img, &layer.digest, token).await?
+            self.get_blob(params, &layer.digest).await?
         };
 
         let info = get_files_from_layer(&buf, &layer.media_type)
@@ -552,9 +569,7 @@ impl DockerClient {
     }
     async fn get_all_layer_info(
         &self,
-        user: String,
-        img: String,
-        token: String,
+        params: DockerImageParams,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
         let s = self.clone();
@@ -572,7 +587,7 @@ impl DockerClient {
                     .scope(trace_id, async {
                         let mut handles = Vec::with_capacity(layers.len());
                         for layer in layers {
-                            handles.push(s.get_layer_files(&user, &img, &token, layer));
+                            handles.push(s.get_layer_files(&params, layer));
                         }
 
                         let arr = futures::future::join_all(handles).await;
@@ -593,11 +608,14 @@ impl DockerClient {
         let infos = result?;
         Ok(infos)
     }
-    async fn get_auth_token(&self, user: &str, img: &str, tag: &str) -> Result<String> {
+    async fn get_auth_token(&self, params: &DockerImageParams) -> Result<String> {
         // 本地文件无需token
         if self.is_local() {
             return Ok("".to_string());
         }
+        let user = &params.user;
+        let img = &params.img;
+        let tag = &params.tag;
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         let mut builder = Client::builder()
             .build()
@@ -636,10 +654,15 @@ impl DockerClient {
         }
         Ok("".to_string())
     }
-    pub async fn analyze(&self, user: &str, img: &str, tag: &str) -> Result<DockerAnalyzeResult> {
-        let token = self.get_auth_token(user, img, tag).await?;
-        let manifest = self.get_manifest(user, img, tag, &token).await?;
-        let config = self.get_image_config(user, img, tag, &token).await?;
+    pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
+        let token = self.get_auth_token(params).await?;
+        params.token = token;
+        let manifest = self.get_manifest(params).await?;
+        let config = self.get_image_config(params).await?;
+        let user = &params.user;
+        let img = &params.img;
+        let tag = &params.tag;
+
         let mut layers = vec![];
         // let mut layer_infos = vec![];
         let mut file_tree_list: Vec<Vec<FileTreeItem>> = vec![];
@@ -650,12 +673,7 @@ impl DockerClient {
         let mut image_size = 0;
         let mut image_total_size = 0;
         let info_list = self
-            .get_all_layer_info(
-                user.to_string(),
-                img.to_string(),
-                token.clone(),
-                manifest.layers.clone(),
-            )
+            .get_all_layer_info(params.clone(), manifest.layers.clone())
             .await?;
         for (layer_index, history) in config.history.iter().enumerate() {
             let empty = history.empty_layer.unwrap_or_default();
@@ -723,6 +741,12 @@ impl DockerClient {
 
 pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyzeResult> {
     let c = DockerClient::new(&image_info.registry);
-    c.analyze(&image_info.user, &image_info.name, &image_info.tag)
-        .await
+    c.analyze(&mut DockerImageParams {
+        user: image_info.user,
+        img: image_info.name,
+        tag: image_info.tag,
+        arch: image_info.arch,
+        ..Default::default()
+    })
+    .await
 }

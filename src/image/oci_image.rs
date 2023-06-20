@@ -67,13 +67,16 @@ pub struct ImageIndex {
 
 impl ImageIndex {
     // 返回匹配manifest，如果无则返回第一个
-    pub fn guess_manifest(&self) -> ImageIndexManifest {
+    pub fn guess_manifest(&self, arch: &str) -> ImageIndexManifest {
         let os = "linux";
         let mut os_match_manifests = vec![];
-        let mut architecture = "amd64";
-        let arch = std::env::consts::ARCH;
-        if arch.contains("arm") || arch.contains("aarch64") {
-            architecture = "arm64"
+        let mut architecture = arch.to_string();
+        if architecture.is_empty() {
+            architecture = "amd64".to_string();
+            let arch = std::env::consts::ARCH;
+            if arch.contains("arm") || arch.contains("aarch64") {
+                architecture = "arm64".to_string()
+            }
         }
         for item in &self.manifests {
             if item.platform.os != os {

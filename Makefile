@@ -10,7 +10,7 @@ build-web:
 	&& cp -rf dist ../
 
 dev:
-	cargo run -- redis:alpine
+	cargo run -- redis:alpine?arch=arm64
 dev-web:
 	cargo watch -w src -x 'run -- --mode=web'
 
