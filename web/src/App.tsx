@@ -22,6 +22,7 @@ import i18nGet from "./i18n";
 
 import "./App.css";
 
+const { Option } = Select;
 const { defaultAlgorithm, darkAlgorithm } = theme;
 const { Header, Content } = Layout;
 const { Search } = Input;
@@ -435,19 +436,22 @@ interface AppState {
   fileTreeViewOption: FileTreeViewOption;
   wastedList: FileWastedSummary[];
   imageName: string;
+  arch: string;
   latestAnalyzeImages: string[];
 }
 interface App {
   state: AppState;
 }
+const defaultArch = "amd64";
 
 class App extends Component {
   constructor(props: any) {
     super(props);
     const urlInfo = new URL(window.location.href);
-    const image = urlInfo.searchParams.get("image");
+    const image = urlInfo.searchParams.get("image") || "";
+    const arch = urlInfo.searchParams.get("arch") || defaultArch;
     this.state = {
-      defaultImage: image || "",
+      defaultImage: image,
       gotResult: false,
       loading: false,
       imageDescriptions: {} as ImageDescriptions,
@@ -457,6 +461,7 @@ class App extends Component {
       fileTreeViewOption: {} as FileTreeViewOption,
       wastedList: [],
       imageName: "",
+      arch,
       latestAnalyzeImages: [],
     };
   }
@@ -476,17 +481,19 @@ class App extends Component {
     if (!image) {
       return;
     }
-    const url = `/?image=${image}`;
+    const { arch } = this.state;
+    const url = `/?image=${image}&arch=${arch}`;
     if (window.location.href !== url) {
       window.history.pushState(null, "", url);
     }
+
     this.setState({
       imageName: image,
       loading: true,
     });
     try {
       const { data } = await axios.get<ImageAnalyzeResult>(
-        `/api/analyze?image=${image}`
+        `/api/analyze?image=${image}?arch=${arch}`
       );
       // 为每个file tree item增加key
       data.fileTreeList.forEach((fileTree) => {
@@ -529,7 +536,7 @@ class App extends Component {
       fileTreeList,
       fileTreeViewOption,
       wastedList,
-      imageName,
+      arch,
       latestAnalyzeImages,
     } = this.state;
     const onToggleExpand = (key: string) => {
@@ -777,15 +784,31 @@ class App extends Component {
       );
     };
     const getSearchView = () => {
+      const size = "large";
+      const selectBefore = (
+        <Select
+          size={size}
+          defaultValue={arch}
+          onChange={(value) => {
+            this.setState({
+              arch: value,
+            });
+          }}
+        >
+          <Option value="amd64">amd64</Option>
+          <Option value="arm64">arm64</Option>
+        </Select>
+      );
       return (
         <Search
+          addonBefore={selectBefore}
           defaultValue={defaultImage}
           autoFocus={true}
           loading={loading}
           placeholder={i18nGet("imageInputPlaceholder")}
           allowClear
           enterButton={i18nGet("analyzeButton")}
-          size="large"
+          size={size}
           onSearch={this.onSearch.bind(this)}
         />
       );
@@ -812,7 +835,10 @@ class App extends Component {
                 <a
                   href="#"
                   onClick={(e) => {
-                    window.location.href = `/?image=${item}`;
+                    const arr = item.split("?");
+                    const image = arr[0];
+                    const arch = arr[1] || defaultArch;
+                    window.location.href = `/?image=${image}&arch=${arch}`;
                     e.preventDefault();
                   }}
                 >

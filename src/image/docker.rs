@@ -463,7 +463,8 @@ impl DockerClient {
         // 根据tag获取manifest
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
         // 如果缓存中有，直接读取缓存
-        if let Some(manifest) = get_manifest_from_cache(&url) {
+        let key = format!("{url}:{}", params.arch);
+        if let Some(manifest) = get_manifest_from_cache(&key) {
             return Ok(manifest);
         }
         tl_info!(url = url, "Getting manifest");
@@ -488,6 +489,7 @@ impl DockerClient {
             let manifest = serde_json::from_slice::<ImageIndex>(&data)
                 .context(SerdeJsonSnafu {})?
                 .guess_manifest(&params.arch);
+            tl_info!(arch = manifest.platform.architecture, "guess manifest");
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -503,7 +505,7 @@ impl DockerClient {
         };
         // 暂时有效期全部设置为5分钟
         // 后续考虑是否根据tag使用不同有效期
-        set_manifest_to_cache(&url, resp.clone(), 5 * 60);
+        set_manifest_to_cache(&key, resp.clone(), 5 * 60);
         tl_info!(url = url, "Got manifest");
         Ok(resp)
     }
