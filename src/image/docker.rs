@@ -412,7 +412,7 @@ impl DockerClient {
             .build()
             .context(BuildSnafu { url: url.clone() })?
             .get(url.clone());
-        builder = builder.timeout(Duration::from_secs(5 * 60));
+        builder = builder.timeout(Duration::from_secs(30 * 60));
         for (key, value) in headers {
             builder = builder.header(key, value);
         }

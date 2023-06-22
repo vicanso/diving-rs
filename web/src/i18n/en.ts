@@ -10,7 +10,7 @@ export default {
   imageSizeLabel: "Image Size",
   otherLayerSizeLabel: "Other Layer Size",
   wastedSizeLabel: "Wasted Size",
-  architectureLabel: "Architecture",
+  osArchLabel: "OS/ARCH",
   layerContentTitle: "Layer Content",
   permissionLabel: "Permission",
   sizeLabel: "Size",

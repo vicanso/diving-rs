@@ -8,7 +8,7 @@ export default {
   imageSizeLabel: "镜像大小",
   otherLayerSizeLabel: "其它层总大小(不包括第一层)",
   wastedSizeLabel: "浪费的空间大小",
-  architectureLabel: "镜像架构",
+  osArchLabel: "系统/架构",
   layerContentTitle: "分层数据内容",
   permissionLabel: "权限",
   sizeLabel: "大小",

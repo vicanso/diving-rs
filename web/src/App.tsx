@@ -31,6 +31,7 @@ const { Paragraph } = Typography;
 interface ImageAnalyzeResult {
   name: string;
   arch: string;
+  os: string;
   layers: Layer[];
   size: number;
   totalSize: number;
@@ -234,7 +235,7 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     size: `${prettyBytes(result.totalSize)} / ${prettyBytes(result.size)}`,
     otherSize: prettyBytes(otherLayerSize),
     wastedSize: prettyBytes(wastedSize),
-    architecture: result.arch,
+    osArch: `${result.os}/${result.arch}`,
   };
   return {
     wastedList,
@@ -426,7 +427,7 @@ interface ImageDescriptions {
   size: string;
   otherSize: string;
   wastedSize: string;
-  architecture: string;
+  osArch: string;
 }
 interface AppState {
   gotResult: boolean;
@@ -494,7 +495,10 @@ class App extends Component {
     });
     try {
       const { data } = await axios.get<ImageAnalyzeResult>(
-        `/api/analyze?image=${image}?arch=${arch}`
+        `/api/analyze?image=${image}?arch=${arch}`,
+        {
+          timeout: 10 * 60,
+        }
       );
       // 为每个file tree item增加key
       data.fileTreeList.forEach((fileTree) => {
@@ -576,8 +580,8 @@ class App extends Component {
           <Descriptions.Item label={i18nGet("wastedSizeLabel")}>
             {imageDescriptions["wastedSize"]}
           </Descriptions.Item>
-          <Descriptions.Item label={i18nGet("architectureLabel")}>
-            {imageDescriptions["architecture"].toUpperCase()}
+          <Descriptions.Item label={i18nGet("osArchLabel")}>
+            {imageDescriptions["osArch"]}
           </Descriptions.Item>
         </Descriptions>
       );

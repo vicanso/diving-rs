@@ -26,6 +26,7 @@ mod util;
 struct WidgetState {
     name: String,
     arch: String,
+    os: String,
     active_list: Vec<String>,
     // 选中的区域
     active: String,
@@ -128,6 +129,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let mut state = WidgetState {
         name: result.name,
         arch: result.arch,
+        os: result.os,
         layers: result.layers,
         selected_layer: 0,
         file_tree_list: result.file_tree_list,
@@ -216,6 +218,7 @@ fn draw_widgets<B: Backend>(f: &mut Frame<B>, state: &mut WidgetState) {
     let image_detail_widget = image_detail::new_image_detail_widget(ImageDetailWidgetOption {
         name: state.name.clone(),
         arch: state.arch.clone(),
+        os: state.os.clone(),
         total_size: state.total_size,
         size: state.size,
         file_summary_list: state.file_summary_list.clone(),
