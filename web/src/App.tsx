@@ -30,6 +30,7 @@ const { Paragraph } = Typography;
 
 interface ImageAnalyzeResult {
   name: string;
+  arch: string;
   layers: Layer[];
   size: number;
   totalSize: number;
@@ -233,6 +234,7 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     size: `${prettyBytes(result.totalSize)} / ${prettyBytes(result.size)}`,
     otherSize: prettyBytes(otherLayerSize),
     wastedSize: prettyBytes(wastedSize),
+    architecture: result.arch,
   };
   return {
     wastedList,
@@ -424,9 +426,9 @@ interface ImageDescriptions {
   size: string;
   otherSize: string;
   wastedSize: string;
+  architecture: string;
 }
 interface AppState {
-  defaultImage: string;
   gotResult: boolean;
   loading: boolean;
   imageDescriptions: ImageDescriptions;
@@ -451,7 +453,6 @@ class App extends Component {
     const image = urlInfo.searchParams.get("image") || "";
     const arch = urlInfo.searchParams.get("arch") || defaultArch;
     this.state = {
-      defaultImage: image,
       gotResult: false,
       loading: false,
       imageDescriptions: {} as ImageDescriptions,
@@ -460,14 +461,14 @@ class App extends Component {
       fileTreeList: [],
       fileTreeViewOption: {} as FileTreeViewOption,
       wastedList: [],
-      imageName: "",
+      imageName: image,
       arch,
       latestAnalyzeImages: [],
     };
   }
   async componentDidMount() {
-    if (this.state.defaultImage) {
-      this.onSearch(this.state.defaultImage);
+    if (this.state.imageName) {
+      this.onSearch(this.state.imageName);
     }
     const { data } = await axios.get<string[]>("/api/latest-images", {
       timeout: 5 * 1000,
@@ -527,7 +528,7 @@ class App extends Component {
   }
   render(): ReactNode {
     const {
-      defaultImage,
+      imageName,
       gotResult,
       loading,
       imageDescriptions,
@@ -574,6 +575,9 @@ class App extends Component {
           </Descriptions.Item>
           <Descriptions.Item label={i18nGet("wastedSizeLabel")}>
             {imageDescriptions["wastedSize"]}
+          </Descriptions.Item>
+          <Descriptions.Item label={i18nGet("architectureLabel")}>
+            {imageDescriptions["architecture"].toUpperCase()}
           </Descriptions.Item>
         </Descriptions>
       );
@@ -789,20 +793,23 @@ class App extends Component {
         <Select
           size={size}
           defaultValue={arch}
+          style={{
+            width: "100px",
+          }}
           onChange={(value) => {
             this.setState({
               arch: value,
             });
           }}
         >
-          <Option value="amd64">amd64</Option>
-          <Option value="arm64">arm64</Option>
+          <Option value="amd64">AMD64</Option>
+          <Option value="arm64">ARM64</Option>
         </Select>
       );
       return (
         <Search
           addonBefore={selectBefore}
-          defaultValue={defaultImage}
+          defaultValue={imageName}
           autoFocus={true}
           loading={loading}
           placeholder={i18nGet("imageInputPlaceholder")}
