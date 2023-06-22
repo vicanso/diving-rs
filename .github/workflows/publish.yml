@@ -73,12 +73,13 @@ jobs:
         with:
           image: messense/rust-musl-cross:x86_64-musl
           options: -v ${{ github.workspace }}:/home/rust/src
-          run: make release
+          run: |
+            make release
+            mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86
       # - name: release
       #   run: make release
       - name: Upload Assets
         run: |
-          mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86
           ./.github/workflows/upload_asset.sh ./diving-linux-x86 $GITHUB_TOKEN
 
   # linux-aarch64:
