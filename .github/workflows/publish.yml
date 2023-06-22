@@ -58,7 +58,6 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
-    container: messense/rust-musl-cross:x86_64-musl
 
     steps:
       - uses: actions/checkout@v3
@@ -70,7 +69,13 @@ jobs:
       - name: build-web
         run: make build-web
       - name: release
-        run: make release
+        uses: addnab/docker-run-action@v3
+        with:
+          image: messense/rust-musl-cross:x86_64-musl
+          options: -v ${{ github.workspace }}:/home/rust/src
+          run: make release
+      # - name: release
+      #   run: make release
       - name: Upload Assets
         run: |
           mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86
