@@ -15,6 +15,7 @@ pub struct ImageDetailWidget<'a> {
 
 pub struct ImageDetailWidgetOption {
     pub name: String,
+    pub arch: String,
     pub total_size: u64,
     pub size: u64,
     pub file_summary_list: Vec<ImageFileSummary>,
@@ -63,13 +64,17 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
     // 生成浪费空间的文件列表
     let space_span = Span::from("   ");
     let headers = vec!["Count", "Total Space", "Path"];
+    let mut name = opt.name;
+    if !opt.arch.is_empty() {
+        name += &format!("({})", opt.arch);
+    }
     let mut spans_list = vec![
         Spans::from(vec![
             Span::styled(
                 "Image name: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::from(opt.name),
+            Span::from(name),
         ]),
         Spans::from(vec![
             Span::styled(

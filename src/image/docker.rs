@@ -91,7 +91,7 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut arch = "".to_string();
     if let Some(index) = value.find('?') {
         let query = value.substring(index + 1, value.len());
-        for item in query.split('&').into_iter() {
+        for item in query.split('&') {
             let arr: Vec<&str> = item.split('=').collect();
             if arr.len() == 2 && arr[0] == "arch" {
                 arch = arr[1].to_string();
@@ -185,6 +185,10 @@ pub struct ImageManifestCacheInfo {
 pub struct DockerAnalyzeResult {
     // 镜像名称
     pub name: String,
+    // 架构
+    pub arch: String,
+    // 系统
+    pub os: String,
     // 镜像分层数据
     pub layers: Vec<ImageLayer>,
     // 镜像大小
@@ -732,6 +736,8 @@ impl DockerClient {
 
         Ok(DockerAnalyzeResult {
             name: format!("{user}/{img}:{tag}"),
+            arch: config.architecture,
+            os: config.os,
             layers,
             size: image_size,
             total_size: image_total_size,
