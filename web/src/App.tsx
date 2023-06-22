@@ -494,8 +494,11 @@ class App extends Component {
       loading: true,
     });
     try {
-      const { data } = await axios.get<ImageAnalyzeResult>(
-        `/api/analyze?image=${image}?arch=${arch}`,
+      let url = `/api/analyze?image=${image}`;
+      if (!image.startsWith("file://") && arch) {
+        url += `?arch=${arch}`;
+      }
+      const { data } = await axios.get<ImageAnalyzeResult>(url,
         {
           timeout: 10 * 60 * 1000,
         }
