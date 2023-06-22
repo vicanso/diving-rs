@@ -497,7 +497,7 @@ class App extends Component {
       const { data } = await axios.get<ImageAnalyzeResult>(
         `/api/analyze?image=${image}?arch=${arch}`,
         {
-          timeout: 10 * 60,
+          timeout: 10 * 60 * 1000,
         }
       );
       // 为每个file tree item增加key
