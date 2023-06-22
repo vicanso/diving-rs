@@ -36,6 +36,9 @@ struct Args {
     #[arg(short, long, default_value = "terminal")]
     mode: String,
     image: Option<String>,
+    /// The listen addr of web mode
+    #[arg(short, long, default_value = "0.0.0.0:7001")]
+    listen: String,
 }
 
 impl Args {
@@ -120,7 +123,7 @@ async fn run() {
             // 后面的layer先执行
             .layer(from_fn(access_log))
             .layer(from_fn(entry));
-        let addr = "0.0.0.0:7001".parse().unwrap();
+        let addr = args.listen.parse().unwrap();
         info!("listening on http://{addr}");
         axum::Server::bind(&addr)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
