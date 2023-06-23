@@ -36,6 +36,7 @@ serde_repr = "0.1.10"
 snafu = "0.7.4"
 substring = "1.4.5"
 tar = "0.4.38"
+tempfile = "3.6.0"
 time = "0.3.22"
 tokio = { version = "1.28.2", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "fs"] }
 tokio-cron-scheduler = "0.9.4"

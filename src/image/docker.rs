@@ -8,6 +8,8 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 use substring::Substring;
 
@@ -26,6 +28,8 @@ use crate::{
 
 #[derive(Debug, Snafu)]
 pub enum Error {
+    #[snafu(display("IO fail: {source}"))]
+    IO { source: std::io::Error },
     #[snafu(display("Build request {} fail: {}", url, source))]
     Build { source: reqwest::Error, url: String },
     #[snafu(display("Request {} fail: {}", url, source))]
@@ -62,6 +66,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 static REGISTRY: &str = "https://index.docker.io/v2";
 
 static REGISTRY_LOCAL_FILE: &str = "local-file";
+static REGISTRY_LOCAL_DOCKER: &str = "local-docker";
 
 #[derive(Debug, Clone, Default)]
 pub struct ImageInfo {
@@ -78,6 +83,7 @@ pub struct ImageInfo {
 }
 
 static FILE_PROTOCOL: &str = "file://";
+static LOCAL_DOCKER_PROTOCOL: &str = "docker://";
 
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
@@ -85,6 +91,13 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
         return ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
             name: value.replace(FILE_PROTOCOL, ""),
+            ..Default::default()
+        };
+    }
+    if value.starts_with(LOCAL_DOCKER_PROTOCOL) {
+        return ImageInfo {
+            registry: REGISTRY_LOCAL_DOCKER.to_string(),
+            name: value.replace(LOCAL_DOCKER_PROTOCOL, ""),
             ..Default::default()
         };
     }
@@ -380,6 +393,26 @@ pub struct DockerImageParams {
     pub arch: String,
 }
 
+fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
+    tl_info!(image = image, "saving image");
+    let docker_save = Command::new("docker")
+        .arg("save")
+        .arg(image)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|err| Error::IO { source: err })?;
+    let output = docker_save
+        .wait_with_output()
+        .map_err(|err| Error::IO { source: err })?;
+    if !output.status.success() {
+        return Err(Error::Whatever {
+            message: "docker save fail".to_string(),
+        });
+    }
+    tl_info!(image = image, "save image done");
+    Ok(output.stdout)
+}
+
 impl DockerClient {
     pub fn new(register: &str) -> Self {
         DockerClient {
@@ -471,7 +504,7 @@ impl DockerClient {
         if let Some(manifest) = get_manifest_from_cache(&key) {
             return Ok(manifest);
         }
-        tl_info!(url = url, "Getting manifest");
+        tl_info!(url = url, "getting manifest");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -510,7 +543,7 @@ impl DockerClient {
         // 暂时有效期全部设置为5分钟
         // 后续考虑是否根据tag使用不同有效期
         set_manifest_to_cache(&key, resp.clone(), 5 * 60);
-        tl_info!(url = url, "Got manifest");
+        tl_info!(url = url, "got manifest");
         Ok(resp)
     }
     // 获取镜像的信息
@@ -541,7 +574,7 @@ impl DockerClient {
         let img = &params.img;
         let token = &params.token;
         let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
-        tl_info!(url = url, "Getting blob");
+        tl_info!(url = url, "getting blob");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -551,7 +584,7 @@ impl DockerClient {
         // 出错忽略
         // 写入数据失败不影响后续
         let _ = save_blob_to_file(digest, &resp).await;
-        tl_info!(url = url, "Got blob");
+        tl_info!(url = url, "got blob");
         Ok(resp.to_vec())
     }
     async fn get_layer_files(
@@ -645,7 +678,7 @@ impl DockerClient {
                         return Ok(info.token);
                     }
                 }
-                tl_info!(url = url, "Getting token");
+                tl_info!(url = url, "getting token");
                 let mut resp = self
                     .get::<DockerTokenInfo>(url.clone(), HashMap::new())
                     .await?;
@@ -654,7 +687,7 @@ impl DockerClient {
                 }
                 // 将token缓存，方便后续使用
                 set_docker_token_to_cache(key, resp.clone());
-                tl_info!(url = url, "Got token");
+                tl_info!(url = url, "got token");
                 return Ok(resp.token);
             }
         }
@@ -748,13 +781,30 @@ impl DockerClient {
 }
 
 pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyzeResult> {
-    let c = DockerClient::new(&image_info.registry);
-    c.analyze(&mut DockerImageParams {
-        user: image_info.user,
-        img: image_info.name,
-        tag: image_info.tag,
-        arch: image_info.arch,
-        ..Default::default()
-    })
-    .await
+    if image_info.registry == REGISTRY_LOCAL_DOCKER {
+        let buf = get_buf_from_local_docker(&image_info.name)?;
+        let mut tmpfile = tempfile::Builder::new().tempfile().unwrap();
+        let filename = tmpfile.path().to_string_lossy().to_string();
+        tl_info!("saving tmp file");
+        tmpfile.write_all(&buf).context(IOSnafu {})?;
+        tmpfile.flush().context(IOSnafu {})?;
+        tl_info!("save tmp file done");
+
+        let c = DockerClient::new(REGISTRY_LOCAL_FILE);
+        c.analyze(&mut DockerImageParams {
+            img: filename,
+            ..Default::default()
+        })
+        .await
+    } else {
+        let c = DockerClient::new(&image_info.registry);
+        c.analyze(&mut DockerImageParams {
+            user: image_info.user,
+            img: image_info.name,
+            tag: image_info.tag,
+            arch: image_info.arch,
+            ..Default::default()
+        })
+        .await
+    }
 }

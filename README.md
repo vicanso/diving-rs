@@ -19,12 +19,20 @@ The config file is `~/.diving/config.yml`, the options:
 
 ## terminal
 
+Mirror data supports three data source modes. The specific form is as follows:
+
+- `registry` get image form docker registry or other register
+- `docker` get image from local docker client
+- `file` get image for tar file
+
 ```bash
 diving redis:alpine
 
-diving file:///tmp/redis.tar
-
 diving quay.io/prometheus/node-exporter
+
+diving docker://redis:alpine
+
+diving file:///tmp/redis.tar
 ```
 
 - `Current Layer Contents` only show the files of current layer

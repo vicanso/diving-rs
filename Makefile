@@ -13,6 +13,8 @@ dev:
 	cargo run -- redis:alpine?arch=amd64
 dev-web:
 	cargo watch -w src -x 'run -- --mode=web'
+dev-docker:
+	cargo run -- docker://redis:alpine
 
 udeps:
 	cargo +nightly udeps
