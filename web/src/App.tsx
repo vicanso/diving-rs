@@ -495,14 +495,12 @@ class App extends Component {
     });
     try {
       let url = `/api/analyze?image=${image}`;
-      if (!image.startsWith("file://") && arch) {
+      if (!/^(file|docker):\/\//.test(image) && arch) {
         url += `?arch=${arch}`;
       }
-      const { data } = await axios.get<ImageAnalyzeResult>(url,
-        {
-          timeout: 10 * 60 * 1000,
-        }
-      );
+      const { data } = await axios.get<ImageAnalyzeResult>(url, {
+        timeout: 10 * 60 * 1000,
+      });
       // 为每个file tree item增加key
       data.fileTreeList.forEach((fileTree) => {
         addKeyToFileTreeItem(fileTree, "");

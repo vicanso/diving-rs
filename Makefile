@@ -6,7 +6,7 @@ fmt:
 
 build-web:
 	cd web \
-	&& yarn install && yarn build \
+	&& yarn install --network-timeout 600000 && yarn build \
 	&& cp -rf dist ../
 
 dev:
