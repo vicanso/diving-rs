@@ -35,6 +35,6 @@ WORKDIR /home/rust
 
 HEALTHCHECK --timeout=10s --interval=10s CMD [ "wget", "http://127.0.0.1:7001/ping", "-q", "-O", "-"]
 
-CMD ["diving", "--mode", "web"]
+CMD ["diving", "--mode", "web", "--listen", "0.0.0.0:7001"]
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -37,7 +37,7 @@ struct Args {
     mode: String,
     image: Option<String>,
     /// The listen addr of web mode
-    #[arg(short, long, default_value = "0.0.0.0:7001")]
+    #[arg(short, long, default_value = "127.0.0.1:7001")]
     listen: String,
 }
 
