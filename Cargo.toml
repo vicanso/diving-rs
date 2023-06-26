@@ -11,7 +11,7 @@ axum-client-ip = "0.4.1"
 bytes = "1.4.0"
 bytesize = "1.2.0"
 chrono = "0.4.26"
-clap = { version = "4.3.5", features = ["derive"] }
+clap = { version = "4.3.8", features = ["derive"] }
 config = "0.13.3"
 crossterm = "0.26.1"
 futures = "0.3.28"
@@ -31,8 +31,10 @@ regex = "1.8.4"
 reqwest = { version = "0.11.18", default-features = false, features = ["rustls-tls", "json"] }
 rust-embed = { version = "6.7.0", features = ["compression", "mime-guess"] }
 serde = { version = "1.0.164", features = ["derive"] }
-serde_json = "1.0.97"
+serde_json = "1.0.99"
 serde_repr = "0.1.10"
+signal-hook = "0.3.15"
+signal-hook-registry = "1.4.1"
 snafu = "0.7.4"
 substring = "1.4.5"
 tar = "0.4.38"

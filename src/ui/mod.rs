@@ -1,8 +1,14 @@
+use self::image_detail::ImageDetailWidgetOption;
+use crate::image::{DockerAnalyzeResult, FileTreeItem, ImageFileSummary, ImageLayer};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use std::process;
+use std::process::Command;
+use std::sync::atomic;
+use std::sync::mpsc::sync_channel;
 use std::{error::Error, io};
 use tui::{
     backend::Backend,
@@ -11,10 +17,6 @@ use tui::{
     widgets::ListState,
     Frame, Terminal,
 };
-
-use crate::image::{DockerAnalyzeResult, FileTreeItem, ImageFileSummary, ImageLayer};
-
-use self::image_detail::ImageDetailWidgetOption;
 
 mod files;
 mod image_detail;
@@ -125,6 +127,8 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let hidden = atomic::AtomicBool::default();
+
     // create app and run it
     let mut state = WidgetState {
         name: result.name,
@@ -141,11 +145,50 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         active: LAYERS_WIDGET.to_string(),
         ..Default::default()
     };
+    let (tx, rx) = sync_channel(1);
+
+    let signal = unsafe {
+        signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
+            // 事件触发失败则直接退出
+            // 因此使用unwrap
+            tx.send(true).unwrap();
+        })
+    }?;
+
     loop {
+        if hidden.load(atomic::Ordering::Relaxed) {
+            // 等待fg事件，出错直接退出
+            // 因此使用unwrap
+            rx.recv().unwrap();
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.hide_cursor()?;
+            hidden.store(false, atomic::Ordering::Relaxed);
+            terminal.clear()?;
+        }
         terminal.draw(|f| draw_widgets(f, &mut state))?;
 
         if let Event::Key(key) = event::read()? {
             match key.code {
+                // make dev的形式下不可用
+                // suspend
+                KeyCode::Char('z') => {
+                    // 只针对类unix系统
+                    if cfg!(unix) && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        hidden.store(true, atomic::Ordering::Relaxed);
+
+                        disable_raw_mode()?;
+                        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                        terminal.show_cursor()?;
+
+                        let mut kill = Command::new("kill")
+                            .args(["-s", "STOP", &process::id().to_string()])
+                            .spawn()?;
+                        kill.wait()?;
+
+                        continue;
+                    }
+                }
                 // 退出
                 KeyCode::Char('c') => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -176,7 +219,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-
+    signal_hook_registry::unregister(signal);
     Ok(())
 }
 
