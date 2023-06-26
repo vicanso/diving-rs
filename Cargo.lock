@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "diving"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "axum",
  "axum-client-ip",
