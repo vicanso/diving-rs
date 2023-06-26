@@ -445,14 +445,18 @@ interface AppState {
 interface App {
   state: AppState;
 }
-const defaultArch = "amd64";
+const amd64Arch = "amd64";
+const arm64Arch = "arm64";
 
 class App extends Component {
   constructor(props: any) {
     super(props);
     const urlInfo = new URL(window.location.href);
     const image = urlInfo.searchParams.get("image") || "";
-    const arch = urlInfo.searchParams.get("arch") || defaultArch;
+    let arch = urlInfo.searchParams.get("arch") || amd64Arch;
+    if ([amd64Arch, arm64Arch].indexOf(arch) === -1) {
+      arch = amd64Arch;
+    }
     this.state = {
       gotResult: false,
       loading: false,
@@ -849,7 +853,13 @@ class App extends Component {
                   onClick={(e) => {
                     const arr = item.split("?");
                     const image = arr[0];
-                    const arch = arr[1] || defaultArch;
+                    let arch = amd64Arch;
+                    if (arr[1]) {
+                      const result = /arch=(\S+)/.exec(arr[1]);
+                      if (result && result.length === 2) {
+                        arch = result[1];
+                      }
+                    }
                     window.location.href = `/?image=${image}&arch=${arch}`;
                     e.preventDefault();
                   }}
