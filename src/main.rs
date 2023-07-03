@@ -9,6 +9,7 @@ use tower::ServiceBuilder;
 use tracing::Level;
 use tracing::{error, info};
 use tracing_subscriber::FmtSubscriber;
+use human_panic::setup_panic;
 
 mod config;
 mod controller;
@@ -162,7 +163,7 @@ async fn shutdown_signal() {
 fn main() {
     // Because we need to get the local offset before Tokio spawns any threads, our `main`
     // function cannot use `tokio::main`.
-
+    setup_panic!();
     init_logger();
     run();
 }
