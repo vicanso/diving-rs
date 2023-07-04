@@ -29,6 +29,8 @@ RUN addgroup -g 1000 rust \
 COPY --from=builder /diving-rs/target/release/diving /usr/local/bin/diving
 COPY --from=builder /diving-rs/entrypoint.sh /entrypoint.sh
 
+ENV RUST_ENV=production
+
 USER rust
 
 WORKDIR /home/rust

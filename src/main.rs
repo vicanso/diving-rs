@@ -1,5 +1,6 @@
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
 use clap::Parser;
+use human_panic::setup_panic;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
@@ -9,7 +10,6 @@ use tower::ServiceBuilder;
 use tracing::Level;
 use tracing::{error, info};
 use tracing_subscriber::FmtSubscriber;
-use human_panic::setup_panic;
 
 mod config;
 mod controller;
@@ -61,10 +61,11 @@ fn init_logger() {
             time::format_description::well_known::Rfc3339,
         )
     });
-
+    let env = std::env::var("RUST_ENV").unwrap_or_default();
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_timer(timer)
+        .with_ansi(env != "production")
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
