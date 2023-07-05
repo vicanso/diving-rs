@@ -1,0 +1,27 @@
+name: "publish"
+on:
+  push:
+    # tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    branches: [ main ]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: build-web
+        run: make build-web
+      - name: release
+        run: make release
