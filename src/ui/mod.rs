@@ -146,17 +146,16 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         ..Default::default()
     };
     let (tx, rx) = sync_channel(1);
-    let signal = if cfg!(unix) {
-        Some(unsafe {
-            signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
-                // 事件触发失败则直接退出
-                // 因此使用unwrap
-                tx.send(true).unwrap();
-            })
-        }?)
-    } else {
-        None
-    };
+    #[cfg(not(windows))]
+    let signal = Some(unsafe {
+        signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
+            // 事件触发失败则直接退出
+            // 因此使用unwrap
+            tx.send(true).unwrap();
+        })
+    }?);
+    #[cfg(windows)]
+    let signal = None;
 
     loop {
         if hidden.load(atomic::Ordering::Relaxed) {
