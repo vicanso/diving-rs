@@ -145,7 +145,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         active: LAYERS_WIDGET.to_string(),
         ..Default::default()
     };
-    let (tx, rx) = sync_channel(1);
+    let (tx, rx) = sync_channel::<bool>(1);
     #[cfg(not(windows))]
     let signal = Some(unsafe {
         signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
