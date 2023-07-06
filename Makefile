@@ -20,7 +20,6 @@ udeps:
 	cargo +nightly udeps
 
 release:
-	cargo check
 	cargo build --release
 	ls -lh target/release
 
