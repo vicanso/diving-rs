@@ -127,7 +127,6 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let hidden = atomic::AtomicBool::default();
 
     // create app and run it
     let mut state = WidgetState {
@@ -145,8 +144,9 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         active: LAYERS_WIDGET.to_string(),
         ..Default::default()
     };
-    let (tx, rx) = sync_channel::<bool>(1);
     #[cfg(not(windows))]
+    let hidden = atomic::AtomicBool::default();
+    let (tx, rx) = sync_channel(1);
     let signal = Some(unsafe {
         signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
             // 事件触发失败则直接退出
@@ -158,6 +158,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let signal = None;
 
     loop {
+        #[cfg(not(windows))]
         if hidden.load(atomic::Ordering::Relaxed) {
             // 等待fg事件，出错直接退出
             // 因此使用unwrap
@@ -176,7 +177,8 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
                 // suspend
                 KeyCode::Char('z') => {
                     // 只针对类unix系统
-                    if cfg!(unix) && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    #[cfg(not(windows))]
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
                         hidden.store(true, atomic::Ordering::Relaxed);
 
                         disable_raw_mode()?;
