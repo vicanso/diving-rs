@@ -236,6 +236,7 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     otherSize: prettyBytes(otherLayerSize),
     wastedSize: prettyBytes(wastedSize),
     osArch: `${result.os}/${result.arch}`,
+    created: result.layers[result.layers.length - 1].created,
   };
   return {
     wastedList,
@@ -428,6 +429,7 @@ interface ImageDescriptions {
   otherSize: string;
   wastedSize: string;
   osArch: string;
+  created: string;
 }
 interface AppState {
   gotResult: boolean;
@@ -588,6 +590,9 @@ class App extends Component {
           <Descriptions.Item label={i18nGet("osArchLabel")}>
             {imageDescriptions["osArch"]}
           </Descriptions.Item>
+          <Descriptions.Item label={i18nGet("createdLabel")}>
+            {new Date(imageDescriptions["created"]).toLocaleString()}
+          </Descriptions.Item>
         </Descriptions>
       );
       return <div className="imageSummary mtop30">{imageSummary}</div>;
@@ -733,11 +738,11 @@ class App extends Component {
           <Card className="command">
             <Space direction="vertical">
               <span>
-                <span className="bold">Created: </span>
+                <span className="bold">{i18nGet("createdLabel")}: </span>
                 {new Date(layerInfo.created).toLocaleString()}
               </span>
               <span>
-                <span className="bold">Command: </span>
+                <span className="bold">{i18nGet("commandLabel")}: </span>
                 {layerInfo.cmd}
               </span>
             </Space>

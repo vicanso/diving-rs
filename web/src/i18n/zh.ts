@@ -9,6 +9,8 @@ export default {
   otherLayerSizeLabel: "其它层总大小(不包括第一层)",
   wastedSizeLabel: "浪费的空间大小",
   osArchLabel: "系统/架构",
+  createdLabel: "创建于",
+  commandLabel: "命令",
   layerContentTitle: "分层数据内容",
   permissionLabel: "权限",
   sizeLabel: "大小",

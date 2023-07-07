@@ -11,6 +11,8 @@ export default {
   otherLayerSizeLabel: "Other Layer Size",
   wastedSizeLabel: "Wasted Size",
   osArchLabel: "OS/ARCH",
+  createdLabel: "Created",
+  commandLabel: "Command",
   layerContentTitle: "Layer Content",
   permissionLabel: "Permission",
   sizeLabel: "Size",
