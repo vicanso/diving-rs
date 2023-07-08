@@ -19,7 +19,7 @@ The config file is `~/.diving/config.yml`, the options:
 
 ## terminal
 
-Mirror data supports three data source modes. The specific form is as follows:
+Supports three data source modes analyze image. The specific form is as follows:
 
 - `registry` get image form docker registry or other register
 - `docker` get image from local docker client
