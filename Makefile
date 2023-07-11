@@ -24,6 +24,9 @@ udeps:
 bloat:
 	cargo bloat --release --crates
 
+outdated:
+	cargo outdated
+
 release:
 	cargo build --release
 	ls -lh target/release

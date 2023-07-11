@@ -38,8 +38,8 @@ pub enum Error {
     Json { source: reqwest::Error, url: String },
     #[snafu(display("Get {} bytes fail: {}", url, source))]
     Bytes { source: reqwest::Error, url: String },
-    #[snafu(display("Serde json fail: {}", source))]
-    SerdeJson { source: serde_json::Error },
+    #[snafu(display("Serde json {category} fail: {source}"))]
+    SerdeJson { source: serde_json::Error, category: String },
     #[snafu(display("Layer handle fail: {}", source))]
     Layer { source: super::layer::Error },
     #[snafu(display("Task fail: {}", source))]
@@ -306,7 +306,9 @@ struct DockerRequestError {
 }
 
 fn get_value_from_json(v: &[u8], key: &str) -> Result<String> {
-    let mut root: Value = serde_json::from_slice(v).context(SerdeJsonSnafu {})?;
+    let mut root: Value = serde_json::from_slice(v).context(SerdeJsonSnafu {
+        category: "get_from_json",
+    })?;
     for k in key.split('.') {
         let value = root.get(k);
         if value.is_none() {
@@ -428,7 +430,9 @@ impl DockerClient {
             .context(LayerSnafu {})?;
 
         let manifest_list =
-            serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {})?;
+            serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {
+                category: "get_local_manifest",
+            })?;
         if manifest_list.is_empty() {
             return Err(Error::Whatever {
                 message: "Local Manifest Not Found".to_string(),
@@ -474,7 +478,9 @@ impl DockerClient {
         headers: HashMap<String, String>,
     ) -> Result<T> {
         let data = self.get_bytes(url.clone(), headers).await?;
-        let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {})?;
+        let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {
+            category: "request"
+        })?;
         Ok(result)
     }
     // 获取manifest
@@ -521,10 +527,14 @@ impl DockerClient {
         let media_type = get_value_from_json(&data, "mediaType")?;
         let resp: ImageManifest = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
             // docker的版本则可直接返回
-            serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
+            serde_json::from_slice(&data).context(SerdeJsonSnafu {
+                category: "get_manifest_schema2",
+            })?
         } else {
             let manifest = serde_json::from_slice::<ImageIndex>(&data)
-                .context(SerdeJsonSnafu {})?
+                .context(SerdeJsonSnafu {
+                    category: "guess_manifest",
+                })?
                 .guess_manifest(&params.arch);
             tl_info!(arch = manifest.platform.architecture, "guess manifest");
             let mut headers = HashMap::new();
@@ -538,7 +548,9 @@ impl DockerClient {
                 self.registry, manifest.digest
             );
             let data = self.get_bytes(url.clone(), headers).await?;
-            serde_json::from_slice(&data).context(SerdeJsonSnafu {})?
+            serde_json::from_slice(&data).context(SerdeJsonSnafu {
+                category: "get_manifest",
+            })?
         };
         // 暂时有效期全部设置为5分钟
         // 后续考虑是否根据tag使用不同有效期
@@ -560,7 +572,9 @@ impl DockerClient {
             self.get_blob(params, &manifest.config.digest).await?
         };
 
-        let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {})?;
+        let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {
+            category: "get_image_config",
+        })?;
         Ok(result)
     }
     // 获取镜像分层的blob
