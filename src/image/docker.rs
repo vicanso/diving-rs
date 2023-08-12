@@ -39,7 +39,10 @@ pub enum Error {
     #[snafu(display("Get {} bytes fail: {}", url, source))]
     Bytes { source: reqwest::Error, url: String },
     #[snafu(display("Serde json {category} fail: {source}"))]
-    SerdeJson { source: serde_json::Error, category: String },
+    SerdeJson {
+        source: serde_json::Error,
+        category: String,
+    },
     #[snafu(display("Layer handle fail: {}", source))]
     Layer { source: super::layer::Error },
     #[snafu(display("Task fail: {}", source))]
@@ -479,7 +482,7 @@ impl DockerClient {
     ) -> Result<T> {
         let data = self.get_bytes(url.clone(), headers).await?;
         let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {
-            category: "request"
+            category: "request",
         })?;
         Ok(result)
     }
