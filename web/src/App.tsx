@@ -132,6 +132,9 @@ const getLogoIcon = (isDarkMode: boolean) => {
 };
 
 const getGithubIcon = (isDarkMode: boolean) => {
+  if (window.location.host.indexOf("diving") === -1) {
+    return;
+  }
   let color = `rgb(0, 0, 0)`;
   if (isDarkMode) {
     color = `rgb(255, 255, 255)`;
