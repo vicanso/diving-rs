@@ -92,25 +92,34 @@ async fn start_scheduler() {
     scheduler.start().await.unwrap();
 }
 
+// 分析镜像（错误直接以字符串返回）
+async fn analyze(image: String) -> Result<(), String> {
+    // 命令行模式下清除过期数据
+    clear_blob_files().await.map_err(|item| item.to_string())?;
+    let image_info = parse_image_info(&image);
+    let result = analyze_docker_image(image_info)
+        .await
+        .map_err(|item| item.to_string())?;
+    ui::run_app(result).map_err(|item| item.to_string())?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn run() {
     // 启动时确保可以读取配置
     config::must_load_config();
     let args = Args::parse();
     if args.is_terminal_type() {
-        // 命令行模式下清除过期数据
-        clear_blob_files().await.unwrap();
-        if args.image.is_none() {
-            panic!("image cat not be nil")
-        }
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    let image_info = parse_image_info(&value);
-                    let result = analyze_docker_image(image_info).await.unwrap();
-                    ui::run_app(result).unwrap();
+                    if let Err(err) = analyze(value).await {
+                        error!(err, "analyze image fail")
+                    }
                 })
                 .await;
+        } else {
+            error!("image can not be nil")
         }
     } else {
         start_scheduler().await;
@@ -144,6 +153,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
+        // TODO 后续有需要可在此设置ping的状态
         signal::unix::signal(signal::unix::SignalKind::terminate())
             .expect("failed to install signal handler")
             .recv()

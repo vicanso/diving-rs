@@ -205,6 +205,12 @@ pub struct DockerAnalyzeResult {
     pub arch: String,
     // 系统
     pub os: String,
+    // 运行用户
+    pub user: String,
+    // 环境变量
+    pub envs: Vec<String>,
+    // 镜像label
+    pub labels: Vec<String>,
     // 镜像分层数据
     pub layers: Vec<ImageLayer>,
     // 镜像大小
@@ -783,11 +789,30 @@ impl DockerClient {
         }
 
         tl_info!(user = user, img = img, tag = tag, "analyze image done",);
+        let mut user = "".to_string();
+        let mut envs = vec![];
+        let mut labels = vec![];
+        if let Some(ref extra_info) = config.config {
+            if let Some(ref value) = extra_info.user {
+                user = value.to_string();    
+            }
+            if let Some(ref value) = extra_info.env {
+                envs = value.clone();
+            }
+            if let Some(ref value) = extra_info.labels {
+                for (k, v) in value.iter() {
+                    labels.push(format!("{k}={v}"));
+                }
+            }
+        }
 
         Ok(DockerAnalyzeResult {
             name: format!("{user}/{img}:{tag}"),
             arch: config.architecture,
             os: config.os,
+            user,
+            envs,
+            labels,
             layers,
             size: image_size,
             total_size: image_total_size,

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use std::collections::HashMap;
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
@@ -155,6 +156,17 @@ pub struct ImageManifestLayer {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImageExtraInfo {
+    #[serde(rename = "User")]
+    pub user: Option<String>,
+    #[serde(rename = "Env")]
+    pub env: Option<Vec<String>>,
+    #[serde(rename = "Labels")]
+    pub labels: Option<HashMap<String, String>>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageConfig {
     // 架构
     pub architecture: String,
@@ -164,6 +176,8 @@ pub struct ImageConfig {
     pub history: Vec<ImageHistory>,
     pub os: String,
     pub rootfs: ImageRootfs,
+    // 镜像信息(还有其它更多字段未读取)
+    pub config: Option<ImageExtraInfo>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
