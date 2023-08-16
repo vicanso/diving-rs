@@ -794,7 +794,7 @@ impl DockerClient {
         let mut labels = vec![];
         if let Some(ref extra_info) = config.config {
             if let Some(ref value) = extra_info.user {
-                user = value.to_string();    
+                user = value.to_string();
             }
             if let Some(ref value) = extra_info.env {
                 envs = value.clone();
