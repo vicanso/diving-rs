@@ -34,15 +34,15 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
 
     let paragraph = Paragraph::new(vec![
         Spans::from(Span::styled(
-            "Command:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Spans::from(cmd),
-        Spans::from(Span::styled(
             "Created:",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Spans::from(create_at),
+        Spans::from(Span::styled(
+            "Command:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Spans::from(cmd),
     ])
     .block(util::create_block(" Layer Details "))
     .alignment(Alignment::Left)
