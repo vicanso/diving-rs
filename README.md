@@ -21,7 +21,7 @@ The config file is `~/.diving/config.yml`, the options:
 
 Supports three data source modes analyze image. The specific form is as follows:
 
-- `registry` get image form docker registry or other register
+- `registry` get image form docker registry or other registry
 - `docker` get image from local docker client
 - `file` get image for tar file
 

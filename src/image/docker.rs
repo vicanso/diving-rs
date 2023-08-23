@@ -198,6 +198,14 @@ pub struct ImageManifestCacheInfo {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BigModifiedFileInfo {
+    pub path: String,
+    pub size: u64,
+    pub digest: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockerAnalyzeResult {
     // 镜像名称
     pub name: String,
@@ -221,6 +229,8 @@ pub struct DockerAnalyzeResult {
     pub file_tree_list: Vec<Vec<FileTreeItem>>,
     // 镜像删除与更新文件汇总
     pub file_summary_list: Vec<ImageFileSummary>,
+    // 本次镜像变化的大文件
+    pub big_modified_file_list: Vec<BigModifiedFileInfo>,
 }
 
 impl DockerTokenInfo {
@@ -737,7 +747,20 @@ impl DockerClient {
         let info_list = self
             .get_all_layer_info(params.clone(), manifest.layers.clone())
             .await?;
+        let mut image_created = 0;
+        if let Some(value) = config.history.last() {
+            if let Ok(value) = DateTime::parse_from_rfc3339(&value.created) {
+                image_created = value.timestamp();
+            }
+        }
+        let mut big_modified_file_list = vec![];
         for (layer_index, history) in config.history.iter().enumerate() {
+            let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
+                // 如果5分钟内
+                image_created - value.timestamp() < 300
+            } else {
+                false
+            };
             let empty = history.empty_layer.unwrap_or_default();
             let mut digest = "".to_string();
             let mut info = &ImageLayerInfo {
@@ -764,6 +787,18 @@ impl DockerClient {
                     }
                     image_size += info.size;
                     image_total_size += info.unpack_size;
+                    if is_new {
+                        for file in info.files.iter() {
+                            if file.size < 1000 * 1000 || !file.link.is_empty() {
+                                continue;
+                            }
+                            big_modified_file_list.push(BigModifiedFileInfo {
+                                path: file.path.clone(),
+                                size: file.size,
+                                digest: digest.clone(),
+                            });
+                        }
+                    }
                     // TODO 根据file summary判断文件是否更新或删除
                     file_tree = convert_files_to_file_tree(&info.files, &file_summary_list);
                 }
@@ -818,6 +853,7 @@ impl DockerClient {
             total_size: image_total_size,
             file_tree_list,
             file_summary_list,
+            big_modified_file_list,
         })
     }
 }

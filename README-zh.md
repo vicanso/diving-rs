@@ -17,7 +17,7 @@
 
 镜像数据支持三种数据源模式，具体形式如下：
 
-- `registry` 简写的形式为docker registry，私有或其它的register则使用完整地址
+- `registry` 简写的形式为docker registry，私有或其它的registry则使用完整地址
 - `docker` 基于本地安装了docker客户端的形式
 - `file` 基于本地导出的tar包
 
