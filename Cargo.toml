@@ -11,7 +11,7 @@ axum-client-ip = "0.4.1"
 bytes = "1.4.0"
 bytesize = "1.2.0"
 chrono = "0.4.26"
-clap = { version = "4.3.23", features = ["derive"] }
+clap = { version = "4.4.0", features = ["derive"] }
 config = "0.13.3"
 crossterm = "0.26.1"
 futures = "0.3.28"
@@ -19,7 +19,6 @@ glob = "0.3.1"
 hex = "0.4.3"
 home = "0.5.5"
 http = "0.2.9"
-human-panic = "1.1.5"
 humantime = "2.1.0"
 libflate = "1.4.0"
 lru = "0.10.1"
@@ -29,9 +28,9 @@ nanoid = "0.4.0"
 once_cell = "1.18.0"
 pad = "0.1.6"
 regex = "1.9.3"
-reqwest = { version = "0.11.19", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.11.20", default-features = false, features = ["rustls-tls", "json"] }
 rust-embed = { version = "6.8.1", features = ["compression", "mime-guess"] }
-serde = { version = "1.0.185", features = ["derive"] }
+serde = { version = "1.0.186", features = ["derive"] }
 serde_json = "1.0.105"
 serde_repr = "0.1.16"
 signal-hook = { version = "0.3.17", default-features = false }

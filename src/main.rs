@@ -1,6 +1,5 @@
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
 use clap::Parser;
-use human_panic::setup_panic;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
@@ -106,6 +105,7 @@ async fn analyze(image: String) -> Result<(), String> {
 
 #[tokio::main]
 async fn run() {
+    // TODO 增加panic的异常输出
     // 启动时确保可以读取配置
     config::must_load_config();
     let args = Args::parse();
@@ -174,7 +174,10 @@ async fn shutdown_signal() {
 fn main() {
     // Because we need to get the local offset before Tokio spawns any threads, our `main`
     // function cannot use `tokio::main`.
-    setup_panic!();
+    std::panic::set_hook(Box::new(|e| {
+        error!(category = "panic", message = e.to_string(),);
+        std::process::exit(1);
+    }));
     init_logger();
     run();
 }
