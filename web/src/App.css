@@ -135,6 +135,36 @@ ul.wastedList li {
   margin-right: 30px;
 }
 
+.bigModifiedFileList {
+  margin: 0;
+  padding: 0;
+}
+ul.bigModifiedFileList li:nth-child(odd) {
+  background-color: rgb(241, 245, 249);
+}
+ul.bigModifiedFileList.dark li:nth-child(odd) {
+  background-color: rgba(0, 0, 0, 0.6);
+}
+ul.bigModifiedFileList li {
+  list-style: none;
+  padding: 8px 10px;
+}
+.bigModifiedFileList li span {
+  display: inline-block;
+}
+.bigModifiedFileList li span {
+  display: inline-block;
+}
+.bigModifiedFileList li span:nth-child(1) {
+  text-align: right;
+  width: 80px;
+}
+.bigModifiedFileList li span:nth-child(2) {
+  text-align: right;
+  width: 120px;
+  margin-right: 30px;
+}
+
 .command {
   margin-bottom: 15px;
 }

@@ -26,4 +26,5 @@ export default {
   countLabel: "Count",
   pathLabel: "Path",
   latestAnalyzeImagesTitle: "Latest Analyze Images",
+  modifiedAddedLargeFileTitle: "Modified Or Add Large File",
 };

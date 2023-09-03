@@ -28,6 +28,12 @@ const { Header, Content } = Layout;
 const { Search } = Input;
 const { Paragraph } = Typography;
 
+interface ModifiedFile {
+  digest: string;
+  path: string;
+  size: number;
+}
+
 interface ImageAnalyzeResult {
   name: string;
   arch: string;
@@ -37,6 +43,7 @@ interface ImageAnalyzeResult {
   totalSize: number;
   fileTreeList: FileTreeList[][];
   fileSummaryList: FileSummaryList[];
+  bigModifiedFileList: ModifiedFile[];
 }
 
 interface Layer {
@@ -303,7 +310,7 @@ const addToFileTreeView = (
   list: JSX.Element[],
   items: FileTreeList[],
   isLastList: boolean[],
-  opt: FileTreeViewOption
+  opt: FileTreeViewOption,
 ) => {
   if (!items) {
     return 0;
@@ -400,7 +407,7 @@ const addToFileTreeView = (
           {name}
           {downloadIcon}
         </span>
-      </li>
+      </li>,
     );
     count++;
     if (item.children.length && shouldExpand(item.key)) {
@@ -412,7 +419,7 @@ const addToFileTreeView = (
         list,
         item.children,
         tmp,
-        opt
+        opt,
       );
       // 如果子文件一个都没有插入
       // 也未指定keyword
@@ -446,6 +453,7 @@ interface AppState {
   imageName: string;
   arch: string;
   latestAnalyzeImages: string[];
+  bigModifiedFileList: ModifiedFile[];
 }
 interface App {
   state: AppState;
@@ -474,6 +482,7 @@ class App extends Component {
       imageName: image,
       arch,
       latestAnalyzeImages: [],
+      bigModifiedFileList: [],
     };
   }
   async componentDidMount() {
@@ -523,6 +532,7 @@ class App extends Component {
         layers: data.layers,
         currentLayer: 0,
         gotResult: true,
+        bigModifiedFileList: data.bigModifiedFileList,
       });
     } catch (err: any) {
       let msg = err?.message as string;
@@ -553,6 +563,7 @@ class App extends Component {
       wastedList,
       arch,
       latestAnalyzeImages,
+      bigModifiedFileList,
     } = this.state;
     const onToggleExpand = (key: string) => {
       const opt = Object.assign({}, this.state.fileTreeViewOption);
@@ -648,7 +659,7 @@ class App extends Component {
       fileTreeViewList,
       fileTreeList[currentLayer],
       [],
-      fileTreeViewOption
+      fileTreeViewOption,
     );
 
     const layerFilter = (
@@ -804,6 +815,47 @@ class App extends Component {
         </div>
       );
     };
+
+    const getBigModifiedFileView = () => {
+      if (bigModifiedFileList.length === 0) {
+        return <></>;
+      }
+      const arr = bigModifiedFileList.slice(0);
+      arr.sort((item1, item2) => {
+        return item2.size - item1.size;
+      });
+      const list = arr.map((item) => {
+        let { digest } = item;
+        if (digest) {
+          digest = digest.replace("sha256:", "").substring(0, 8);
+        }
+        return (
+          <li key={item.path}>
+            <span>{digest.toUpperCase()}</span>
+            <span>{prettyBytes(item.size)}</span>
+            <span>/{item.path}</span>
+          </li>
+        );
+      });
+      let className = "bigModifiedFileList";
+      if (isDarkMode()) {
+        className += " dark";
+      }
+      return (
+        <div className="mtop30">
+          <Card title={i18nGet("modifiedAddedLargeFileTitle")}>
+            <ul className={className}>
+              <li>
+                <span>{i18nGet("layerLabel")}</span>
+                <span>{i18nGet("totalSizeLabel")}</span>
+                <span>{i18nGet("pathLabel")}</span>
+              </li>
+              {list}
+            </ul>
+          </Card>
+        </div>
+      );
+    };
     const getSearchView = () => {
       const size = "large";
       const selectBefore = (
@@ -931,6 +983,7 @@ class App extends Component {
                 {getImageSummaryView()}
                 {getLayerContentView()}
                 {getWastedSummaryView()}
+                {getBigModifiedFileView()}
               </div>
             </Content>
           )}

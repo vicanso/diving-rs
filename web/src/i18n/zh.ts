@@ -24,4 +24,5 @@ export default {
   countLabel: "次数",
   pathLabel: "路径",
   latestAnalyzeImagesTitle: "最近分析的镜像列表",
+  modifiedAddedLargeFileTitle: "修改或新增的大文件",
 };
