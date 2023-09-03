@@ -10,10 +10,11 @@ use http::header;
 use http::Uri;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 type JSONResult<T> = HTTPResult<Json<T>>;
 
 pub fn new_router() -> Router {
@@ -55,14 +56,24 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> JSONResult<DockerAnalyz
     Ok(Json(result))
 }
 
-async fn get_latest_images() -> JSONResult<Vec<String>> {
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestImageResp {
+    pub images: Vec<String>,
+    pub version: String,
+}
+
+async fn get_latest_images() -> JSONResult<LatestImageResp> {
     let mut image_list = vec![];
     if let Ok(cache) = get_latest_image_cache().lock() {
         for (name, _) in cache.iter() {
             image_list.push(name.clone());
         }
     }
-    Ok(Json(image_list))
+    Ok(Json(LatestImageResp{
+        images: image_list,
+        version: VERSION.to_string(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]

@@ -442,6 +442,7 @@ interface ImageDescriptions {
   created: string;
 }
 interface AppState {
+  version: string;
   gotResult: boolean;
   loading: boolean;
   imageDescriptions: ImageDescriptions;
@@ -455,6 +456,12 @@ interface AppState {
   latestAnalyzeImages: string[];
   bigModifiedFileList: ModifiedFile[];
 }
+
+interface LatestImages {
+  images: string[];
+  version: string;
+}
+
 interface App {
   state: AppState;
 }
@@ -483,17 +490,19 @@ class App extends Component {
       arch,
       latestAnalyzeImages: [],
       bigModifiedFileList: [],
+      version: "",
     };
   }
   async componentDidMount() {
     if (this.state.imageName) {
       this.onSearch(this.state.imageName);
     }
-    const { data } = await axios.get<string[]>("/api/latest-images", {
+    const { data } = await axios.get<LatestImages>("/api/latest-images", {
       timeout: 5 * 1000,
     });
     this.setState({
-      latestAnalyzeImages: data,
+      latestAnalyzeImages: data.images,
+      version: data.version,
     });
   }
   async onSearch(value: String) {
@@ -564,6 +573,7 @@ class App extends Component {
       arch,
       latestAnalyzeImages,
       bigModifiedFileList,
+      version,
     } = this.state;
     const onToggleExpand = (key: string) => {
       const opt = Object.assign({}, this.state.fileTreeViewOption);
@@ -951,7 +961,7 @@ class App extends Component {
               >
                 <Space>
                   {getLogoIcon(isDarkMode())}
-                  <span>Diving</span>
+                  <span>Diving {version}</span>
                 </Space>
               </div>
               {gotResult && <div className="search">{getSearchView()}</div>}

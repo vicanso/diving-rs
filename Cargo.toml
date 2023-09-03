@@ -1,6 +1,6 @@
 [package]
 name = "diving"
-version = "0.5.5"
+version = "0.5.6"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
 keywords = ["diving", "image", "dive"]
