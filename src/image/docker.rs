@@ -535,7 +535,7 @@ impl DockerClient {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
         // 支持的类型
-        let accepts = vec![
+        let accepts = [
             MEDIA_TYPE_IMAGE_INDEX,
             MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
             MEDIA_TYPE_MANIFEST_LIST,

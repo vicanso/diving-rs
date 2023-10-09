@@ -123,9 +123,9 @@ pub struct ImageIndexPlatform {
 #[serde(rename_all = "camelCase")]
 pub struct ImageIndexAnnotations {
     #[serde(rename = "vnd.docker.reference.digest")]
-    pub vnd_docker_reference_digest: String,
+    pub vnd_docker_reference_digest: Option<String>,
     #[serde(rename = "vnd.docker.reference.type")]
-    pub vnd_docker_reference_type: String,
+    pub vnd_docker_reference_type: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -70,7 +70,7 @@ async fn get_latest_images() -> JSONResult<LatestImageResp> {
             image_list.push(name.clone());
         }
     }
-    Ok(Json(LatestImageResp{
+    Ok(Json(LatestImageResp {
         images: image_list,
         version: VERSION.to_string(),
     }))

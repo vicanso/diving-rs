@@ -157,7 +157,7 @@ pub fn new_files_widget(
         .split(opt.area);
 
     let space_span = Span::from("   ");
-    let name_list = vec!["Permission", " UID:GID ", "     Size", "FileTree"];
+    let name_list = ["Permission", " UID:GID ", "     Size", "FileTree"];
     let mode_tips = format!(
         "Esc|0: All   1: Modified/Removed   2: File >= 1MB   |  Current: {}",
         opt.mode

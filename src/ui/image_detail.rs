@@ -64,7 +64,7 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
 
     // 生成浪费空间的文件列表
     let space_span = Span::from("   ");
-    let headers = vec!["Count", "Total Space", "Path"];
+    let headers = ["Count", "Total Space", "Path"];
     let mut name = opt.name;
     if !opt.arch.is_empty() {
         name += &format!("({}/{})", opt.os, opt.arch);

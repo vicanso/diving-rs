@@ -24,7 +24,7 @@ pub struct LayersWidgetOption {
 }
 // 创建layer列表的widget
 pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> LayersWidget<'a> {
-    let mut row_max_counts = vec![0, 0, 0];
+    let mut row_max_counts = [0, 0, 0];
     let mut row_data_list = vec![];
     // 生成表格数据，并计算每列最大宽度
     for (index, item) in layers.iter().enumerate() {
