@@ -1,3 +1,4 @@
+use crate::config::must_load_config;
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
 use http::StatusCode;
@@ -647,11 +648,12 @@ impl DockerClient {
         let s = self.clone();
         let trace_id = TRACE_ID.with(clone_value_from_task_local);
         let result = std::thread::spawn(move || {
+            let threads = must_load_config().threads.unwrap_or(layers.len());
             // 新的thread需要重新设置trace id
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .thread_name("getAllLayerInfo")
-                .worker_threads(layers.len())
+                .worker_threads(threads)
                 .build()
                 .expect("Creating tokio runtime");
             runtime.block_on(async move {

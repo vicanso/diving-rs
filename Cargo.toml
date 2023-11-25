@@ -1,6 +1,6 @@
 [package]
 name = "diving"
-version = "0.5.8"
+version = "0.5.9"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
 keywords = ["diving", "image", "dive"]
@@ -14,13 +14,13 @@ bytes = "1.5.0"
 bytesize = "1.2.0"
 chrono = "0.4.31"
 clap = { version = "4.4.8", features = ["derive"] }
-config = "0.13.3"
+config = "0.13.4"
 crossterm = "0.26.1"
 futures = "0.3.29"
 glob = "0.3.1"
 hex = "0.4.3"
 home = "0.5.5"
-http = "0.2.10"
+http = "0.2.11"
 humantime = "2.1.0"
 libflate = "1.4.0"
 lru = "0.10.1"
@@ -32,7 +32,7 @@ pad = "0.1.6"
 regex = "1.10.2"
 reqwest = { version = "0.11.22", default-features = false, features = ["rustls-tls", "json"] }
 rust-embed = { version = "6.8.1", features = ["compression", "mime-guess"] }
-serde = { version = "1.0.192", features = ["derive"] }
+serde = { version = "1.0.193", features = ["derive"] }
 serde_json = "1.0.108"
 serde_repr = "0.1.17"
 signal-hook = { version = "0.3.17", default-features = false }

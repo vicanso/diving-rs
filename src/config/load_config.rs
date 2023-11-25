@@ -8,6 +8,7 @@ use std::{fs, path::PathBuf};
 pub struct DivingConfig {
     pub layer_path: Option<String>,
     pub layer_ttl: Option<String>,
+    pub threads: Option<usize>,
 }
 
 pub fn must_load_config() -> &'static DivingConfig {
