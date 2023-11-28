@@ -134,13 +134,17 @@ async fn run() {
             // 后面的layer先执行
             .layer(from_fn(access_log))
             .layer(from_fn(entry));
-        let addr = args.listen.parse().unwrap();
-        info!("listening on http://{addr}");
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .unwrap();
+
+        info!("listening on http://{}", args.listen);
+        let listener = tokio::net::TcpListener::bind(args.listen).await.unwrap();
+
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        // .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
     }
 }
 

@@ -477,7 +477,7 @@ impl DockerClient {
             .send()
             .await
             .context(RequestSnafu { url: url.clone() })?;
-        if resp.status() >= StatusCode::UNAUTHORIZED {
+        if resp.status().as_u16() >= StatusCode::UNAUTHORIZED.as_u16() {
             let err = resp
                 .json::<DockerRequestErrorResp>()
                 .await
@@ -700,7 +700,7 @@ impl DockerClient {
             .send()
             .await
             .context(RequestSnafu { url: url.clone() })?;
-        if resp.status() == StatusCode::UNAUTHORIZED {
+        if resp.status().as_u16() == StatusCode::UNAUTHORIZED.as_u16() {
             if let Some(value) = resp.headers().get("www-authenticate") {
                 let auth_info = parse_auth_info(value.to_str().unwrap_or_default())?;
                 let url = format!(
