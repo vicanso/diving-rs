@@ -1,10 +1,6 @@
 use bytesize::ByteSize;
 use pad::PadStr;
-use tui::{
-    style::{Modifier, Style},
-    text::{Span, Spans},
-    widgets::Paragraph,
-};
+use ratatui::{prelude::*, widgets::*};
 
 use super::util;
 use crate::image::ImageFileSummary;
@@ -70,36 +66,36 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
         name += &format!("({}/{})", opt.os, opt.arch);
     }
     let mut spans_list = vec![
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Image name: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(name),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Total Image size: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(format!("{} / {}", ByteSize(total_size), ByteSize(size),)),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Potential wasted space: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(ByteSize(wasted_size).to_string()),
         ]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::styled(
                 "Image efficiency score: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(format!("{score} %")),
         ]),
-        Spans::from(vec![]),
-        Spans::from(vec![
+        Line::from(vec![]),
+        Line::from(vec![
             Span::styled(headers[0], Style::default().add_modifier(Modifier::BOLD)),
             space_span.clone(),
             Span::styled(headers[1], Style::default().add_modifier(Modifier::BOLD)),
@@ -117,7 +113,7 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
         let size_str = ByteSize(wasted.total_size)
             .to_string()
             .pad_to_width_with_alignment(size_pad_width, pad::Alignment::Right);
-        spans_list.push(Spans::from(vec![
+        spans_list.push(Line::from(vec![
             Span::from(count_str),
             space_span.clone(),
             Span::from(size_str),

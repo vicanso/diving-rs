@@ -5,18 +5,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ratatui::{prelude::*, widgets::*};
 use std::process;
 use std::process::Command;
 use std::sync::atomic;
 use std::sync::mpsc::sync_channel;
 use std::{error::Error, io};
-use tui::{
-    backend::Backend,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    widgets::ListState,
-    Frame, Terminal,
-};
 
 mod files;
 mod image_detail;
@@ -227,7 +221,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn draw_widgets<B: Backend>(f: &mut Frame<B>, state: &mut WidgetState) {
+fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())

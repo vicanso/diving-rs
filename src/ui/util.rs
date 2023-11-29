@@ -1,8 +1,5 @@
-use tui::{
-    style::{Modifier, Style},
-    text::Span,
-    widgets::{Block, Borders},
-};
+use ratatui::{prelude::*, widgets::*};
+
 use unicode_width::UnicodeWidthStr;
 
 // 计算字符宽度

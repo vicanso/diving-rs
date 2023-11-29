@@ -1,11 +1,6 @@
 use bytesize::ByteSize;
 use pad::PadStr;
-use tui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Span, Spans},
-    widgets::{Block, List, ListItem, Paragraph},
-};
+use ratatui::{prelude::*, widgets::*};
 
 use crate::image::{FileTreeItem, Op};
 
@@ -112,7 +107,7 @@ fn add_to_file_tree_view(
         if !item.link.is_empty() {
             name = format!("{name} → {}", item.link);
         }
-        list.push(ListItem::new(Spans::from(vec![
+        list.push(ListItem::new(Line::from(vec![
             Span::styled(get_file_mode_str(&item.mode), style),
             space_span.clone(),
             Span::styled(get_id_str(&id), style),
@@ -163,11 +158,11 @@ pub fn new_files_widget(
         opt.mode
     );
     let content = Paragraph::new(vec![
-        Spans::from(vec![Span::styled(
+        Line::from(vec![Span::styled(
             mode_tips,
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Spans::from(vec![
+        Line::from(vec![
             Span::from(name_list[0]),
             space_span.clone(),
             Span::from(name_list[1]),

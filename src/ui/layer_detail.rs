@@ -1,11 +1,5 @@
 use chrono::{DateTime, Local, TimeZone};
-
-use tui::{
-    layout::Alignment,
-    style::{Modifier, Style},
-    text::{Span, Spans},
-    widgets::{Paragraph, Wrap},
-};
+use ratatui::{prelude::*, widgets::*};
 
 use super::util;
 use crate::image::ImageLayer;
@@ -32,18 +26,12 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
             .to_rfc3339();
     };
 
-    let paragraph = Paragraph::new(vec![
-        Spans::from(Span::styled(
-            "Created:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Spans::from(create_at),
-        Spans::from(Span::styled(
-            "Command:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Spans::from(cmd),
-    ])
+    let paragraph = Paragraph::new(Line::from(vec![
+        Span::styled("Created:", Style::default().add_modifier(Modifier::BOLD)),
+        Span::from(create_at),
+        Span::styled("Command:", Style::default().add_modifier(Modifier::BOLD)),
+        Span::from(cmd),
+    ]))
     .block(util::create_block(" Layer Details "))
     .alignment(Alignment::Left)
     .wrap(Wrap { trim: true });

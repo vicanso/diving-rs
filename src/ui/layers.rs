@@ -1,13 +1,7 @@
 use bytesize::ByteSize;
 
 use pad::PadStr;
-
-use tui::{
-    layout::Constraint,
-    style::{Color, Modifier, Style},
-    text::Spans,
-    widgets::{Cell, Row, Table},
-};
+use ratatui::{prelude::*, widgets::*};
 
 use super::util;
 use crate::image::ImageLayer;
@@ -50,7 +44,7 @@ pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> 
                     pad::Alignment::Right,
                 )));
             } else {
-                cells.push(Cell::from(Spans::from(value)));
+                cells.push(Cell::from(value));
             }
         }
         let mut style = Style::default();
