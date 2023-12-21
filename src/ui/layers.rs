@@ -66,14 +66,16 @@ pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> 
     if opt.is_active {
         title = " ● Layers ";
     }
-    let widget = Table::new(rows)
-        .header(header)
-        .block(util::create_block(title))
-        .widths(&[
+    let widget = Table::new(
+        rows,
+        [
             Constraint::Length(5),
             Constraint::Length(10),
             Constraint::Min(u16::MAX),
-        ]);
+        ],
+    )
+    .header(header)
+    .block(util::create_block(title));
 
     LayersWidget {
         height: height as u16,
