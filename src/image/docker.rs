@@ -234,6 +234,60 @@ pub struct DockerAnalyzeResult {
     pub big_modified_file_list: Vec<BigModifiedFileInfo>,
 }
 
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct ImageFileWastedSummary {
+    pub path: String,
+    pub total_size: u64,
+    pub count: u32,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct DockerAnalyzeSummary {
+    pub wasted_list: Vec<ImageFileWastedSummary>,
+    pub wasted_size: u64,
+    pub wasted_percent: f64,
+    pub score: u64,
+}
+
+impl DockerAnalyzeResult {
+    pub fn summary(&self) -> DockerAnalyzeSummary {
+        let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
+        let mut wasted_size = 0;
+        for file in self.file_summary_list.iter() {
+            let mut found = false;
+            let info = &file.info;
+            wasted_size += info.size;
+            for wasted in wasted_list.iter_mut() {
+                if wasted.path == info.path {
+                    found = true;
+                    wasted.count += 1;
+                    wasted.total_size += info.size;
+                }
+            }
+            if !found {
+                wasted_list.push(ImageFileWastedSummary {
+                    path: info.path.clone(),
+                    count: 1,
+                    total_size: info.size,
+                });
+            }
+        }
+        wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+
+        let mut score = 100 - wasted_size * 100 / self.total_size;
+        // 有浪费空间，则分数-1
+        if wasted_size != 0 {
+            score -= 1;
+        }
+        DockerAnalyzeSummary {
+            wasted_list,
+            wasted_size,
+            wasted_percent: (wasted_size as f64) / (self.total_size as f64),
+            score,
+        }
+    }
+}
+
 impl DockerTokenInfo {
     // 判断docker token是否已过期
     fn expired(&self) -> bool {

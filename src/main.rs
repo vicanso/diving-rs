@@ -1,5 +1,7 @@
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
+use bytesize::ByteSize;
 use clap::Parser;
+use colored::*;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
@@ -91,6 +93,10 @@ async fn start_scheduler() {
     scheduler.start().await.unwrap();
 }
 
+fn is_ci() -> bool {
+    env::var_os("CI").unwrap_or_default() == "true"
+}
+
 // 分析镜像（错误直接以字符串返回）
 async fn analyze(image: String) -> Result<(), String> {
     // 命令行模式下清除过期数据
@@ -99,7 +105,50 @@ async fn analyze(image: String) -> Result<(), String> {
     let result = analyze_docker_image(image_info)
         .await
         .map_err(|item| item.to_string())?;
-    ui::run_app(result).map_err(|item| item.to_string())?;
+    if is_ci() {
+        let summary = result.summary();
+        let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
+        let highest_wasted_bytes = config::get_highest_wasted_bytes();
+        let highest_user_wasted_percent = config::get_highest_user_wasted_percent();
+        println!("{}", "Analyze result:".bold().green());
+        println!("  efficiency: {} %", summary.score);
+        println!(
+            "  wasted bytes: {} bytes ({})",
+            summary.wasted_size,
+            ByteSize(summary.wasted_size)
+        );
+
+        let mut passed = true;
+        if summary.score < lowest_efficiency {
+            println!(
+                "{}: lowest efficiency check, lowest: {}",
+                "FAIL".red(),
+                lowest_efficiency
+            );
+            passed = false;
+        }
+        if summary.wasted_size > highest_wasted_bytes {
+            println!(
+                "{}: highest wasted bytes check, highest: {}",
+                "FAIL".red(),
+                ByteSize(highest_wasted_bytes)
+            );
+            passed = false;
+        }
+        if summary.wasted_percent > highest_user_wasted_percent {
+            println!(
+                "{}: highest user wasted percent check, highest: {:.2}",
+                "FAIL".red(),
+                highest_user_wasted_percent
+            );
+            passed = false;
+        }
+        if !passed {
+            return Err("CI check fail".to_string());
+        }
+    } else {
+        ui::run_app(result).map_err(|item| item.to_string())?;
+    }
     Ok(())
 }
 
@@ -114,7 +163,8 @@ async fn run() {
             TRACE_ID
                 .scope(generate_trace_id(), async {
                     if let Err(err) = analyze(value).await {
-                        error!(err, "analyze image fail")
+                        error!(err, "analyze image fail");
+                        std::process::exit(1)
                     }
                 })
                 .await;

@@ -1,5 +1,5 @@
 use self::image_detail::ImageDetailWidgetOption;
-use crate::image::{DockerAnalyzeResult, FileTreeItem, ImageFileSummary, ImageLayer};
+use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageLayer};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -35,14 +35,13 @@ struct WidgetState {
     layers: Vec<ImageLayer>,
     // 每层对应的文件树
     file_tree_list: Vec<Vec<FileTreeItem>>,
-    // 镜像删除、更新等文件汇总
-    file_summary_list: Vec<ImageFileSummary>,
     // 文件列表的状态
     files_state: ListState,
     // 文件列表项总数
     file_count: usize,
     // 文件树模式
     file_tree_mode: u8,
+    summary: DockerAnalyzeSummary,
 }
 
 static LAYERS_WIDGET: &str = "layers";
@@ -124,6 +123,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
     let hidden = atomic::AtomicBool::default();
 
     // create app and run it
+    let summary = result.summary();
     let mut state = WidgetState {
         name: result.name,
         arch: result.arch,
@@ -131,12 +131,12 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         layers: result.layers,
         selected_layer: 0,
         file_tree_list: result.file_tree_list,
-        file_summary_list: result.file_summary_list,
         size: result.size,
         total_size: result.total_size,
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
         active: LAYERS_WIDGET.to_string(),
+        summary,
         ..Default::default()
     };
     let (tx, rx) = sync_channel::<bool>(1);
@@ -262,7 +262,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         os: state.os.clone(),
         total_size: state.total_size,
         size: state.size,
-        file_summary_list: state.file_summary_list.clone(),
+        summary: state.summary.clone(),
     });
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);

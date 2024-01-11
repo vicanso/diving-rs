@@ -4,3 +4,7 @@ layer_path: /opt/diving/layers
 layer_ttl: 180d
 # no default value
 # threads: 2
+# If the efficiency is measured below X%, mark as failed.
+lowest_efficiency: 0.95
+# If the amount of wasted space is at least X or larger than X, mark as failed.
+highest_wasted_bytes: 20MB
