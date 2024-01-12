@@ -154,7 +154,6 @@ async fn analyze(image: String) -> Result<(), String> {
 
 #[tokio::main]
 async fn run() {
-    // TODO 增加panic的异常输出
     // 启动时确保可以读取配置
     config::must_load_config();
     let args = Args::parse();

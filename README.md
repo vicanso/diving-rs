@@ -33,6 +33,8 @@ diving quay.io/prometheus/node-exporter
 diving docker://redis:alpine
 
 diving file:///tmp/redis.tar
+
+CI=true diving redis:alpine
 ```
 
 - `Current Layer Contents` only show the files of current layer
