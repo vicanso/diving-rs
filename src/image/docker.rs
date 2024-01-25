@@ -234,14 +234,14 @@ pub struct DockerAnalyzeResult {
     pub big_modified_file_list: Vec<BigModifiedFileInfo>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct ImageFileWastedSummary {
     pub path: String,
     pub total_size: u64,
     pub count: u32,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct DockerAnalyzeSummary {
     pub wasted_list: Vec<ImageFileWastedSummary>,
     pub wasted_size: u64,

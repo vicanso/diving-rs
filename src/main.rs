@@ -2,6 +2,7 @@ use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
 use bytesize::ByteSize;
 use clap::Parser;
 use colored::*;
+use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
@@ -41,6 +42,9 @@ struct Args {
     /// The listen addr of web mode
     #[arg(short, long, default_value = "127.0.0.1:7001")]
     listen: String,
+    /// The result output file
+    #[arg(short, long)]
+    output_file: Option<String>,
 }
 
 impl Args {
@@ -98,14 +102,14 @@ fn is_ci() -> bool {
 }
 
 // 分析镜像（错误直接以字符串返回）
-async fn analyze(image: String) -> Result<(), String> {
+async fn analyze(image: String, output_file: String) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
     let result = analyze_docker_image(image_info)
         .await
         .map_err(|item| item.to_string())?;
-    if is_ci() {
+    if is_ci() || !output_file.is_empty() {
         let summary = result.summary();
         let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
         let highest_wasted_bytes = config::get_highest_wasted_bytes();
@@ -143,7 +147,13 @@ async fn analyze(image: String) -> Result<(), String> {
             );
             passed = false;
         }
-        if !passed {
+        if !output_file.is_empty() {
+            fs::write(
+                output_file,
+                serde_json::to_string(&summary).map_err(|err| err.to_string())?,
+            )
+            .map_err(|err| err.to_string())?;
+        } else if !passed {
             return Err("CI check fail".to_string());
         }
     } else {
@@ -161,7 +171,7 @@ async fn run() {
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    if let Err(err) = analyze(value).await {
+                    if let Err(err) = analyze(value, args.output_file.unwrap_or_default()).await {
                         error!(err, "analyze image fail");
                         std::process::exit(1)
                     }
