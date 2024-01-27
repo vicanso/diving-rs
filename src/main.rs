@@ -106,7 +106,7 @@ async fn analyze(image: String, output_file: String) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
-    let result = analyze_docker_image(image_info)
+    let mut result = analyze_docker_image(image_info)
         .await
         .map_err(|item| item.to_string())?;
     if is_ci() || !output_file.is_empty() {
@@ -150,7 +150,7 @@ async fn analyze(image: String, output_file: String) -> Result<(), String> {
         if !output_file.is_empty() {
             fs::write(
                 output_file,
-                serde_json::to_string(&summary).map_err(|err| err.to_string())?,
+                serde_json::to_string(&result).map_err(|err| err.to_string())?,
             )
             .map_err(|err| err.to_string())?;
         } else if !passed {
