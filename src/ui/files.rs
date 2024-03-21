@@ -44,7 +44,7 @@ fn add_to_file_tree_view(
     mode: u8,
     width_list: Vec<usize>,
     list: &mut Vec<ListItem>,
-    items: &Vec<FileTreeItem>,
+    items: &[FileTreeItem],
     is_last_list: Vec<bool>,
 ) -> usize {
     let mut count = 0;

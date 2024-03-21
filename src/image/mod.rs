@@ -11,7 +11,6 @@ pub use layer::{
 };
 pub use oci_image::{
     convert_files_to_file_tree, find_file_tree_item, FileTreeItem, ImageConfig, ImageFileInfo,
-    ImageFileSummary, ImageIndex, ImageIndexManifest, ImageIndexPlatform, ImageLayer,
-    ImageManifest, ImageManifestConfig, ImageManifestLayer, Op, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
-    MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
+    ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
+    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
