@@ -10,18 +10,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "antd": "^5.13.2",
-    "axios": "^1.6.7",
+    "antd": "^5.16.0",
+    "axios": "^1.6.8",
     "pretty-bytes": "^6.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@types/react": "^18.2.48",
-    "@types/react-dom": "^18.2.18",
-    "@vitejs/plugin-react-swc": "^3.5.0",
-    "prettier": "^3.2.4",
-    "typescript": "^5.3.3",
-    "vite": "^5.0.12"
+    "@types/react": "^18.2.74",
+    "@types/react-dom": "^18.2.24",
+    "@vitejs/plugin-react-swc": "^3.6.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.3",
+    "vite": "^5.2.8"
   }
 }

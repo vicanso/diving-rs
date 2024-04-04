@@ -386,7 +386,7 @@ const addToFileTreeView = (
       downloadIcon = (
         <a
           className="download"
-          href={`/api/file?digest=${layer.digest}&mediaType=${layer.mediaType}&file=${item.key}`}
+          href={`./api/file?digest=${layer.digest}&mediaType=${layer.mediaType}&file=${item.key}`}
         >
           {getDownloadIcon()}
         </a>
@@ -467,6 +467,10 @@ interface App {
 }
 const amd64Arch = "amd64";
 const arm64Arch = "arm64";
+const request = axios.create({
+  timeout: 600 * 1000,
+  baseURL: "./api",
+});
 
 class App extends Component {
   constructor(props: any) {
@@ -497,7 +501,7 @@ class App extends Component {
     if (this.state.imageName) {
       this.onSearch(this.state.imageName);
     }
-    const { data } = await axios.get<LatestImages>("/api/latest-images", {
+    const { data } = await request.get<LatestImages>("/latest-images", {
       timeout: 5 * 1000,
     });
     this.setState({
@@ -521,11 +525,11 @@ class App extends Component {
       loading: true,
     });
     try {
-      let url = `/api/analyze?image=${image}`;
+      let url = `/analyze?image=${image}`;
       if (!/^(file|docker):\/\//.test(image) && arch) {
         url += `?arch=${arch}`;
       }
-      const { data } = await axios.get<ImageAnalyzeResult>(url, {
+      const { data } = await request.get<ImageAnalyzeResult>(url, {
         timeout: 10 * 60 * 1000,
       });
       // 为每个file tree item增加key
