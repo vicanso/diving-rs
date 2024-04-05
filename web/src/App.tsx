@@ -515,7 +515,7 @@ class App extends Component {
       return;
     }
     const { arch } = this.state;
-    const url = `/?image=${image}&arch=${arch}`;
+    const url = `./?image=${image}&arch=${arch}`;
     if (window.location.href !== url) {
       window.history.pushState(null, "", url);
     }
