@@ -37,8 +37,6 @@ pub enum Error {
     Request { source: reqwest::Error, url: String },
     #[snafu(display("Parse {} json fail: {}", url, source))]
     Json { source: reqwest::Error, url: String },
-    #[snafu(display("Get {} bytes fail: {}", url, source))]
-    Bytes { source: reqwest::Error, url: String },
     #[snafu(display("Serde json {category} fail: {source}"))]
     SerdeJson {
         source: serde_json::Error,
@@ -46,8 +44,6 @@ pub enum Error {
     },
     #[snafu(display("Layer handle fail: {}", source))]
     Layer { source: super::layer::Error },
-    #[snafu(display("Task fail: {}", source))]
-    Task { source: tokio::task::JoinError },
     #[snafu(display("Request {} code: {} fail: {}", url, code, message))]
     Docker {
         message: String,
