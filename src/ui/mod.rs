@@ -225,7 +225,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(f.size());
+        .split(f.area());
 
     let layers_widget = layers::new_layers_widget(
         &state.layers,
