@@ -1,6 +1,6 @@
 [package]
 name = "diving"
-version = "0.6.11"
+version = "0.6.12"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
 keywords = ["diving", "image", "dive"]
@@ -8,20 +8,20 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-axum = "0.7.5"
-axum-client-ip = "0.6.1"
-bytes = "1.8.0"
+axum = "0.8.1"
+axum-client-ip = "0.7.0"
+bytes = "1.9.0"
 bytesize = { version = "1.3.0", features = ["serde"] }
-chrono = "0.4.38"
-clap = { version = "4.5.20", features = ["derive"] }
-colored = "2.1.0"
-config = "0.14.1"
+chrono = "0.4.39"
+clap = { version = "4.5.26", features = ["derive"] }
+colored = "3.0.0"
+config = "0.15.6"
 crossterm = "0.28.1"
 futures = "0.3.31"
-glob = "0.3.1"
+glob = "0.3.2"
 hex = "0.4.3"
-home = "0.5.9"
-http = "1.1.0"
+home = "0.5.11"
+http = "1.2.0"
 humantime = "2.1.0"
 libflate = "2.1.0"
 lru = "0.12.5"
@@ -32,22 +32,22 @@ once_cell = "1.20.2"
 pad = "0.1.6"
 ratatui = "0.29.0"
 regex = "1.11.1"
-reqwest = { version = "0.12.8", default-features = false, features = [
+reqwest = { version = "0.12.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
 rust-embed = { version = "8.5.0", features = ["compression", "mime-guess"] }
-serde = { version = "1.0.213", features = ["derive"] }
-serde_json = "1.0.132"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
 serde_repr = "0.1.19"
 signal-hook = { version = "0.3.17", default-features = false }
 signal-hook-registry = "1.4.2"
 snafu = "0.8.5"
 substring = "1.4.5"
-tar = "0.4.42"
-tempfile = "3.13.0"
-time = "0.3.36"
-tokio = { version = "1.41.0", features = [
+tar = "0.4.43"
+tempfile = "3.15.0"
+time = "0.3.37"
+tokio = { version = "1.43.0", features = [
     "macros",
     "rt",
     "rt-multi-thread",
@@ -56,9 +56,9 @@ tokio = { version = "1.41.0", features = [
     "fs",
 ] }
 tokio-cron-scheduler = "0.13.0"
-tower = { version = "0.5.1", features = ["timeout"] }
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["local-time"] }
+tower = { version = "0.5.2", features = ["timeout"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["local-time"] }
 unicode-width = "0.2.0"
 unix_mode = "0.1.4"
 zstd = "0.13.2"
