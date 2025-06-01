@@ -251,7 +251,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
             [
                 Constraint::Length(layers_widget.height),
                 Constraint::Length(detail_widget.height),
-                Constraint::Length(u16::MAX),
+                Constraint::Fill(1),
             ]
             .as_ref(),
         )

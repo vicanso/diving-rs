@@ -1,10 +1,8 @@
-use bytesize::ByteSize;
-
-use pad::PadStr;
-use ratatui::{prelude::*, widgets::*};
-
 use super::util;
 use crate::image::ImageLayer;
+use bytesize::ByteSize;
+use pad::PadStr;
+use ratatui::{prelude::*, widgets::*};
 
 pub struct LayersWidget<'a> {
     // 组件高度
@@ -71,7 +69,7 @@ pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> 
         [
             Constraint::Length(5),
             Constraint::Length(10),
-            Constraint::Min(u16::MAX),
+            Constraint::Fill(1),
         ],
     )
     .header(header)
