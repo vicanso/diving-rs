@@ -139,7 +139,7 @@ fn add_to_file_tree_view(
 pub fn new_files_widget(
     file_tree_list: &[Vec<FileTreeItem>],
     opt: FilesWidgetOption,
-) -> FilesWidget {
+) -> FilesWidget<'_> {
     // TODO 如何调整生命周期
     let mut title = " Current Layer Contents ";
     if opt.is_active {

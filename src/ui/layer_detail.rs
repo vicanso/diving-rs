@@ -14,7 +14,7 @@ pub struct DetailWidgetOption {
     pub width: u16,
 }
 // 创建layer详细信息的widget
-pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> DetailWidget {
+pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> DetailWidget<'_> {
     let cmd = layer.cmd.clone();
     let detail_word_width = util::get_width(&cmd);
     let mut create_at = layer.created.clone();

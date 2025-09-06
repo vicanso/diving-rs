@@ -8,7 +8,7 @@ pub fn get_width(str: &str) -> u16 {
 }
 
 // 创建block
-pub fn create_block(title: &str) -> Block {
+pub fn create_block(title: &str) -> Block<'_> {
     Block::default().borders(Borders::ALL).title(Span::styled(
         title,
         Style::default().add_modifier(Modifier::BOLD),
