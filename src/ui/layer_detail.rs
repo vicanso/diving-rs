@@ -37,7 +37,7 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
     .wrap(Wrap { trim: true });
     // 拆分左侧栏
     let mut detail_height = detail_word_width / opt.width;
-    if detail_word_width % opt.width != 0 {
+    if detail_word_width.is_multiple_of(opt.width) {
         detail_height += 1;
     }
     // title + command tag + created tag + created time + border bottom

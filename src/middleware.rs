@@ -1,16 +1,13 @@
 use crate::{task_local::*, tl_info};
 use axum::{body::Body, http::Request, middleware::Next, response::Response};
-use axum_client_ip::InsecureClientIp;
+use axum_client_ip::RightmostXForwardedFor as ClientIp;
+
 use chrono::Utc;
 
 use crate::task_local::{generate_trace_id, TRACE_ID};
 use crate::util::set_no_cache_if_not_exist;
 
-pub async fn access_log(
-    InsecureClientIp(ip): InsecureClientIp,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn access_log(ClientIp(ip): ClientIp, req: Request<Body>, next: Next) -> Response {
     let started_at = Utc::now().timestamp_millis();
     let path = req.uri().path().to_string();
     let uri = req.uri().to_string();
