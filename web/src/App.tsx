@@ -1,4 +1,4 @@
-import { Component, ReactNode } from "react";
+import { Component, ReactNode, ReactElement } from "react";
 import {
   ConfigProvider,
   theme,
@@ -307,7 +307,7 @@ const isMatchKeyword = (item: FileTreeList, keyword: string) => {
 const addToFileTreeView = (
   onToggleExpand: (key: string) => void,
   layer: Layer,
-  list: JSX.Element[],
+  list: ReactElement[],
   items: FileTreeList[],
   isLastList: boolean[],
   opt: FileTreeViewOption,
@@ -360,7 +360,7 @@ const addToFileTreeView = (
     } else if (item.op === opModified) {
       className = "modified";
     }
-    let icon: JSX.Element = <></>;
+    let icon: ReactElement = <></>;
     if (item.children.length) {
       const { key } = item;
       if (isExpandAll() || opt.expandItems?.includes(key)) {
@@ -381,7 +381,7 @@ const addToFileTreeView = (
         </a>
       );
     }
-    let downloadIcon: JSX.Element = <></>;
+    let downloadIcon: ReactElement = <></>;
     if (item.children.length === 0 && item.size > 0) {
       downloadIcon = (
         <a
@@ -666,7 +666,7 @@ class App extends Component {
       };
     });
 
-    const fileTreeViewList = [] as JSX.Element[];
+    const fileTreeViewList = [] as ReactElement[];
     addToFileTreeView(
       onToggleExpand,
       layers[currentLayer],

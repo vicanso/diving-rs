@@ -9,19 +9,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 1024 * 1024,
     rollupOptions: {
       output: {
-        manualChunks: {
-          common: [
-            "axios",
-            "pretty-bytes",
-          ],
-          ui: [
-            "react",
-            "react-dom",
-          ],
-          antd: [
-            "antd",
-          ]
-        },
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        }
       },
     },
   },
