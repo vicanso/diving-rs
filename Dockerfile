@@ -1,4 +1,4 @@
-FROM node:18-alpine as webbuilder
+FROM node:20-alpine as webbuilder
 
 COPY . /diving-rs
 RUN apk update \
