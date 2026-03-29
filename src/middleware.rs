@@ -1,18 +1,27 @@
-use crate::{task_local::*, tl_info};
-use axum::{body::Body, http::Request, middleware::Next, response::Response};
-use axum_client_ip::RightmostXForwardedFor as ClientIp;
-
-use chrono::Utc;
-
 use crate::task_local::{generate_trace_id, TRACE_ID};
 use crate::util::set_no_cache_if_not_exist;
+use crate::{task_local::*, tl_info};
+use axum::extract::ConnectInfo;
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
+use axum_client_ip::RightmostXForwardedFor as ClientIp;
+use chrono::Utc;
+use std::net::SocketAddr;
 
-pub async fn access_log(ClientIp(ip): ClientIp, req: Request<Body>, next: Next) -> Response {
+pub async fn access_log(
+    client_ip: Result<ClientIp, axum_client_ip::Rejection>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
     let started_at = Utc::now().timestamp_millis();
     let path = req.uri().path().to_string();
     let uri = req.uri().to_string();
     let method = req.method().to_string();
+
     let resp = next.run(req).await;
+    let ip = client_ip
+        .map(|ip| ip.0.to_string())
+        .unwrap_or_else(|_| addr.ip().to_string());
     if path != "/ping" {
         let status = resp.status().as_u16();
         let cost = Utc::now().timestamp_millis() - started_at;
