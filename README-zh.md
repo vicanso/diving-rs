@@ -6,6 +6,15 @@
 
 需要注意：由于镜像分层数据需要从镜像源下载，如docker hub，下载时长需要较长时间，如果超时则再次尝试即可，建议下载程序在本机执行。而对于私有化部署的镜像源，则可将diving的镜像部署运行在可访问镜像源的机器即可。
 
+
+## 安装
+
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.sh | sh
+```
+
+
 ## config
 
 默认配置文件为`~/.diving/config.yml`，其配置选项如下：

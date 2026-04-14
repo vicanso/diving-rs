@@ -10,6 +10,14 @@ It supports multiple platforms: linux, windows and macos, you can get it from [r
 
 Note: Since the layer data needs to be downloaded from the source, such as Docker Hub, it may take a long time, if times out, please try again, it is recommended that the download program be executed locally. For image sources deployed privately, you can deploy the image of Diving on a machine that can access the image source.
 
+
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.sh | sh
+```
+
+
 ## config
 
 The config file is `~/.diving/config.yml`, the options:
