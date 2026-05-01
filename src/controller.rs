@@ -1,8 +1,7 @@
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::HTTPResult;
-use crate::image::{
-    analyze_docker_image, get_file_content_from_layer, parse_image_info, DockerAnalyzeResult,
-};
+use crate::image::{analyze_docker_image, get_file_content_from_layer, parse_image_info};
+use crate::markdown;
 use crate::store::get_blob_from_file;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::Query, routing::get, Json, Router};
@@ -34,6 +33,8 @@ async fn ping() -> &'static str {
 #[serde(rename_all = "camelCase")]
 struct AnalyzeParams {
     image: String,
+    format: Option<String>,
+    skip_base: Option<bool>,
 }
 
 fn get_latest_image_cache() -> &'static Mutex<LruCache<String, String>> {
@@ -49,11 +50,15 @@ fn add_to_latest_image_cache(name: &String) {
     }
 }
 
-async fn analyze(Query(params): Query<AnalyzeParams>) -> JSONResult<DockerAnalyzeResult> {
+async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
     let image_info = parse_image_info(&params.image);
     let result = analyze_docker_image(image_info).await?;
     add_to_latest_image_cache(&params.image);
-    Ok(Json(result))
+    if params.format.as_deref() == Some("markdown") {
+        let md = markdown::to_markdown(&result, params.skip_base.unwrap_or(false));
+        return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
+    }
+    Ok(Json(result).into_response())
 }
 
 #[derive(Debug, Serialize)]

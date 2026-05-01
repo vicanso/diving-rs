@@ -17,6 +17,7 @@ mod controller;
 mod dist;
 mod error;
 mod image;
+mod markdown;
 mod middleware;
 mod store;
 mod task_local;
@@ -44,6 +45,9 @@ struct Args {
     /// The result output file
     #[arg(short, long)]
     output_file: Option<String>,
+    /// Auto-detect and hide base image layers in Markdown output
+    #[arg(long, default_value_t = false)]
+    skip_base: bool,
 }
 
 impl Args {
@@ -99,7 +103,7 @@ fn is_ci() -> bool {
 }
 
 // 分析镜像（错误直接以字符串返回）
-async fn analyze(image: String, output_file: String) -> Result<(), String> {
+async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
@@ -145,11 +149,19 @@ async fn analyze(image: String, output_file: String) -> Result<(), String> {
             passed = false;
         }
         if !output_file.is_empty() {
-            fs::write(
-                output_file,
-                serde_json::to_string(&result).map_err(|err| err.to_string())?,
-            )
-            .map_err(|err| err.to_string())?;
+            let is_markdown = output_file == "-"
+                || output_file.ends_with(".md")
+                || output_file.ends_with(".markdown");
+            let content = if is_markdown {
+                markdown::to_markdown(&result, skip_base)
+            } else {
+                serde_json::to_string(&result).map_err(|err| err.to_string())?
+            };
+            if output_file == "-" {
+                print!("{}", content);
+            } else {
+                fs::write(output_file, content).map_err(|err| err.to_string())?;
+            }
         } else if !passed {
             return Err("CI check fail".to_string());
         }
@@ -168,7 +180,9 @@ async fn run() {
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    if let Err(err) = analyze(value, args.output_file.unwrap_or_default()).await {
+                    if let Err(err) =
+                        analyze(value, args.output_file.unwrap_or_default(), args.skip_base).await
+                    {
                         error!(err, "analyze image fail");
                         std::process::exit(1)
                     }

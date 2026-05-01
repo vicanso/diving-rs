@@ -66,6 +66,15 @@ CI=true diving redis:alpine
 
 # save analysis result to a JSON file
 diving redis:alpine --output-file result.json
+
+# save analysis result as Markdown (detected by .md extension)
+diving redis:alpine --output-file result.md
+
+# print Markdown to stdout (all layers shown by default)
+diving myimage:latest --output-file -
+
+# add --skip-base to auto-detect and hide base image layers via timestamp gap
+diving myimage:latest --output-file - --skip-base
 ```
 
 - `Current Layer Contents` only show the files of current layer

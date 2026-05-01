@@ -63,6 +63,15 @@ CI=true diving redis:alpine
 
 # 将分析结果保存为 JSON 文件
 diving redis:alpine --output-file result.json
+
+# 将分析结果保存为 Markdown 格式（通过 .md 后缀自动识别）
+diving redis:alpine --output-file result.md
+
+# 将 Markdown 分析结果直接输出到控制台（默认显示全部层）
+diving myimage:latest --output-file -
+
+# 加上 --skip-base 通过时间戳间隔自动识别并隐藏基础镜像的层
+diving myimage:latest --output-file - --skip-base
 ```
 
 - `Current Layer Contents` 仅显示当前层的所有文件

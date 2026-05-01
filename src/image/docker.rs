@@ -881,12 +881,13 @@ impl DockerClient {
         }
 
         tl_info!(user = user, img = img, tag = tag, "analyze image done",);
-        let mut user = "".to_string();
+        let image_name = format!("{user}/{img}:{tag}");
+        let mut run_user = "".to_string();
         let mut envs = vec![];
         let mut labels = vec![];
         if let Some(ref extra_info) = config.config {
             if let Some(ref value) = extra_info.user {
-                user = value.to_string();
+                run_user = value.to_string();
             }
             if let Some(ref value) = extra_info.env {
                 envs = value.clone();
@@ -899,10 +900,10 @@ impl DockerClient {
         }
 
         Ok(DockerAnalyzeResult {
-            name: format!("{user}/{img}:{tag}"),
+            name: image_name,
             arch: config.architecture,
             os: config.os,
-            user,
+            user: run_user,
             envs,
             labels,
             layers,
