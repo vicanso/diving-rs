@@ -78,6 +78,10 @@ diving redis:alpine --output-file result.json
 ## web
 
 ```bash
+# Create the data directory and grant ownership to the container user (UID/GID 1000)
+mkdir -p $PWD/diving
+chown -R 1000:1000 $PWD/diving
+
 docker run -d --restart=always \
   -p 7001:7001 \
   -v $PWD/diving:/home/rust/.diving \
@@ -85,7 +89,7 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-It does not run as root, so the mounted directory needs read+write permission, otherwise it will fail to start.
+The container runs as user `rust` (UID 1000, GID 1000), not root. The `chown` command above grants ownership of the host directory to that user. Without it the container cannot write layer cache files and will fail to start.
 
 To change the listen address, pass `--listen`:
 

@@ -75,6 +75,10 @@ diving redis:alpine --output-file result.json
 ## web
 
 ```bash
+# 创建数据目录并将所有权授予容器内用户（UID/GID 均为 1000）
+mkdir -p $PWD/diving
+chown -R 1000:1000 $PWD/diving
+
 docker run -d --restart=always \
   -p 7001:7001 \
   -v $PWD/diving:/home/rust/.diving \
@@ -82,7 +86,7 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-需要注意，镜像非使用 root 运行，因此挂载的目录需要添加对应的读写权限，否则会启动失败。
+容器以 `rust` 用户（UID 1000，GID 1000）而非 root 运行。上方的 `chown` 命令将宿主机目录的所有权交给该用户，省略此步骤会导致容器无法写入 layer 缓存文件而启动失败。
 
 如需修改监听地址，可通过 `--listen` 参数指定：
 
