@@ -20,7 +20,23 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.s
 默认配置文件为`~/.diving/config.yml`，其配置选项如下：
 
 - `layer_path`: 分层数据缓存的目录，默认为`~/.diving/layers`
-- `layer_ttl`: 分层数据缓存的有效期, 默认为`90d`，如果90天未再访问则该layer被清除
+- `layer_ttl`: 分层数据缓存的有效期，默认为`90d`，若超过指定时间未再访问则该 layer 被清除
+- `cleanup_interval_hours`: 扫描并清除过期缓存的间隔时间（单位：小时），默认为`1`
+- `threads`: 并行下载 layer 的线程数，默认为逻辑 CPU 核心数
+- `lowest_efficiency`: CI 检查——最低可接受的镜像效率（0–1），默认为`0.95`
+- `highest_wasted_bytes`: CI 检查——最大允许的浪费字节数，默认为`20971520`（20 MB）
+- `highest_user_wasted_percent`: CI 检查——最大允许的浪费比例（0–1），默认为`0.1`
+
+`~/.diving/config.yml` 示例：
+
+```yaml
+layer_ttl: 30d
+cleanup_interval_hours: 6
+threads: 4
+lowest_efficiency: 0.95
+highest_wasted_bytes: 20971520
+highest_user_wasted_percent: 0.1
+```
 
 ## terminal
 
@@ -33,13 +49,20 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.s
 ```bash
 diving redis:alpine
 
+# 指定架构
+diving redis:alpine?arch=arm64
+
 diving quay.io/prometheus/node-exporter
 
 diving docker://redis:alpine
 
 diving file:///tmp/redis.tar
 
+# CI 模式——输出效率评分，检查不通过时以退出码 1 退出
 CI=true diving redis:alpine
+
+# 将分析结果保存为 JSON 文件
+diving redis:alpine --output-file result.json
 ```
 
 - `Current Layer Contents` 仅显示当前层的所有文件
@@ -59,7 +82,13 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-需要注意，镜像非使用root运行，因此挂载的目录需要添加对应的读写权限，否则会启动失败。
+需要注意，镜像非使用 root 运行，因此挂载的目录需要添加对应的读写权限，否则会启动失败。
+
+如需修改监听地址，可通过 `--listen` 参数指定：
+
+```bash
+diving --mode web --listen 0.0.0.0:8080
+```
 
 在浏览器中打开`http://127.0.0.1:7001/`即可。
 

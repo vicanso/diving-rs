@@ -23,7 +23,23 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.s
 The config file is `~/.diving/config.yml`, the options:
 
 - `layer_path`: The path of layer cache, default is `~/.diving/layers`
-- `layer_ttl`: The ttl of layer, default is `90d`. The layer will be purged if it is not accessed again for 90 days
+- `layer_ttl`: The TTL of cached layer blobs, default is `90d`. A layer is purged if it has not been accessed for the specified duration
+- `cleanup_interval_hours`: How often (in hours) the layer cache is scanned for expired entries, default is `1`
+- `threads`: Number of threads for parallel layer downloads, default is the number of logical CPUs
+- `lowest_efficiency`: CI check — minimum acceptable efficiency score (0–1), default is `0.95`
+- `highest_wasted_bytes`: CI check — maximum wasted bytes, default is `20971520` (20 MB)
+- `highest_user_wasted_percent`: CI check — maximum wasted percentage (0–1), default is `0.1`
+
+Example `~/.diving/config.yml`:
+
+```yaml
+layer_ttl: 30d
+cleanup_interval_hours: 6
+threads: 4
+lowest_efficiency: 0.95
+highest_wasted_bytes: 20971520
+highest_user_wasted_percent: 0.1
+```
 
 ## terminal
 
@@ -36,13 +52,20 @@ Supports three data source modes analyze image. The specific form is as follows:
 ```bash
 diving redis:alpine
 
+# specify architecture
+diving redis:alpine?arch=arm64
+
 diving quay.io/prometheus/node-exporter
 
 diving docker://redis:alpine
 
 diving file:///tmp/redis.tar
 
+# CI mode — prints efficiency score and exits with code 1 if checks fail
 CI=true diving redis:alpine
+
+# save analysis result to a JSON file
+diving redis:alpine --output-file result.json
 ```
 
 - `Current Layer Contents` only show the files of current layer
@@ -62,7 +85,13 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-It should be noted that it does not run as root, so the mounted directory needs to add the permission(r+w), otherwise it will fail to start.
+It does not run as root, so the mounted directory needs read+write permission, otherwise it will fail to start.
+
+To change the listen address, pass `--listen`:
+
+```bash
+diving --mode web --listen 0.0.0.0:8080
+```
 
 Open `http://127.0.0.1:7001/` in the browser.
 
