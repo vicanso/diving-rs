@@ -140,7 +140,6 @@ pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<Image
     let buf;
     let size = data.len() as u64;
     let mut unpack_size = size;
-    // TODO 支持gzip zstd等
     let mut a = if media_type.contains("gzip") {
         buf = gunzip(data)?;
         unpack_size = buf.len() as u64;

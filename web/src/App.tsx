@@ -81,7 +81,7 @@ interface Info {
   mode: string;
   uid: number;
   gid: number;
-  isWhiteout: any;
+  isWhiteout: boolean;
 }
 interface FileWastedSummary {
   path: string;
@@ -472,8 +472,8 @@ const request = axios.create({
   baseURL: "./api",
 });
 
-class App extends Component {
-  constructor(props: any) {
+class App extends Component<object, AppState> {
+  constructor(props: object) {
     super(props);
     const urlInfo = new URL(window.location.href);
     const image = urlInfo.searchParams.get("image") || "";

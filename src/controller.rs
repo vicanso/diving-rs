@@ -108,11 +108,13 @@ impl IntoResponse for DownloadFile {
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
     let buf = get_blob_from_file(&params.digest).await?;
     let content = get_file_content_from_layer(&buf, &params.media_type, &params.file).await?;
-    let name = params.file.split('/').next_back().unwrap_or_default();
-    Ok(DownloadFile {
-        name: name.to_string(),
-        content,
-    })
+    let raw_name = params.file.split('/').next_back().unwrap_or_default();
+    // Strip characters that would break the Content-Disposition header value
+    let name = raw_name
+        .chars()
+        .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
+        .collect::<String>();
+    Ok(DownloadFile { name, content })
 }
 
 async fn serve(uri: Uri) -> StaticFile {

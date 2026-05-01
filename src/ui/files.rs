@@ -80,18 +80,8 @@ fn add_to_file_tree_view(
 
     for (index, item) in items.iter().enumerate() {
         match mode {
-            // 只展示更新与删除
-            1 => {
-                if !is_modified_or_removed(item) {
-                    continue;
-                }
-            }
-            // 只显示大于1MB
-            2 => {
-                if item.size < 1024 * 1024 {
-                    continue;
-                }
-            }
+            1 if !is_modified_or_removed(item) => continue,
+            2 if item.size < 1024 * 1024 => continue,
             _ => {}
         }
         let mut style = Style::default();

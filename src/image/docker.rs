@@ -268,7 +268,7 @@ impl DockerAnalyzeResult {
                 });
             }
         }
-        wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        wasted_list.sort_by_key(|b| std::cmp::Reverse(b.total_size));
 
         let mut score = 100 - wasted_size * 100 / self.total_size;
         // 有浪费空间，则分数-1
@@ -339,8 +339,8 @@ fn get_manifest_cache() -> &'static Mutex<LruCache<String, ImageManifestCacheInf
 fn get_manifest_from_cache(key: &String) -> Option<ImageManifest> {
     if let Ok(mut cache) = get_manifest_cache().lock() {
         if let Some(info) = cache.get(key) {
-            // 数据未过期
             if info.expired_at > Utc::now().timestamp() {
+                tracing::debug!(key, "manifest cache hit");
                 return Some(info.manifest.clone());
             }
         }
@@ -349,10 +349,8 @@ fn get_manifest_from_cache(key: &String) -> Option<ImageManifest> {
 }
 
 fn set_manifest_to_cache(key: &String, manifest: ImageManifest, ttl_seconds: i64) {
-    // 失败忽略
     if let Ok(mut cache) = get_manifest_cache().lock() {
-        // 设置5分钟有效
-        cache.push(
+        cache.put(
             key.to_string(),
             ImageManifestCacheInfo {
                 expired_at: Utc::now().timestamp() + ttl_seconds,
@@ -398,7 +396,7 @@ fn add_to_file_summary(
     for file in files.iter() {
         for items in file_tree_list.iter() {
             let arr: Vec<&str> = file.path.split('/').collect();
-            if let Some(found) = find_file_tree_item(items, arr) {
+            if let Some(found) = find_file_tree_item(items, &arr) {
                 // 以前已存在，因此为修改或删除
                 // 文件删除
                 let mut op = Op::Modified;
@@ -622,9 +620,16 @@ impl DockerClient {
                 category: "get_manifest",
             })?
         };
-        // 暂时有效期全部设置为5分钟
-        // 后续考虑是否根据tag使用不同有效期
-        set_manifest_to_cache(&key, resp.clone(), 5 * 60);
+        // mutable tags (latest/edge/stable/…) expire quickly; versioned tags are immutable
+        let mutable_tags = [
+            "latest", "edge", "stable", "nightly", "beta", "alpha", "main",
+        ];
+        let ttl = if mutable_tags.contains(&params.tag.as_str()) {
+            5 * 60
+        } else {
+            60 * 60
+        };
+        set_manifest_to_cache(&key, resp.clone(), ttl);
         tl_info!(url = url, "got manifest");
         Ok(resp)
     }
@@ -649,9 +654,9 @@ impl DockerClient {
     }
     // 获取镜像分层的blob
     pub async fn get_blob(&self, params: &DockerImageParams, digest: &str) -> Result<Vec<u8>> {
-        // 是否需要加锁避免同时读写
         // 忽略出错，如果出错直接从网络加载
         if let Ok(data) = get_blob_from_file(digest).await {
+            tl_info!(digest, "blob cache hit");
             return Ok(data);
         }
         let user = &params.user;
@@ -936,5 +941,65 @@ pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyze
             ..Default::default()
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_image_info_simple() {
+        let info = parse_image_info("redis:alpine");
+        assert_eq!(info.name, "redis");
+        assert_eq!(info.tag, "alpine");
+        assert_eq!(info.user, "library");
+        assert_eq!(info.registry, REGISTRY);
+    }
+
+    #[test]
+    fn test_parse_image_info_no_tag_defaults_to_latest() {
+        let info = parse_image_info("redis");
+        assert_eq!(info.name, "redis");
+        assert_eq!(info.tag, "latest");
+    }
+
+    #[test]
+    fn test_parse_image_info_with_user() {
+        let info = parse_image_info("vicanso/diving:v1.0");
+        assert_eq!(info.user, "vicanso");
+        assert_eq!(info.name, "diving");
+        assert_eq!(info.tag, "v1.0");
+    }
+
+    #[test]
+    fn test_parse_image_info_with_registry() {
+        let info = parse_image_info("registry.example.com/user/image:v2.3");
+        assert_eq!(info.registry, "https://registry.example.com/v2");
+        assert_eq!(info.user, "user");
+        assert_eq!(info.name, "image");
+        assert_eq!(info.tag, "v2.3");
+    }
+
+    #[test]
+    fn test_parse_image_info_file_protocol() {
+        let info = parse_image_info("file:///tmp/image.tar");
+        assert_eq!(info.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(info.name, "/tmp/image.tar");
+    }
+
+    #[test]
+    fn test_parse_image_info_docker_protocol() {
+        let info = parse_image_info("docker://redis:alpine");
+        assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
+        assert_eq!(info.name, "redis:alpine");
+    }
+
+    #[test]
+    fn test_parse_image_info_arch_query_param() {
+        let info = parse_image_info("redis:alpine?arch=arm64");
+        assert_eq!(info.arch, "arm64");
+        assert_eq!(info.tag, "alpine");
+        assert_eq!(info.name, "redis");
     }
 }

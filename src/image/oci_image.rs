@@ -229,62 +229,56 @@ pub struct FileTreeItem {
 }
 
 // 从文件树中查找文件
-pub fn find_file_tree_item(items: &[FileTreeItem], path_list: Vec<&str>) -> Option<FileTreeItem> {
+pub fn find_file_tree_item(items: &[FileTreeItem], path_list: &[&str]) -> Option<FileTreeItem> {
     if path_list.is_empty() {
         return None;
     }
     let is_last = path_list.len() == 1;
-    let path = path_list.first().unwrap().to_string();
+    let path = path_list[0];
     for item in items.iter() {
         if item.name == path {
             if is_last {
                 return Some(item.clone());
             }
-            return find_file_tree_item(&item.children, path_list[1..].to_vec());
+            return find_file_tree_item(&item.children, &path_list[1..]);
         }
     }
     None
 }
 
 // 添加文件至文件树
-fn add_file(items: &mut Vec<FileTreeItem>, name_list: Vec<&str>, item: FileTreeItem) {
-    // 文件
+fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeItem) {
     if name_list.is_empty() {
         items.push(item);
         return;
     }
-    // 目录
     let name = name_list[0];
-    let mut found_index = -1;
-    // 是否已存在此目录
+    let mut found_index = -1i64;
     for (index, dir) in items.iter_mut().enumerate() {
         if dir.name == name {
             dir.size += item.size;
             found_index = index as i64;
         }
     }
-    // 不存在则插入
     if found_index < 0 {
         found_index = items.len() as i64;
-        let mut op = Op::None;
-        if item.op == Op::Modified {
-            op = Op::Modified;
-        }
+        let op = if item.op == Op::Modified {
+            Op::Modified
+        } else {
+            Op::None
+        };
         items.push(FileTreeItem {
             name: name.to_string(),
             size: item.size,
             op,
-            // TODO 其它属性
             ..Default::default()
         });
     }
     if let Some(file_tree_item) = items.get_mut(found_index as usize) {
-        // 子目录
-        add_file(&mut file_tree_item.children, name_list[1..].to_vec(), item);
+        add_file(&mut file_tree_item.children, &name_list[1..], item);
     }
 }
 
-// 将文件转换为文件树
 pub fn convert_files_to_file_tree(
     files: &[ImageFileInfo],
     file_summary_list: &[ImageFileSummary],
@@ -308,7 +302,7 @@ pub fn convert_files_to_file_tree(
         let size = arr.len();
         add_file(
             &mut file_tree,
-            arr[0..size - 1].to_vec(),
+            &arr[0..size - 1],
             FileTreeItem {
                 // 已保证不会为空
                 name: arr[size - 1].to_string(),
@@ -323,4 +317,75 @@ pub fn convert_files_to_file_tree(
         )
     }
     file_tree
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_files_to_file_tree_empty() {
+        assert!(convert_files_to_file_tree(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn test_convert_files_to_file_tree_nested() {
+        let files = vec![ImageFileInfo {
+            path: "usr/local/bin/app".to_string(),
+            size: 1024,
+            ..Default::default()
+        }];
+        let tree = convert_files_to_file_tree(&files, &[]);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name, "usr");
+        assert_eq!(tree[0].size, 1024);
+        assert_eq!(tree[0].children[0].name, "local");
+        assert_eq!(tree[0].children[0].children[0].name, "bin");
+        let leaf = &tree[0].children[0].children[0].children[0];
+        assert_eq!(leaf.name, "app");
+        assert_eq!(leaf.size, 1024);
+    }
+
+    #[test]
+    fn test_convert_files_sibling_dirs_accumulate_size() {
+        let files = vec![
+            ImageFileInfo {
+                path: "usr/bin/a".to_string(),
+                size: 100,
+                ..Default::default()
+            },
+            ImageFileInfo {
+                path: "usr/bin/b".to_string(),
+                size: 200,
+                ..Default::default()
+            },
+        ];
+        let tree = convert_files_to_file_tree(&files, &[]);
+        assert_eq!(tree[0].size, 300);
+    }
+
+    #[test]
+    fn test_find_file_tree_item_hit() {
+        let files = vec![ImageFileInfo {
+            path: "usr/bin/app".to_string(),
+            size: 512,
+            ..Default::default()
+        }];
+        let tree = convert_files_to_file_tree(&files, &[]);
+        let found = find_file_tree_item(&tree, &["usr", "bin", "app"]);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().size, 512);
+    }
+
+    #[test]
+    fn test_find_file_tree_item_miss() {
+        let files = vec![ImageFileInfo {
+            path: "usr/bin/app".to_string(),
+            size: 512,
+            ..Default::default()
+        }];
+        let tree = convert_files_to_file_tree(&files, &[]);
+        assert!(find_file_tree_item(&tree, &["usr", "bin", "missing"]).is_none());
+        assert!(find_file_tree_item(&tree, &[]).is_none());
+    }
 }

@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::{env, str::FromStr};
 use tokio::signal;
-use tokio_cron_scheduler::{Job, JobScheduler};
 use tower::ServiceBuilder;
 use tracing::Level;
 use tracing::{error, info};
@@ -75,26 +74,24 @@ fn init_logger() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
 
-async fn start_scheduler() {
-    let scheduler = JobScheduler::new().await.unwrap();
-    scheduler
-        .add(
-            // TODO 后续调整为可配置
-            Job::new_async("@hourly", |_, _| {
-                Box::pin(async {
-                    let result = clear_blob_files().await;
-                    if let Err(err) = result {
-                        error!(err = err.to_string(), "clear blob files fail")
-                    } else {
-                        info!("clear blob files success")
-                    }
-                })
-            })
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    scheduler.start().await.unwrap();
+fn start_cleanup_task() {
+    let interval_hours = config::must_load_config()
+        .cleanup_interval_hours
+        .unwrap_or(1);
+    let duration = Duration::from_secs(interval_hours * 3600);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(duration);
+        ticker.tick().await; // skip immediate first tick
+        loop {
+            ticker.tick().await;
+            let result = clear_blob_files().await;
+            if let Err(err) = result {
+                error!(err = err.to_string(), "clear blob files fail");
+            } else {
+                info!("clear blob files success");
+            }
+        }
+    });
 }
 
 fn is_ci() -> bool {
@@ -181,7 +178,7 @@ async fn run() {
             error!("image can not be nil")
         }
     } else {
-        start_scheduler().await;
+        start_cleanup_task();
         // build our application with a route
         let app = Router::new()
             .merge(new_router())
@@ -195,15 +192,26 @@ async fn run() {
             .layer(from_fn(entry));
 
         info!("listening on http://{}", args.listen);
-        let listener = tokio::net::TcpListener::bind(args.listen).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(&args.listen)
+            .await
+            .unwrap_or_else(|e| {
+                error!(
+                    err = e.to_string(),
+                    addr = args.listen,
+                    "failed to bind TCP listener"
+                );
+                std::process::exit(1);
+            });
 
-        axum::serve(
+        if let Err(err) = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
+        {
+            error!(err = err.to_string(), "server error");
+        }
     }
 }
 

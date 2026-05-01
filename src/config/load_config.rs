@@ -13,6 +13,8 @@ pub struct DivingConfig {
     pub lowest_efficiency: Option<f64>,
     pub highest_wasted_bytes: Option<ByteSize>,
     pub highest_user_wasted_percent: Option<f64>,
+    // Interval between layer cache cleanup runs, in hours (default: 1)
+    pub cleanup_interval_hours: Option<u64>,
 }
 
 pub fn must_load_config() -> &'static DivingConfig {
@@ -20,14 +22,15 @@ pub fn must_load_config() -> &'static DivingConfig {
     DIVING_CONFIG.get_or_init(|| {
         let config_file = get_config_path().join("config.yml");
         if !config_file.exists() {
-            fs::File::create(config_file.clone()).unwrap();
+            fs::File::create(&config_file)
+                .expect("failed to create ~/.diving/config.yml: check directory permissions");
         }
         Config::builder()
             .add_source(File::from(config_file))
             .build()
-            .unwrap()
+            .expect("failed to build config")
             .try_deserialize::<DivingConfig>()
-            .unwrap()
+            .expect("config.yml contains invalid fields: check ~/.diving/config.yml")
     })
 }
 
@@ -35,16 +38,16 @@ pub fn must_load_config() -> &'static DivingConfig {
 pub fn get_config_path() -> &'static PathBuf {
     static CONFIG_PATH: OnceCell<PathBuf> = OnceCell::new();
     CONFIG_PATH.get_or_init(|| {
-        let dir = home_dir().unwrap();
+        let dir = home_dir().expect("failed to determine home directory");
         let config_path = dir.join(".diving");
-        fs::create_dir_all(config_path.clone()).unwrap();
+        fs::create_dir_all(&config_path)
+            .expect("failed to create ~/.diving directory: check permissions");
         config_path
     })
 }
 
 // 获取或初始化layer目录
 pub fn get_layer_path() -> &'static PathBuf {
-    // 读取配置，若未配置则使用默认
     static LAYER_PATH: OnceCell<PathBuf> = OnceCell::new();
     LAYER_PATH.get_or_init(|| {
         let config_path = get_config_path();
@@ -54,7 +57,8 @@ pub fn get_layer_path() -> &'static PathBuf {
             .clone()
             .unwrap_or_else(|| "layers".to_string());
         let layer_path = config_path.join(file);
-        fs::create_dir_all(layer_path.clone()).unwrap();
+        fs::create_dir_all(&layer_path)
+            .expect("failed to create layer cache directory: check permissions");
         layer_path
     })
 }

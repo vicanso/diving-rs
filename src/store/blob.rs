@@ -4,6 +4,7 @@ use glob::glob;
 use snafu::{ResultExt, Snafu};
 use std::{path::PathBuf, time::Duration};
 use tokio::fs;
+use tracing::warn;
 
 use crate::config::{get_layer_path, must_load_config};
 use crate::error::HTTPError;
@@ -99,8 +100,9 @@ pub async fn clear_blob_files() -> Result<()> {
     })?)
     .flatten()
     {
-        // 清除失败忽略
-        let _ = clear_blob(entry, expired).await;
+        if let Err(e) = clear_blob(entry, expired).await {
+            warn!(err = e.to_string(), "failed to clear blob file");
+        }
     }
     Ok(())
 }
