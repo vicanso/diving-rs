@@ -42,6 +42,11 @@ impl From<Error> for HTTPError {
     }
 }
 
+// 返回blob缓存文件路径（不检查文件是否存在）
+pub fn get_blob_path(digest: &str) -> PathBuf {
+    get_layer_path().join(digest)
+}
+
 // 将blob数据保存至文件
 pub async fn save_blob_to_file(digest: &str, data: &Bytes) -> Result<()> {
     let file = get_layer_path().join(digest);

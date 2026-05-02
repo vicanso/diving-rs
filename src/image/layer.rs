@@ -1,10 +1,10 @@
 use crate::error::HTTPError;
-use bytes::Bytes;
-use libflate::gzip::Decoder;
+use libflate::gzip::Decoder as GzipDecoder;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::fs::File;
-use std::{io::Read, path::Path};
+use std::io::Read;
+use std::path::Path;
 use tar::Archive;
 
 use super::ImageFileInfo;
@@ -25,27 +25,75 @@ pub enum Error {
 
 impl From<Error> for HTTPError {
     fn from(err: Error) -> Self {
-        // 对于部分error单独转换
         HTTPError::new_with_category(&err.to_string(), "layer")
     }
 }
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-// 解压gzip
-fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = Decoder::new(data).context(GzipDecodeSnafu {})?;
-    let mut decode_data = vec![];
-    let _ = decoder
-        .read_to_end(&mut decode_data)
-        .context(GzipDecodeSnafu {})?;
-    Ok(Bytes::copy_from_slice(&decode_data).to_vec())
+/// Wraps any `Read` and counts the total bytes read, letting us measure the
+/// decompressed size without buffering the full output.
+struct CountingReader<R: Read> {
+    inner: R,
+    count: u64,
 }
 
-// zstd解压
-pub fn zstd_decode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut buf = vec![];
-    zstd::stream::copy_decode(data, &mut buf).context(ZstdDecodeSnafu {})?;
-    Ok(buf)
+impl<R: Read> CountingReader<R> {
+    fn new(inner: R) -> Self {
+        Self { inner, count: 0 }
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+}
+
+/// Parse every tar entry header from `archive`, collecting file metadata.
+/// File content is never read — the tar crate reads and discards it when
+/// advancing to the next entry.
+fn collect_tar_entries<R: Read>(
+    archive: &mut Archive<R>,
+) -> Result<Vec<ImageFileInfo>> {
+    let mut files = vec![];
+    for entry in archive.entries().context(TarSnafu {})? {
+        let file = entry.context(TarSnafu {})?;
+        let header = file.header();
+        if header.entry_type().is_dir() {
+            continue;
+        }
+        let mut link = "".to_string();
+        if let Some(value) = file.link_name().context(TarSnafu {})? {
+            link = value.to_string_lossy().to_string();
+        }
+        let mut path = file
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .to_string();
+        let mut is_whiteout = None;
+        if let Some(filename) = Path::new(&path).file_name() {
+            let name = filename.to_string_lossy();
+            let prefix = ".wh.";
+            if name.starts_with(prefix) {
+                path = path.replace(name.to_string().as_str(), &name.replace(prefix, ""));
+                is_whiteout = Some(true);
+            }
+        }
+        let mode = header.mode().context(TarSnafu {})?;
+        files.push(ImageFileInfo {
+            path,
+            link,
+            size: file.size(),
+            mode: unix_mode::to_string(mode),
+            uid: header.uid().context(TarSnafu {})?,
+            gid: header.gid().context(TarSnafu {})?,
+            is_whiteout,
+        });
+    }
+    Ok(files)
 }
 
 // 从tar中读取文件信息
@@ -66,11 +114,10 @@ pub async fn get_file_size_from_tar(tar: &str, filename: &str) -> Result<u64> {
     Ok(0)
 }
 
-// 从tar中读取文件信息
+// 从tar中读取文件内容
 pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
     let file = File::open(tar).context(TarSnafu {})?;
     let mut a = Archive::new(file);
-    let mut content = vec![];
     for file in a.entries().context(TarSnafu {})? {
         let mut file = file.context(TarSnafu {})?;
         let name = file
@@ -79,54 +126,52 @@ pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<
             .to_string_lossy()
             .to_string();
         if name == filename {
+            let mut content = Vec::with_capacity(file.size() as usize);
             file.read_to_end(&mut content).context(ReadSnafu {})?;
-            break;
+            return Ok(content);
         }
     }
-    if content.is_empty() {
-        return Err(Error::NotFound {});
-    }
-    Ok(content)
+    Err(Error::NotFound {})
 }
 
-// 从分层数据中读取文件
-pub async fn get_file_content_from_layer(
-    data: &[u8],
+// 从layer数据中读取指定文件内容（流式解压，只读取目标文件）
+pub async fn get_file_content_from_layer<R: Read>(
+    reader: R,
     media_type: &str,
     filename: &str,
 ) -> Result<Vec<u8>> {
-    let buf;
-    let mut a = if media_type.contains("gzip") {
-        buf = gunzip(data)?;
-        Archive::new(&buf[..])
+    macro_rules! find_file {
+        ($reader:expr) => {{
+            let mut archive = Archive::new($reader);
+            for entry in archive.entries().context(TarSnafu {})? {
+                let mut entry = entry.context(TarSnafu {})?;
+                let name = entry
+                    .path()
+                    .context(TarSnafu {})?
+                    .to_string_lossy()
+                    .to_string();
+                if name == filename {
+                    let mut content = Vec::with_capacity(entry.size() as usize);
+                    entry.read_to_end(&mut content).context(ReadSnafu {})?;
+                    return Ok(content);
+                }
+            }
+            Err(Error::NotFound {})
+        }};
+    }
+
+    if media_type.contains("gzip") {
+        find_file!(GzipDecoder::new(reader).context(GzipDecodeSnafu {})?)
     } else if media_type.contains("zstd") {
-        buf = zstd_decode(data)?;
-        Archive::new(&buf[..])
+        find_file!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
     } else {
-        Archive::new(data)
-    };
-    let mut content = vec![];
-    for file in a.entries().context(TarSnafu {})? {
-        let mut file = file.context(TarSnafu {})?;
-        let name = file
-            .path()
-            .context(TarSnafu {})?
-            .to_string_lossy()
-            .to_string();
-        if name == filename {
-            file.read_to_end(&mut content).context(ReadSnafu {})?;
-            break;
-        }
+        find_file!(reader)
     }
-    if content.is_empty() {
-        return Err(Error::NotFound {});
-    }
-    Ok(content)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageLayerInfo {
-    // 原始大小
+    // 原始（压缩）大小
     pub size: u64,
     // 解压后的大小
     pub unpack_size: u64,
@@ -134,69 +179,32 @@ pub struct ImageLayerInfo {
     pub files: Vec<ImageFileInfo>,
 }
 
-// 从分层数据中读取所有文件信息
-// "application/vnd.oci.image.layer.v1.tar+gzip",
-pub async fn get_files_from_layer(data: &[u8], media_type: &str) -> Result<ImageLayerInfo> {
-    let buf;
-    let size = data.len() as u64;
-    let mut unpack_size = size;
-    let mut a = if media_type.contains("gzip") {
-        buf = gunzip(data)?;
-        unpack_size = buf.len() as u64;
-        Archive::new(&buf[..])
+// 从layer数据中读取所有文件信息
+// 使用流式解压 + tar header-only 读取，不在内存中缓冲解压内容
+pub async fn get_files_from_layer<R: Read>(
+    reader: R,
+    media_type: &str,
+    compressed_size: u64,
+) -> Result<ImageLayerInfo> {
+    macro_rules! parse_layer {
+        ($reader:expr) => {{
+            let mut counting = CountingReader::new($reader);
+            let files = collect_tar_entries(&mut Archive::new(&mut counting))?;
+            (files, counting.count)
+        }};
+    }
+
+    let (files, unpack_size) = if media_type.contains("gzip") {
+        parse_layer!(GzipDecoder::new(reader).context(GzipDecodeSnafu {})?)
     } else if media_type.contains("zstd") {
-        buf = zstd_decode(data)?;
-        unpack_size = buf.len() as u64;
-        Archive::new(&buf[..])
+        parse_layer!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
     } else {
-        Archive::new(data)
+        parse_layer!(reader)
     };
 
-    let mut files = vec![];
-    for file in a.entries().context(TarSnafu {})? {
-        let file = file.context(TarSnafu {})?;
-        let header = file.header();
-        // 不返回目录
-        if header.entry_type().is_dir() {
-            continue;
-        }
-        let mut link = "".to_string();
-
-        if let Some(value) = file.link_name().context(TarSnafu {})? {
-            link = value.to_string_lossy().to_string()
-        }
-        let mut path = file
-            .path()
-            .context(TarSnafu {})?
-            .to_string_lossy()
-            .to_string();
-        let mut is_whiteout = None;
-        // 为了实现这样的删除操作，AuFS 会在可读写层创建一个 whiteout 文件，把只读层里的文件“遮挡”起来。
-        // .wh.
-        // usr/local/bin/.wh.static
-        if let Some(filename) = Path::new(&path).file_name() {
-            let name = filename.to_string_lossy();
-            let prefix = ".wh.";
-            if name.starts_with(prefix) {
-                path = path.replace(name.to_string().as_str(), &name.replace(prefix, ""));
-                is_whiteout = Some(true);
-            }
-        }
-        let mode = header.mode().context(TarSnafu {})?;
-        let info = ImageFileInfo {
-            path,
-            link,
-            size: file.size(),
-            mode: unix_mode::to_string(mode),
-            uid: header.uid().context(TarSnafu {})?,
-            gid: header.gid().context(TarSnafu {})?,
-            is_whiteout,
-        };
-        files.push(info);
-    }
     Ok(ImageLayerInfo {
         files,
+        size: compressed_size,
         unpack_size,
-        size,
     })
 }

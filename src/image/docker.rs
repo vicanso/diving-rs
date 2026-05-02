@@ -1,6 +1,7 @@
 use crate::config::must_load_config;
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use http::StatusCode;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
@@ -9,10 +10,11 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 use substring::Substring;
+use tokio::io::AsyncWriteExt;
 
 use super::{get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer};
 use super::{
@@ -24,7 +26,7 @@ use super::{
 use crate::{
     error::HTTPError,
     image::{convert_files_to_file_tree, find_file_tree_item, ImageFileInfo},
-    store::{get_blob_from_file, save_blob_to_file},
+    store::{get_blob_from_file, get_blob_path, save_blob_to_file},
 };
 
 #[derive(Debug, Snafu)]
@@ -508,11 +510,11 @@ impl DockerClient {
         }
         Ok(manifest_list[0].clone())
     }
-    async fn get_bytes(
+    async fn send_request(
         &self,
         url: String,
         headers: HashMap<String, String>,
-    ) -> Result<bytes::Bytes> {
+    ) -> Result<reqwest::Response> {
         let mut builder = Client::builder()
             .build()
             .context(BuildSnafu { url: url.clone() })?
@@ -533,12 +535,39 @@ impl DockerClient {
             return Err(Error::Docker {
                 message: err.errors[0].message.clone(),
                 code: err.errors[0].code.clone(),
-                url: url.clone(),
+                url,
             });
         }
+        Ok(resp)
+    }
 
-        let result = resp.bytes().await.context(JsonSnafu { url: url.clone() })?;
-        Ok(result)
+    async fn get_bytes(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+    ) -> Result<bytes::Bytes> {
+        let resp = self.send_request(url.clone(), headers).await?;
+        resp.bytes().await.context(JsonSnafu { url })
+    }
+
+    /// Stream a blob response directly to disk without buffering the whole body.
+    async fn download_blob_to_path(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let resp = self.send_request(url.clone(), headers).await?;
+        let mut file = tokio::fs::File::create(path)
+            .await
+            .context(IOSnafu {})?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context(RequestSnafu { url: url.clone() })?;
+            file.write_all(&chunk).await.context(IOSnafu {})?;
+        }
+        file.flush().await.context(IOSnafu {})?;
+        Ok(())
     }
     async fn get<T: DeserializeOwned>(
         &self,
@@ -682,18 +711,49 @@ impl DockerClient {
         layer: ImageManifestLayer,
     ) -> Result<ImageLayerInfo> {
         let img = &params.img;
-        let buf = if self.is_local() {
-            get_file_content_from_tar(img, &layer.digest)
+        if self.is_local() {
+            let buf = get_file_content_from_tar(img, &layer.digest)
                 .await
-                .context(LayerSnafu {})?
-        } else {
-            self.get_blob(params, &layer.digest).await?
-        };
-
-        let info = get_files_from_layer(&buf, &layer.media_type)
+                .context(LayerSnafu {})?;
+            let compressed_size = buf.len() as u64;
+            return get_files_from_layer(
+                std::io::Cursor::new(buf),
+                &layer.media_type,
+                compressed_size,
+            )
             .await
-            .context(LayerSnafu {})?;
-        Ok(info)
+            .context(LayerSnafu {});
+        }
+
+        let path = get_blob_path(&layer.digest);
+        let is_cached = path.exists()
+            && std::fs::metadata(&path)
+                .map(|m| m.len() == layer.size)
+                .unwrap_or(false);
+
+        if !is_cached {
+            let user = &params.user;
+            let token = &params.token;
+            let url = format!("{}/{user}/{img}/blobs/{}", self.registry, layer.digest);
+            tl_info!(url = url, "getting blob");
+            let mut headers = HashMap::new();
+            if !token.is_empty() {
+                headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+            }
+            self.download_blob_to_path(url.clone(), headers, &path)
+                .await?;
+            tl_info!(url = url, "got blob");
+        } else {
+            tl_info!(digest = layer.digest, "blob cache hit");
+        }
+
+        let compressed_size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(layer.size);
+        let file = std::fs::File::open(&path).context(IOSnafu {})?;
+        get_files_from_layer(BufReader::new(file), &layer.media_type, compressed_size)
+            .await
+            .context(LayerSnafu {})
     }
     async fn get_all_layer_info(
         &self,

@@ -2,7 +2,7 @@ use crate::dist::{get_static_file, StaticFile};
 use crate::error::HTTPResult;
 use crate::image::{analyze_docker_image, get_file_content_from_layer, parse_image_info};
 use crate::markdown;
-use crate::store::get_blob_from_file;
+use crate::store::get_blob_path;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::Query, routing::get, Json, Router};
 use http::header;
@@ -111,8 +111,15 @@ impl IntoResponse for DownloadFile {
 }
 
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
-    let buf = get_blob_from_file(&params.digest).await?;
-    let content = get_file_content_from_layer(&buf, &params.media_type, &params.file).await?;
+    let path = get_blob_path(&params.digest);
+    let file = std::fs::File::open(&path)
+        .map_err(|e| crate::error::HTTPError::new_with_category(&e.to_string(), "blob"))?;
+    let content = get_file_content_from_layer(
+        std::io::BufReader::new(file),
+        &params.media_type,
+        &params.file,
+    )
+    .await?;
     let raw_name = params.file.split('/').next_back().unwrap_or_default();
     // Strip characters that would break the Content-Disposition header value
     let name = raw_name
