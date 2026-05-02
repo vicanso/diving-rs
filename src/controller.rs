@@ -37,16 +37,16 @@ struct AnalyzeParams {
     skip_base: Option<bool>,
 }
 
-fn get_latest_image_cache() -> &'static Mutex<LruCache<String, String>> {
-    static LATEST_IMAGE_CACHE: OnceCell<Mutex<LruCache<String, String>>> = OnceCell::new();
+fn get_latest_image_cache() -> &'static Mutex<LruCache<String, ()>> {
+    static LATEST_IMAGE_CACHE: OnceCell<Mutex<LruCache<String, ()>>> = OnceCell::new();
     LATEST_IMAGE_CACHE.get_or_init(|| {
         let c = LruCache::new(NonZeroUsize::new(5).unwrap());
         Mutex::new(c)
     })
 }
-fn add_to_latest_image_cache(name: &String) {
+fn add_to_latest_image_cache(name: &str) {
     if let Ok(mut cache) = get_latest_image_cache().lock() {
-        cache.put(name.to_string(), "".to_string());
+        cache.put(name.to_owned(), ());
     }
 }
 
@@ -69,15 +69,14 @@ struct LatestImageResp {
 }
 
 async fn get_latest_images() -> JSONResult<LatestImageResp> {
-    let mut image_list = vec![];
-    if let Ok(cache) = get_latest_image_cache().lock() {
-        for (name, _) in cache.iter() {
-            image_list.push(name.clone());
-        }
-    }
+    let image_list = if let Ok(cache) = get_latest_image_cache().lock() {
+        cache.iter().map(|(name, _)| name.clone()).collect()
+    } else {
+        vec![]
+    };
     Ok(Json(LatestImageResp {
         images: image_list,
-        version: VERSION.to_string(),
+        version: VERSION.to_owned(),
     }))
 }
 
@@ -112,20 +111,22 @@ impl IntoResponse for DownloadFile {
 
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
     let path = get_blob_path(&params.digest);
-    let file = std::fs::File::open(&path)
-        .map_err(|e| crate::error::HTTPError::new_with_category(&e.to_string(), "blob"))?;
-    let content = get_file_content_from_layer(
-        std::io::BufReader::new(file),
-        &params.media_type,
-        &params.file,
-    )
-    .await?;
-    let raw_name = params.file.split('/').next_back().unwrap_or_default();
-    // Strip characters that would break the Content-Disposition header value
-    let name = raw_name
-        .chars()
-        .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
-        .collect::<String>();
+    let (name, content) = tokio::task::block_in_place(|| -> HTTPResult<(String, Vec<u8>)> {
+        let file = std::fs::File::open(&path)
+            .map_err(|e| crate::error::HTTPError::new_with_category(&e.to_string(), "blob"))?;
+        let content = get_file_content_from_layer(
+            std::io::BufReader::new(file),
+            &params.media_type,
+            &params.file,
+        )?;
+        let raw_name = params.file.split('/').next_back().unwrap_or_default();
+        // Strip characters that would break the Content-Disposition header value
+        let name = raw_name
+            .chars()
+            .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
+            .collect::<String>();
+        Ok((name, content))
+    })?;
     Ok(DownloadFile { name, content })
 }
 

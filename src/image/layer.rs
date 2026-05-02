@@ -54,9 +54,7 @@ impl<R: Read> Read for CountingReader<R> {
 /// Parse every tar entry header from `archive`, collecting file metadata.
 /// File content is never read — the tar crate reads and discards it when
 /// advancing to the next entry.
-fn collect_tar_entries<R: Read>(
-    archive: &mut Archive<R>,
-) -> Result<Vec<ImageFileInfo>> {
+fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFileInfo>> {
     let mut files = vec![];
     for entry in archive.entries().context(TarSnafu {})? {
         let file = entry.context(TarSnafu {})?;
@@ -135,7 +133,7 @@ pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<
 }
 
 // 从layer数据中读取指定文件内容（流式解压，只读取目标文件）
-pub async fn get_file_content_from_layer<R: Read>(
+pub fn get_file_content_from_layer<R: Read>(
     reader: R,
     media_type: &str,
     filename: &str,
@@ -181,7 +179,7 @@ pub struct ImageLayerInfo {
 
 // 从layer数据中读取所有文件信息
 // 使用流式解压 + tar header-only 读取，不在内存中缓冲解压内容
-pub async fn get_files_from_layer<R: Read>(
+pub fn get_files_from_layer<R: Read>(
     reader: R,
     media_type: &str,
     compressed_size: u64,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
@@ -228,24 +228,6 @@ pub struct FileTreeItem {
     pub children: Vec<FileTreeItem>,
 }
 
-// 从文件树中查找文件
-pub fn find_file_tree_item(items: &[FileTreeItem], path_list: &[&str]) -> Option<FileTreeItem> {
-    if path_list.is_empty() {
-        return None;
-    }
-    let is_last = path_list.len() == 1;
-    let path = path_list[0];
-    for item in items.iter() {
-        if item.name == path {
-            if is_last {
-                return Some(item.clone());
-            }
-            return find_file_tree_item(&item.children, &path_list[1..]);
-        }
-    }
-    None
-}
-
 // 添加文件至文件树
 fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeItem) {
     if name_list.is_empty() {
@@ -258,6 +240,7 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeIte
         if dir.name == name {
             dir.size += item.size;
             found_index = index as i64;
+            break;
         }
     }
     if found_index < 0 {
@@ -283,19 +266,22 @@ pub fn convert_files_to_file_tree(
     files: &[ImageFileInfo],
     file_summary_list: &[ImageFileSummary],
 ) -> Vec<FileTreeItem> {
+    let modified_paths: HashSet<&str> = file_summary_list
+        .iter()
+        .map(|item| item.info.path.as_str())
+        .collect();
     let mut file_tree: Vec<FileTreeItem> = vec![];
+    let mut arr: Vec<&str> = Vec::with_capacity(8);
     for file in files.iter() {
-        let arr: Vec<&str> = file.path.split('/').collect();
+        arr.clear();
+        arr.extend(file.path.split('/'));
         if arr.is_empty() {
             continue;
         }
         let mut op = Op::None;
         if file.is_whiteout.is_some() {
             op = Op::Removed;
-        } else if file_summary_list
-            .iter()
-            .any(|item| item.info.path == file.path)
-        {
+        } else if modified_paths.contains(file.path.as_str()) {
             op = Op::Modified;
         }
 
@@ -362,30 +348,5 @@ mod tests {
         ];
         let tree = convert_files_to_file_tree(&files, &[]);
         assert_eq!(tree[0].size, 300);
-    }
-
-    #[test]
-    fn test_find_file_tree_item_hit() {
-        let files = vec![ImageFileInfo {
-            path: "usr/bin/app".to_string(),
-            size: 512,
-            ..Default::default()
-        }];
-        let tree = convert_files_to_file_tree(&files, &[]);
-        let found = find_file_tree_item(&tree, &["usr", "bin", "app"]);
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().size, 512);
-    }
-
-    #[test]
-    fn test_find_file_tree_item_miss() {
-        let files = vec![ImageFileInfo {
-            path: "usr/bin/app".to_string(),
-            size: 512,
-            ..Default::default()
-        }];
-        let tree = convert_files_to_file_tree(&files, &[]);
-        assert!(find_file_tree_item(&tree, &["usr", "bin", "missing"]).is_none());
-        assert!(find_file_tree_item(&tree, &[]).is_none());
     }
 }

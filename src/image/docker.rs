@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{
     error::HTTPError,
-    image::{convert_files_to_file_tree, find_file_tree_item, ImageFileInfo},
+    image::convert_files_to_file_tree,
     store::{get_blob_from_file, get_blob_path, save_blob_to_file},
 };
 
@@ -157,14 +157,11 @@ pub struct AuthInfo {
 }
 
 fn parse_auth_info(auth: &str) -> Result<AuthInfo> {
-    let re =
-        Regex::new("(?P<key>\\S+?)=\"(?P<value>\\S+?)\",?").map_err(|err| Error::Whatever {
-            message: err.to_string(),
-        })?;
-    let mut auth_info = AuthInfo {
-        ..Default::default()
-    };
-    for caps in re.captures_iter(auth) {
+    static AUTH_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+        Regex::new("(?P<key>\\S+?)=\"(?P<value>\\S+?)\",?").expect("auth regex is valid")
+    });
+    let mut auth_info = AuthInfo::default();
+    for caps in AUTH_RE.captures_iter(auth) {
         let value = caps["value"].to_string();
         match &caps["key"] {
             "realm" => auth_info.auth = value,
@@ -173,7 +170,6 @@ fn parse_auth_info(auth: &str) -> Result<AuthInfo> {
             _ => {}
         }
     }
-
     Ok(auth_info)
 }
 
@@ -250,19 +246,16 @@ pub struct DockerAnalyzeSummary {
 impl DockerAnalyzeResult {
     pub fn summary(&self) -> DockerAnalyzeSummary {
         let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
+        let mut path_index: HashMap<&str, usize> = HashMap::new();
         let mut wasted_size = 0;
         for file in self.file_summary_list.iter() {
-            let mut found = false;
             let info = &file.info;
             wasted_size += info.size;
-            for wasted in wasted_list.iter_mut() {
-                if wasted.path == info.path {
-                    found = true;
-                    wasted.count += 1;
-                    wasted.total_size += info.size;
-                }
-            }
-            if !found {
+            if let Some(&i) = path_index.get(info.path.as_str()) {
+                wasted_list[i].count += 1;
+                wasted_list[i].total_size += info.size;
+            } else {
+                path_index.insert(&info.path, wasted_list.len());
                 wasted_list.push(ImageFileWastedSummary {
                     path: info.path.clone(),
                     count: 1,
@@ -289,8 +282,8 @@ impl DockerAnalyzeResult {
 impl DockerTokenInfo {
     // 判断docker token是否已过期
     fn expired(&self) -> bool {
-        let issued_at = self.issued_at.clone().unwrap_or_default();
-        if let Ok(value) = DateTime::<Utc>::from_str(&issued_at) {
+        let issued_at = self.issued_at.as_deref().unwrap_or("");
+        if let Ok(value) = DateTime::<Utc>::from_str(issued_at) {
             // 因为后续需要使用token获取数据
             // 因此提交10秒认为过期，避免请求时失效
             let offset = (self.expires_in.unwrap_or(600) - 10) as i64;
@@ -311,20 +304,19 @@ fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>>
 }
 
 // 从缓存中获取docker token
-fn get_docker_token_from_cache(key: &String) -> Option<DockerTokenInfo> {
+fn get_docker_token_from_cache(key: &str) -> Option<DockerTokenInfo> {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         if let Some(info) = cache.get(key) {
             return Some(info.clone());
         }
     }
-    Option::None
+    None
 }
 
 // 将docker token写入缓存
-fn set_docker_token_to_cache(key: &String, info: DockerTokenInfo) {
-    // 失败忽略
+fn set_docker_token_to_cache(key: &str, info: DockerTokenInfo) {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
-        cache.put(key.to_string(), info);
+        cache.put(key.to_owned(), info);
     }
 }
 
@@ -338,7 +330,7 @@ fn get_manifest_cache() -> &'static Mutex<LruCache<String, ImageManifestCacheInf
     })
 }
 
-fn get_manifest_from_cache(key: &String) -> Option<ImageManifest> {
+fn get_manifest_from_cache(key: &str) -> Option<ImageManifest> {
     if let Ok(mut cache) = get_manifest_cache().lock() {
         if let Some(info) = cache.get(key) {
             if info.expired_at > Utc::now().timestamp() {
@@ -347,13 +339,13 @@ fn get_manifest_from_cache(key: &String) -> Option<ImageManifest> {
             }
         }
     }
-    Option::None
+    None
 }
 
-fn set_manifest_to_cache(key: &String, manifest: ImageManifest, ttl_seconds: i64) {
+fn set_manifest_to_cache(key: &str, manifest: ImageManifest, ttl_seconds: i64) {
     if let Ok(mut cache) = get_manifest_cache().lock() {
         cache.put(
-            key.to_string(),
+            key.to_owned(),
             ImageManifestCacheInfo {
                 expired_at: Utc::now().timestamp() + ttl_seconds,
                 manifest,
@@ -387,34 +379,6 @@ fn get_value_from_json(v: &[u8], key: &str) -> Result<String> {
         root = value.unwrap().to_owned();
     }
     Ok(root.as_str().unwrap_or("").to_string())
-}
-
-fn add_to_file_summary(
-    file_summary_list: &mut Vec<ImageFileSummary>,
-    layer_index: usize,
-    files: &[ImageFileInfo],
-    file_tree_list: &[Vec<FileTreeItem>],
-) {
-    for file in files.iter() {
-        for items in file_tree_list.iter() {
-            let arr: Vec<&str> = file.path.split('/').collect();
-            if let Some(found) = find_file_tree_item(items, &arr) {
-                // 以前已存在，因此为修改或删除
-                // 文件删除
-                let mut op = Op::Modified;
-                let mut info = file.clone();
-                if file.is_whiteout.is_some() {
-                    op = Op::Removed;
-                    info.size = found.size;
-                }
-                file_summary_list.push(ImageFileSummary {
-                    layer_index,
-                    op,
-                    info,
-                });
-            }
-        }
-    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -558,9 +522,7 @@ impl DockerClient {
         path: &std::path::Path,
     ) -> Result<()> {
         let resp = self.send_request(url.clone(), headers).await?;
-        let mut file = tokio::fs::File::create(path)
-            .await
-            .context(IOSnafu {})?;
+        let mut file = tokio::fs::File::create(path).await.context(IOSnafu {})?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context(RequestSnafu { url: url.clone() })?;
@@ -676,7 +638,7 @@ impl DockerClient {
             self.get_blob(params, &manifest.config.digest).await?
         };
 
-        let result = serde_json::from_slice(&data.to_vec()).context(SerdeJsonSnafu {
+        let result = serde_json::from_slice(&data).context(SerdeJsonSnafu {
             category: "get_image_config",
         })?;
         Ok(result)
@@ -716,13 +678,11 @@ impl DockerClient {
                 .await
                 .context(LayerSnafu {})?;
             let compressed_size = buf.len() as u64;
-            return get_files_from_layer(
-                std::io::Cursor::new(buf),
-                &layer.media_type,
-                compressed_size,
-            )
-            .await
-            .context(LayerSnafu {});
+            let media_type = layer.media_type.clone();
+            return tokio::task::block_in_place(|| {
+                get_files_from_layer(std::io::Cursor::new(buf), &media_type, compressed_size)
+                    .context(LayerSnafu {})
+            });
         }
 
         let path = get_blob_path(&layer.digest);
@@ -750,52 +710,42 @@ impl DockerClient {
         let compressed_size = std::fs::metadata(&path)
             .map(|m| m.len())
             .unwrap_or(layer.size);
-        let file = std::fs::File::open(&path).context(IOSnafu {})?;
-        get_files_from_layer(BufReader::new(file), &layer.media_type, compressed_size)
-            .await
-            .context(LayerSnafu {})
+        let media_type = layer.media_type.clone();
+        tokio::task::block_in_place(|| {
+            let file = std::fs::File::open(&path).context(IOSnafu {})?;
+            get_files_from_layer(BufReader::new(file), &media_type, compressed_size)
+                .context(LayerSnafu {})
+        })
     }
     async fn get_all_layer_info(
         &self,
         params: DockerImageParams,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
-        let s = self.clone();
         let trace_id = TRACE_ID.with(clone_value_from_task_local);
-        let result = std::thread::spawn(move || {
-            let threads = must_load_config().threads.unwrap_or(layers.len());
-            // 新的thread需要重新设置trace id
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("getAllLayerInfo")
-                .worker_threads(threads)
-                .build()
-                .expect("Creating tokio runtime");
-            runtime.block_on(async move {
-                TRACE_ID
-                    .scope(trace_id, async {
-                        let mut handles = Vec::with_capacity(layers.len());
-                        for layer in layers {
-                            handles.push(s.get_layer_files(&params, layer));
-                        }
+        let threads = must_load_config().threads.unwrap_or(layers.len()).max(1);
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(threads));
 
-                        let arr = futures::future::join_all(handles).await;
-                        let mut info_list = vec![];
-                        for result in arr {
-                            let info = result?;
-                            info_list.push(info);
-                        }
-                        Ok::<Vec<ImageLayerInfo>, Error>(info_list)
-                    })
-                    .await
-            })
-        })
-        .join()
-        .map_err(|_| Error::Whatever {
-            message: "thread join error".to_string(),
-        })?;
-        let infos = result?;
-        Ok(infos)
+        let mut handles = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let s = self.clone();
+            let p = params.clone();
+            let sem = sem.clone();
+            let tid = trace_id.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                TRACE_ID.scope(tid, s.get_layer_files(&p, layer)).await
+            }));
+        }
+
+        let mut info_list = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let info = handle.await.map_err(|_| Error::Whatever {
+                message: "task join error".to_string(),
+            })??;
+            info_list.push(info);
+        }
+        Ok(info_list)
     }
     async fn get_auth_token(&self, params: &DockerImageParams) -> Result<String> {
         // 本地文件无需token
@@ -822,7 +772,6 @@ impl DockerClient {
                     "{}?service={}&scope={}",
                     auth_info.auth, auth_info.service, auth_info.scope
                 );
-                let key = &url.clone();
                 if let Some(info) = get_docker_token_from_cache(&url) {
                     if !info.expired() {
                         return Ok(info.token);
@@ -835,8 +784,7 @@ impl DockerClient {
                 if resp.issued_at.is_none() {
                     resp.issued_at = Some(Utc::now().to_rfc3339());
                 }
-                // 将token缓存，方便后续使用
-                set_docker_token_to_cache(key, resp.clone());
+                set_docker_token_to_cache(&url, resp.clone());
                 tl_info!(url = url, "got token");
                 return Ok(resp.token);
             }
@@ -870,6 +818,8 @@ impl DockerClient {
                 image_created = value.timestamp();
             }
         }
+        // path → size for every file seen in previous layers; used for O(1) modification detection
+        let mut seen_files: HashMap<String, u64> = HashMap::new();
         let mut big_modified_file_list = vec![];
         for (layer_index, history) in config.history.iter().enumerate() {
             let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
@@ -894,21 +844,31 @@ impl DockerClient {
                     size = value.size;
                     digest = value.digest.clone();
                     media_type = value.media_type.clone();
-                    if layer_index != 0 {
-                        add_to_file_summary(
-                            &mut file_summary_list,
-                            layer_index,
-                            &info.files,
-                            &file_tree_list,
-                        );
-                    }
-                    image_size += info.size;
-                    image_total_size += info.unpack_size;
-                    if is_new {
-                        for file in info.files.iter() {
-                            if file.size < 1000 * 1000 || !file.link.is_empty() {
-                                continue;
+                    // single pass: detect modifications, update seen-files, collect big files
+                    for file in &info.files {
+                        if layer_index != 0 {
+                            if let Some(&prev_size) = seen_files.get(&file.path) {
+                                let op;
+                                let mut file_info = file.clone();
+                                if file.is_whiteout.is_some() {
+                                    op = Op::Removed;
+                                    file_info.size = prev_size;
+                                } else {
+                                    op = Op::Modified;
+                                }
+                                file_summary_list.push(ImageFileSummary {
+                                    layer_index,
+                                    op,
+                                    info: file_info,
+                                });
                             }
+                        }
+                        if file.is_whiteout.is_some() {
+                            seen_files.remove(&file.path);
+                        } else {
+                            seen_files.insert(file.path.clone(), file.size);
+                        }
+                        if is_new && file.size >= 1_000_000 && file.link.is_empty() {
                             big_modified_file_list.push(BigModifiedFileInfo {
                                 path: file.path.clone(),
                                 size: file.size,
@@ -916,17 +876,15 @@ impl DockerClient {
                             });
                         }
                     }
-                    // TODO 根据file summary判断文件是否更新或删除
+                    image_size += info.size;
+                    image_total_size += info.unpack_size;
+                    // convert_files_to_file_tree needs the fully-updated file_summary_list
                     file_tree = convert_files_to_file_tree(&info.files, &file_summary_list);
                 }
                 index += 1;
             }
 
-            let created_by = if let Some(ref value) = history.created_by {
-                value.clone()
-            } else {
-                "".to_string()
-            };
+            let created_by = history.created_by.clone().unwrap_or_default();
 
             layers.push(ImageLayer {
                 created: history.created.clone(),

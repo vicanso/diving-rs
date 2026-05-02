@@ -10,7 +10,7 @@ pub use layer::{
     get_files_from_layer,
 };
 pub use oci_image::{
-    convert_files_to_file_tree, find_file_tree_item, FileTreeItem, ImageConfig, ImageFileInfo,
-    ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
-    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
+    convert_files_to_file_tree, FileTreeItem, ImageConfig, ImageFileInfo, ImageIndex, ImageLayer,
+    ImageManifest, ImageManifestConfig, Op, MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
+    MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
