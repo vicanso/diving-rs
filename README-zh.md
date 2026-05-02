@@ -106,3 +106,31 @@ diving --mode web --listen 0.0.0.0:8080
 在浏览器中打开`http://127.0.0.1:7001/`即可。
 
 ![](./assets/diving-web.png)
+
+### API
+
+#### `GET /api/analyze`
+
+分析 Docker 镜像并返回结果。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `image` | string | 是 | 镜像引用（格式与命令行模式相同） |
+| `format` | string | 否 | 设为 `markdown` 时返回 Markdown 报告，默认返回 JSON |
+| `skipBase` | bool | 否 | 当 `format=markdown` 时，通过时间戳间隔自动识别并隐藏基础镜像的层 |
+
+**示例：**
+
+```bash
+# JSON 响应（默认）
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine"
+
+# 指定架构
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine%3Farch%3Darm64"
+
+# Markdown 报告
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
+
+# Markdown 报告并隐藏基础镜像层
+curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=true"
+```

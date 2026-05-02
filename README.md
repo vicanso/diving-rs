@@ -109,3 +109,31 @@ diving --mode web --listen 0.0.0.0:8080
 Open `http://127.0.0.1:7001/` in the browser.
 
 ![](./assets/diving-web.png)
+
+### API
+
+#### `GET /api/analyze`
+
+Analyze a Docker image and return the result.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `image` | string | yes | Image reference (same formats as terminal mode) |
+| `format` | string | no | Set to `markdown` to return a Markdown report instead of JSON |
+| `skipBase` | bool | no | When `format=markdown`, auto-detect and hide base image layers via timestamp gap |
+
+**Examples:**
+
+```bash
+# JSON response (default)
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine"
+
+# specify architecture
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine%3Farch%3Darm64"
+
+# Markdown report
+curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
+
+# Markdown report with base layers hidden
+curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=true"
+```
