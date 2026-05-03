@@ -1,4 +1,4 @@
-use crate::config::must_load_config;
+use crate::config::{load_user_sensitive_patterns, must_load_config};
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -189,6 +189,7 @@ pub struct DockerTokenInfo {
 pub struct ImageManifestCacheInfo {
     expired_at: i64,
     manifest: ImageManifest,
+    supported_archs: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +198,75 @@ pub struct BigModifiedFileInfo {
     pub path: String,
     pub size: u64,
     pub digest: String,
+}
+
+/// Check whether a file path looks like a sensitive/secret file.
+/// Returns a short description of the risk, or None if not sensitive.
+fn is_sensitive_file(path: &str) -> Option<&'static str> {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let fl = filename.to_lowercase();
+    let pl = path.to_lowercase();
+
+    // .env files
+    if fl == ".env" || fl.starts_with(".env.") || fl.ends_with(".env") {
+        return Some(".env file");
+    }
+    // SSH private keys
+    if matches!(
+        fl.as_str(),
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | "id_ecdsa_sk" | "id_ed25519_sk"
+    ) {
+        return Some("SSH private key");
+    }
+    // AWS credentials
+    if pl.contains("/.aws/credentials") {
+        return Some("AWS credentials");
+    }
+    // Private key / certificate file extensions
+    if fl.ends_with(".pem")
+        || fl.ends_with(".p12")
+        || fl.ends_with(".pfx")
+        || fl.ends_with(".jks")
+        || fl.ends_with(".keystore")
+    {
+        return Some("Private key / certificate");
+    }
+    // .key files — flag only if not inside a known-safe subtree (node_modules, etc.)
+    if fl.ends_with(".key") && !pl.contains("/node_modules/") {
+        return Some("Private key / certificate");
+    }
+    // Docker registry auth
+    if pl.ends_with(".docker/config.json") {
+        return Some("Docker registry credentials");
+    }
+    // Git / network credential stores
+    if fl == ".netrc" || fl == ".git-credentials" {
+        return Some("Git / network credentials");
+    }
+    // Kubernetes config
+    if fl == "kubeconfig" || fl.ends_with(".kubeconfig") {
+        return Some("Kubernetes config");
+    }
+    // Terraform
+    if fl.ends_with(".tfvars") || fl == "terraform.tfstate" {
+        return Some("Terraform secrets");
+    }
+    // GCP / service account JSON keys
+    if fl.ends_with("-key.json")
+        || ((fl.starts_with("service_account") || fl.starts_with("service-account"))
+            && fl.ends_with(".json"))
+    {
+        return Some("Service account key");
+    }
+    // Password files
+    if fl == ".htpasswd" {
+        return Some("Password file");
+    }
+    // .git directory accidentally copied
+    if pl.starts_with(".git/") || pl.contains("/.git/") {
+        return Some(".git directory (SCM history)");
+    }
+    None
 }
 
 /// Reconstruct an approximate Dockerfile from image history.
@@ -234,6 +304,15 @@ fn reconstruct_dockerfile(history: &[ImageHistory]) -> String {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SensitiveFileInfo {
+    pub path: String,
+    pub size: u64,
+    pub layer_index: usize,
+    pub reason: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockerAnalyzeResult {
     // 镜像名称
     pub name: String,
@@ -249,6 +328,8 @@ pub struct DockerAnalyzeResult {
     pub labels: Vec<String>,
     // 反推的 Dockerfile 内容
     pub dockerfile: String,
+    // 该镜像支持的架构列表（linux 平台，来自 manifest index）
+    pub supported_archs: Vec<String>,
     // 镜像分层数据
     pub layers: Vec<ImageLayer>,
     // 镜像大小
@@ -261,6 +342,8 @@ pub struct DockerAnalyzeResult {
     pub file_summary_list: Vec<ImageFileSummary>,
     // 本次镜像变化的大文件
     pub big_modified_file_list: Vec<BigModifiedFileInfo>,
+    // 疑似敏感文件
+    pub sensitive_files: Vec<SensitiveFileInfo>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -365,25 +448,31 @@ fn get_manifest_cache() -> &'static Mutex<LruCache<String, ImageManifestCacheInf
     })
 }
 
-fn get_manifest_from_cache(key: &str) -> Option<ImageManifest> {
+fn get_manifest_from_cache(key: &str) -> Option<(ImageManifest, Vec<String>)> {
     if let Ok(mut cache) = get_manifest_cache().lock() {
         if let Some(info) = cache.get(key) {
             if info.expired_at > Utc::now().timestamp() {
                 tracing::debug!(key, "manifest cache hit");
-                return Some(info.manifest.clone());
+                return Some((info.manifest.clone(), info.supported_archs.clone()));
             }
         }
     }
     None
 }
 
-fn set_manifest_to_cache(key: &str, manifest: ImageManifest, ttl_seconds: i64) {
+fn set_manifest_to_cache(
+    key: &str,
+    manifest: ImageManifest,
+    supported_archs: Vec<String>,
+    ttl_seconds: i64,
+) {
     if let Ok(mut cache) = get_manifest_cache().lock() {
         cache.put(
             key.to_owned(),
             ImageManifestCacheInfo {
                 expired_at: Utc::now().timestamp() + ttl_seconds,
                 manifest,
+                supported_archs,
             },
         );
     }
@@ -577,8 +666,11 @@ impl DockerClient {
         })?;
         Ok(result)
     }
-    // 获取manifest
-    pub async fn get_manifest(&self, params: &DockerImageParams) -> Result<ImageManifest> {
+    // 获取manifest，同时返回该镜像支持的架构列表（linux平台）
+    pub async fn get_manifest(
+        &self,
+        params: &DockerImageParams,
+    ) -> Result<(ImageManifest, Vec<String>)> {
         let img = &params.img;
         let user = &params.user;
         let tag = &params.tag;
@@ -592,61 +684,62 @@ impl DockerClient {
                     .context(LayerSnafu {})?;
                 layer.size = size;
             }
-            return Ok(image_manifest);
+            return Ok((image_manifest, vec![]));
         }
-        // TODO 如果tag非latest，是否可以缓存
-        // 需要注意以命令行或以web server执行的程序生命周期的差别
 
-        // 根据tag获取manifest
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
-        // 如果缓存中有，直接读取缓存
         let key = format!("{url}:{}", params.arch);
-        if let Some(manifest) = get_manifest_from_cache(&key) {
-            return Ok(manifest);
+        if let Some(cached) = get_manifest_from_cache(&key) {
+            return Ok(cached);
         }
         tl_info!(url = url, "getting manifest");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
-        // 支持的类型
         let accepts = [
             MEDIA_TYPE_IMAGE_INDEX,
             MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
             MEDIA_TYPE_MANIFEST_LIST,
         ];
-
         headers.insert("Accept".to_string(), accepts.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
         let media_type = get_value_from_json(&data, "mediaType")?;
-        let resp: ImageManifest = if media_type == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST {
-            // docker的版本则可直接返回
-            serde_json::from_slice(&data).context(SerdeJsonSnafu {
+        let (resp, supported_archs): (ImageManifest, Vec<String>) = if media_type
+            == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST
+        {
+            let manifest = serde_json::from_slice(&data).context(SerdeJsonSnafu {
                 category: "get_manifest_schema2",
-            })?
+            })?;
+            (manifest, vec![])
         } else {
-            let manifest = serde_json::from_slice::<ImageIndex>(&data)
-                .context(SerdeJsonSnafu {
-                    category: "guess_manifest",
-                })?
-                .guess_manifest(&params.arch);
-            tl_info!(arch = manifest.platform.architecture, "guess manifest");
+            let index = serde_json::from_slice::<ImageIndex>(&data).context(SerdeJsonSnafu {
+                category: "guess_manifest",
+            })?;
+            // Collect linux platform architectures from the index
+            let archs = index
+                .manifests
+                .iter()
+                .filter(|m| m.platform.os == "linux")
+                .map(|m| match &m.platform.variant {
+                    Some(v) => format!("{}/{}", m.platform.architecture, v),
+                    None => m.platform.architecture.clone(),
+                })
+                .collect();
+            let chosen = index.guess_manifest(&params.arch);
+            tl_info!(arch = chosen.platform.architecture, "guess manifest");
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
             }
-            headers.insert("Accept".to_string(), manifest.media_type);
-            // 根据digest再次获取
-            let url = format!(
-                "{}/{user}/{img}/manifests/{}",
-                self.registry, manifest.digest
-            );
+            headers.insert("Accept".to_string(), chosen.media_type);
+            let url = format!("{}/{user}/{img}/manifests/{}", self.registry, chosen.digest);
             let data = self.get_bytes(url.clone(), headers).await?;
-            serde_json::from_slice(&data).context(SerdeJsonSnafu {
+            let manifest = serde_json::from_slice(&data).context(SerdeJsonSnafu {
                 category: "get_manifest",
-            })?
+            })?;
+            (manifest, archs)
         };
-        // mutable tags (latest/edge/stable/…) expire quickly; versioned tags are immutable
         let mutable_tags = [
             "latest", "edge", "stable", "nightly", "beta", "alpha", "main",
         ];
@@ -655,9 +748,9 @@ impl DockerClient {
         } else {
             60 * 60
         };
-        set_manifest_to_cache(&key, resp.clone(), ttl);
+        set_manifest_to_cache(&key, resp.clone(), supported_archs.clone(), ttl);
         tl_info!(url = url, "got manifest");
-        Ok(resp)
+        Ok((resp, supported_archs))
     }
     // 获取镜像的信息
     pub async fn get_image_config(&self, params: &DockerImageParams) -> Result<ImageConfig> {
@@ -668,8 +761,7 @@ impl DockerClient {
                 .await
                 .context(LayerSnafu {})?
         } else {
-            // 暂时只获取amd64, linux
-            let manifest = self.get_manifest(params).await?;
+            let (manifest, _) = self.get_manifest(params).await?;
             self.get_blob(params, &manifest.config.digest).await?
         };
 
@@ -829,7 +921,7 @@ impl DockerClient {
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
         let token = self.get_auth_token(params).await?;
         params.token = token;
-        let manifest = self.get_manifest(params).await?;
+        let (manifest, supported_archs) = self.get_manifest(params).await?;
         let config = self.get_image_config(params).await?;
         let user = &params.user;
         let img = &params.img;
@@ -856,6 +948,10 @@ impl DockerClient {
         // path → size for every file seen in previous layers; used for O(1) modification detection
         let mut seen_files: HashMap<String, u64> = HashMap::new();
         let mut big_modified_file_list = vec![];
+        let mut sensitive_files: Vec<SensitiveFileInfo> = vec![];
+        // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
+        let mut sensitive_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (layer_index, history) in config.history.iter().enumerate() {
             let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
                 // 如果5分钟内
@@ -910,6 +1006,47 @@ impl DockerClient {
                                 digest: digest.clone(),
                             });
                         }
+                        // Sensitive file scan (skip whiteout/deleted entries)
+                        if file.is_whiteout.is_none() {
+                            let user_cfg = load_user_sensitive_patterns();
+                            let hit = if let Some(r) = is_sensitive_file(&file.path) {
+                                // Built-in match — suppress if user explicitly ignores it
+                                if user_cfg.is_ignored(&file.path) {
+                                    None
+                                } else {
+                                    Some(r.to_string())
+                                }
+                            } else {
+                                user_cfg.check(&file.path).map(|r| r.to_string())
+                            };
+                            if let Some(reason) = hit {
+                                // For .git/ entries collapse to the git-root to avoid thousands of rows
+                                let dedup_key = if let Some(pos) = file
+                                    .path
+                                    .find("/.git/")
+                                    .map(|p| p + 1)
+                                    .or_else(|| file.path.starts_with(".git/").then_some(0))
+                                {
+                                    format!("{}/.git/", &file.path[..pos])
+                                } else {
+                                    file.path.clone()
+                                };
+                                if sensitive_seen.insert(dedup_key.clone()) {
+                                    // For .git/ show the collapsed directory path
+                                    let display_path = if dedup_key.ends_with("/.git/") {
+                                        dedup_key
+                                    } else {
+                                        file.path.clone()
+                                    };
+                                    sensitive_files.push(SensitiveFileInfo {
+                                        path: display_path,
+                                        size: file.size,
+                                        layer_index,
+                                        reason,
+                                    });
+                                }
+                            }
+                        }
                     }
                     image_size += info.size;
                     image_total_size += info.unpack_size;
@@ -960,12 +1097,14 @@ impl DockerClient {
             envs,
             labels,
             dockerfile: reconstruct_dockerfile(&config.history),
+            supported_archs,
             layers,
             size: image_size,
             total_size: image_total_size,
             file_tree_list,
             file_summary_list,
             big_modified_file_list,
+            sensitive_files,
         })
     }
 }

@@ -38,6 +38,35 @@ highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1
 ```
 
+## sensitive-files
+
+分析过程中，diving 会对每个文件路径执行内置规则扫描（`.env` 文件、SSH 私钥、AWS 凭证、TLS 证书等），命中结果会以 **Security Warnings** 的形式出现在分析报告中。
+
+可通过创建 `~/.diving/sensitive-files` 文件来扩展或屏蔽这些检查，每行一条规则：
+
+| 行格式 | 作用 |
+|--------|------|
+| `<glob-pattern>` | 将匹配的文件标记为敏感（原因显示为 "Custom sensitive file"） |
+| `<glob-pattern> \| <原因>` | 标记为敏感，并附加自定义原因说明 |
+| `!<glob-pattern>` | 忽略/屏蔽匹配项（同时覆盖内置规则和上方自定义规则） |
+
+`#` 开头及空行会被跳过。Glob 模式大小写不敏感；`*` 可跨目录分隔符匹配，同时也会对文件名单独匹配，因此 `*.pem` 能命中 `a/b/cert.pem`。
+
+`~/.diving/sensitive-files` 示例：
+
+```
+# ── 额外规则 ─────────────────────────────────────────────────
+**/*.vault-token | Vault token
+**/app-secrets.json | 应用密钥
+
+# ── 屏蔽内置规则中的误报 ──────────────────────────────────────
+!**/.env.example
+!**/.env.template
+!**/certs/nginx.crt
+!**/testdata/**
+!**/fixtures/**
+```
+
 ## terminal
 
 镜像数据支持三种数据源模式，具体形式如下：

@@ -83,11 +83,9 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     let summary = result.summary();
     let mut md = String::with_capacity(4096);
 
-    let auto_start = if skip_base {
-        find_user_layer_start(result)
-    } else {
-        None
-    };
+    // Always detect the base/user boundary for stats; only skip layers when requested.
+    let user_layer_start = find_user_layer_start(result);
+    let auto_start = if skip_base { user_layer_start } else { None };
     let is_base_layer = |i: usize| -> bool { auto_start.is_some_and(|start| i < start) };
 
     // Title
@@ -96,7 +94,12 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     // Image info table
     md.push_str("## Image Info\n\n");
     md.push_str("| Field | Value |\n|-------|-------|\n");
-    md.push_str(&format!("| Architecture | {} |\n", result.arch));
+    let arch_display = if result.supported_archs.is_empty() {
+        result.arch.clone()
+    } else {
+        format!("{} ({})", result.arch, result.supported_archs.join(", "))
+    };
+    md.push_str(&format!("| Architecture | {} |\n", arch_display));
     md.push_str(&format!("| OS | {} |\n", result.os));
     if !result.user.is_empty() {
         md.push_str(&format!("| User | {} |\n", result.user));
@@ -111,10 +114,22 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     ));
     md.push_str(&format!("| Efficiency | {}% |\n", summary.score));
     md.push_str(&format!(
-        "| Wasted space | {} ({:.1}%) |\n\n",
+        "| Wasted space | {} ({:.1}%) |\n",
         ByteSize(summary.wasted_size),
         summary.wasted_percent * 100.0
     ));
+    if let Some(start) = user_layer_start {
+        let base_layers = &result.layers[..start];
+        let base_size: u64 = base_layers.iter().map(|l| l.size).sum();
+        let base_unpack: u64 = base_layers.iter().map(|l| l.unpack_size).sum();
+        md.push_str(&format!(
+            "| Base image | {} layers, {} compressed / {} uncompressed |\n",
+            start,
+            ByteSize(base_size),
+            ByteSize(base_unpack),
+        ));
+    }
+    md.push('\n');
 
     // Reconstructed Dockerfile — when skip_base is active, only show user layers
     let dockerfile = if let Some(start) = auto_start {
@@ -175,6 +190,29 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         md.push_str("| Path | Size |\n|------|------|\n");
         for item in &result.big_modified_file_list {
             md.push_str(&format!("| `{}` | {} |\n", item.path, ByteSize(item.size)));
+        }
+        md.push('\n');
+    }
+
+    // Security warnings
+    if !result.sensitive_files.is_empty() {
+        md.push_str("## ⚠️ Security Warnings (Potential Secrets)\n\n");
+        md.push_str("| Path | Size | Layer | Risk |\n|------|------|-------|------|\n");
+        const SECRETS_LIMIT: usize = 30;
+        for item in result.sensitive_files.iter().take(SECRETS_LIMIT) {
+            md.push_str(&format!(
+                "| `{}` | {} | Layer {} | {} |\n",
+                item.path,
+                ByteSize(item.size),
+                item.layer_index + 1,
+                item.reason,
+            ));
+        }
+        if result.sensitive_files.len() > SECRETS_LIMIT {
+            md.push_str(&format!(
+                "\n*… and {} more — see JSON output for the full list.*\n",
+                result.sensitive_files.len() - SECRETS_LIMIT
+            ));
         }
         md.push('\n');
     }

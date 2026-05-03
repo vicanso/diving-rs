@@ -41,6 +41,35 @@ highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1
 ```
 
+## sensitive-files
+
+During analysis, diving scans every file path against a set of built-in rules (`.env` files, SSH private keys, AWS credentials, TLS certificates, etc.) and reports matches in the analysis output under **Security Warnings**.
+
+You can extend or suppress these checks by creating `~/.diving/sensitive-files`. Each line is one rule:
+
+| Line format | Effect |
+|-------------|--------|
+| `<glob-pattern>` | Flag matching files as sensitive (reason: "Custom sensitive file") |
+| `<glob-pattern> \| <reason>` | Flag with a custom reason label |
+| `!<glob-pattern>` | Ignore / suppress matches (overrides both built-in rules and custom patterns above) |
+
+Lines starting with `#` and blank lines are ignored. Glob patterns are case-insensitive; `*` matches across directory separators, and patterns are also tested against the filename alone, so `*.pem` matches `a/b/cert.pem`.
+
+Example `~/.diving/sensitive-files`:
+
+```
+# ── Extra patterns ───────────────────────────────────────────
+**/*.vault-token | Vault token
+**/app-secrets.json | Application secrets
+
+# ── Suppress built-in rules for intentional inclusions ───────
+!**/.env.example
+!**/.env.template
+!**/certs/nginx.crt
+!**/testdata/**
+!**/fixtures/**
+```
+
 ## terminal
 
 Supports three data source modes analyze image. The specific form is as follows:

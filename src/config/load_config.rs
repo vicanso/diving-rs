@@ -1,5 +1,6 @@
 use bytesize::ByteSize;
 use config::{Config, File};
+use glob::Pattern;
 use home::home_dir;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,98 @@ pub fn get_layer_path() -> &'static PathBuf {
         fs::create_dir_all(&layer_path)
             .expect("failed to create layer cache directory: check permissions");
         layer_path
+    })
+}
+
+const GLOB_OPTS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: false,
+    require_literal_separator: false,
+    require_literal_leading_dot: false,
+};
+
+fn glob_matches(pattern: &Pattern, path: &str) -> bool {
+    if pattern.matches_with(path, GLOB_OPTS) {
+        return true;
+    }
+    // Also match against the filename alone so `*.pem` hits `a/b/c.pem`.
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    pattern.matches_with(filename, GLOB_OPTS)
+}
+
+pub struct UserSensitivePattern {
+    pub pattern: Pattern,
+    pub reason: String,
+}
+
+pub struct UserSensitiveConfig {
+    /// Extra patterns to flag as sensitive (in addition to built-in rules).
+    pub patterns: Vec<UserSensitivePattern>,
+    /// Patterns that override / silence any match (built-in or custom).
+    /// Entries come from lines prefixed with `!` in the config file.
+    pub ignores: Vec<Pattern>,
+}
+
+impl UserSensitiveConfig {
+    /// Return the reason string if `path` is considered sensitive, or `None`
+    /// if it should be ignored or does not match any custom pattern.
+    pub fn check(&self, path: &str) -> Option<&str> {
+        for p in &self.patterns {
+            if glob_matches(&p.pattern, path) {
+                // Check ignore list before reporting
+                if self.ignores.iter().any(|ig| glob_matches(ig, path)) {
+                    return None;
+                }
+                return Some(&p.reason);
+            }
+        }
+        None
+    }
+
+    /// Return true if `path` is explicitly ignored by the user config.
+    pub fn is_ignored(&self, path: &str) -> bool {
+        self.ignores.iter().any(|ig| glob_matches(ig, path))
+    }
+}
+
+/// Load user-defined sensitive file patterns from `~/.diving/sensitive-files`.
+///
+/// File format (one entry per line):
+///   <glob-pattern>              — add as a sensitive pattern
+///   <glob-pattern> | <reason>  — add with a custom reason label
+///   !<glob-pattern>             — ignore / suppress this path (built-in or custom)
+/// Lines starting with `#` and blank lines are skipped.
+pub fn load_user_sensitive_patterns() -> &'static UserSensitiveConfig {
+    static CFG: OnceCell<UserSensitiveConfig> = OnceCell::new();
+    CFG.get_or_init(|| {
+        let path = get_config_path().join("sensitive-files");
+        let mut patterns = vec![];
+        let mut ignores = vec![];
+        if let Ok(content) = fs::read_to_string(&path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix('!') {
+                    if let Ok(pat) = Pattern::new(rest.trim()) {
+                        ignores.push(pat);
+                    }
+                } else {
+                    let (pat_str, reason) = if let Some(pos) = line.find('|') {
+                        (line[..pos].trim_end(), line[pos + 1..].trim().to_string())
+                    } else {
+                        (line, "Custom sensitive file".to_string())
+                    };
+                    if let Ok(pat) = Pattern::new(pat_str) {
+                        patterns.push(UserSensitivePattern {
+                            pattern: pat,
+                            reason,
+                        });
+                    }
+                }
+            }
+        }
+        UserSensitiveConfig { patterns, ignores }
     })
 }
 
