@@ -198,6 +198,9 @@ pub struct BigModifiedFileInfo {
     pub path: String,
     pub size: u64,
     pub digest: String,
+    pub mode: String,
+    pub uid: u64,
+    pub gid: u64,
 }
 
 /// Check whether a file path looks like a sensitive/secret file.
@@ -1004,6 +1007,9 @@ impl DockerClient {
                                 path: file.path.clone(),
                                 size: file.size,
                                 digest: digest.clone(),
+                                mode: file.mode.clone(),
+                                uid: file.uid,
+                                gid: file.gid,
                             });
                         }
                         // Sensitive file scan (skip whiteout/deleted entries)

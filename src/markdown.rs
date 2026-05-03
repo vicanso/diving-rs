@@ -24,10 +24,18 @@ fn cmd_to_dockerfile_line(cmd: &str) -> Option<String> {
     }
 }
 
+struct FileEntry {
+    path: String,
+    size: u64,
+    mode: String,
+    uid: u64,
+    gid: u64,
+}
+
 struct LayerFiles {
-    added: Vec<(String, u64)>,
-    modified: Vec<(String, u64)>,
-    removed: Vec<(String, u64)>,
+    added: Vec<FileEntry>,
+    modified: Vec<FileEntry>,
+    removed: Vec<FileEntry>,
 }
 
 fn flatten_tree(items: &[FileTreeItem], prefix: &str, out: &mut LayerFiles) {
@@ -38,10 +46,17 @@ fn flatten_tree(items: &[FileTreeItem], prefix: &str, out: &mut LayerFiles) {
             format!("{}/{}", prefix, item.name)
         };
         if item.children.is_empty() {
+            let entry = FileEntry {
+                path,
+                size: item.size,
+                mode: item.mode.clone(),
+                uid: item.uid,
+                gid: item.gid,
+            };
             match item.op {
-                Op::Removed => out.removed.push((path, item.size)),
-                Op::Modified => out.modified.push((path, item.size)),
-                _ => out.added.push((path, item.size)),
+                Op::Removed => out.removed.push(entry),
+                Op::Modified => out.modified.push(entry),
+                _ => out.added.push(entry),
             }
         } else {
             flatten_tree(&item.children, &path, out);
@@ -187,9 +202,16 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     // Large modified files
     if !result.big_modified_file_list.is_empty() {
         md.push_str("## Large Files Added in Recent Layers\n\n");
-        md.push_str("| Path | Size |\n|------|------|\n");
+        md.push_str("| Path | Size | Mode | Owner |\n|------|------|------|-------|\n");
         for item in &result.big_modified_file_list {
-            md.push_str(&format!("| `{}` | {} |\n", item.path, ByteSize(item.size)));
+            md.push_str(&format!(
+                "| `{}` | {} | `{}` | {}:{} |\n",
+                item.path,
+                ByteSize(item.size),
+                item.mode,
+                item.uid,
+                item.gid,
+            ));
         }
         md.push('\n');
     }
@@ -272,28 +294,48 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
                 continue;
             }
 
-            md.push_str("| Change | Path | Size |\n|--------|------|------|\n");
+            md.push_str(
+                "| Change | Path | Size | Mode | Owner |\n\
+                 |--------|------|------|------|-------|\n",
+            );
 
-            for (path, size) in &files.removed {
-                md.push_str(&format!("| Removed | `{}` | {} |\n", path, ByteSize(*size)));
-            }
-            for (path, size) in &files.modified {
+            for e in &files.removed {
                 md.push_str(&format!(
-                    "| Modified | `{}` | {} |\n",
-                    path,
-                    ByteSize(*size)
+                    "| Removed | `{}` | {} | `{}` | {}:{} |\n",
+                    e.path,
+                    ByteSize(e.size),
+                    e.mode,
+                    e.uid,
+                    e.gid,
+                ));
+            }
+            for e in &files.modified {
+                md.push_str(&format!(
+                    "| Modified | `{}` | {} | `{}` | {}:{} |\n",
+                    e.path,
+                    ByteSize(e.size),
+                    e.mode,
+                    e.uid,
+                    e.gid,
                 ));
             }
 
             // Sort added files by size descending; cap at 50 to keep output readable
-            files.added.sort_by_key(|(_, s)| Reverse(*s));
+            files.added.sort_by_key(|e| Reverse(e.size));
             const ADDED_LIMIT: usize = 50;
-            for (path, size) in files.added.iter().take(ADDED_LIMIT) {
-                md.push_str(&format!("| Added | `{}` | {} |\n", path, ByteSize(*size)));
+            for e in files.added.iter().take(ADDED_LIMIT) {
+                md.push_str(&format!(
+                    "| Added | `{}` | {} | `{}` | {}:{} |\n",
+                    e.path,
+                    ByteSize(e.size),
+                    e.mode,
+                    e.uid,
+                    e.gid,
+                ));
             }
             if files.added.len() > ADDED_LIMIT {
                 md.push_str(&format!(
-                    "| … | *{} more files not shown* | |\n",
+                    "| … | *{} more files not shown* | | | |\n",
                     files.added.len() - ADDED_LIMIT
                 ));
             }
