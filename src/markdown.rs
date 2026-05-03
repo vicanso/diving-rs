@@ -4,6 +4,26 @@ use std::cmp::Reverse;
 
 use crate::image::{DockerAnalyzeResult, FileTreeItem, Op};
 
+fn cmd_to_dockerfile_line(cmd: &str) -> Option<String> {
+    if cmd.is_empty() {
+        return None;
+    }
+    let cmd = if cmd.starts_with('|') {
+        cmd.find("/bin/sh -c ")
+            .map(|pos| &cmd[pos..])
+            .unwrap_or(cmd)
+    } else {
+        cmd
+    };
+    if let Some(rest) = cmd.strip_prefix("/bin/sh -c #(nop) ") {
+        Some(rest.trim().to_string())
+    } else if let Some(rest) = cmd.strip_prefix("/bin/sh -c ") {
+        Some(format!("RUN {rest}"))
+    } else {
+        Some(cmd.to_string())
+    }
+}
+
 struct LayerFiles {
     added: Vec<(String, u64)>,
     modified: Vec<(String, u64)>,
@@ -95,6 +115,23 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         ByteSize(summary.wasted_size),
         summary.wasted_percent * 100.0
     ));
+
+    // Reconstructed Dockerfile — when skip_base is active, only show user layers
+    let dockerfile = if let Some(start) = auto_start {
+        result.layers[start..]
+            .iter()
+            .filter_map(|l| cmd_to_dockerfile_line(&l.cmd))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        result.dockerfile.clone()
+    };
+    if !dockerfile.is_empty() {
+        md.push_str("## Dockerfile (reconstructed)\n\n");
+        md.push_str("```dockerfile\n");
+        md.push_str(&dockerfile);
+        md.push_str("\n```\n\n");
+    }
 
     // Environment variables
     if !result.envs.is_empty() {

@@ -19,7 +19,7 @@ use tokio::io::AsyncWriteExt;
 use super::{get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer};
 use super::{
     layer::ImageLayerInfo,
-    oci_image::{ImageFileSummary, ImageManifestLayer},
+    oci_image::{ImageFileSummary, ImageHistory, ImageManifestLayer},
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
@@ -199,6 +199,39 @@ pub struct BigModifiedFileInfo {
     pub digest: String,
 }
 
+/// Reconstruct an approximate Dockerfile from image history.
+///
+/// Each `created_by` entry follows one of these patterns:
+///   `/bin/sh -c #(nop) <INSTRUCTION> <args>`  → metadata instruction (ENV, CMD, …)
+///   `/bin/sh -c <command>`                     → RUN <command>
+///   `|<n> KEY=val … /bin/sh -c <command>`      → RUN <command> (with build-args)
+fn reconstruct_dockerfile(history: &[ImageHistory]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(history.len());
+    for h in history {
+        let raw = match h.created_by.as_deref() {
+            None | Some("") => continue,
+            Some(s) => s,
+        };
+        // Strip build-arg prefix: |<n> KEY=val ... /bin/sh -c <cmd>
+        let raw = if raw.starts_with('|') {
+            raw.find("/bin/sh -c ")
+                .map(|pos| &raw[pos..])
+                .unwrap_or(raw)
+        } else {
+            raw
+        };
+        let line = if let Some(rest) = raw.strip_prefix("/bin/sh -c #(nop) ") {
+            rest.trim().to_string()
+        } else if let Some(rest) = raw.strip_prefix("/bin/sh -c ") {
+            format!("RUN {rest}")
+        } else {
+            raw.to_string()
+        };
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerAnalyzeResult {
@@ -214,6 +247,8 @@ pub struct DockerAnalyzeResult {
     pub envs: Vec<String>,
     // 镜像label
     pub labels: Vec<String>,
+    // 反推的 Dockerfile 内容
+    pub dockerfile: String,
     // 镜像分层数据
     pub layers: Vec<ImageLayer>,
     // 镜像大小
@@ -924,6 +959,7 @@ impl DockerClient {
             user: run_user,
             envs,
             labels,
+            dockerfile: reconstruct_dockerfile(&config.history),
             layers,
             size: image_size,
             total_size: image_total_size,
