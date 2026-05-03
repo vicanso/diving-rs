@@ -106,6 +106,15 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     // Title
     md.push_str(&format!("# Image Analysis: {}\n\n", result.name));
 
+    // Risk tags
+    if !result.tags.is_empty() {
+        md.push_str("## Risk Tags\n\n");
+        for tag in &result.tags {
+            md.push_str(&format!("- `{}`\n", tag));
+        }
+        md.push('\n');
+    }
+
     // Image info table
     md.push_str("## Image Info\n\n");
     md.push_str("| Field | Value |\n|-------|-------|\n");
@@ -116,6 +125,9 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     };
     md.push_str(&format!("| Architecture | {} |\n", arch_display));
     md.push_str(&format!("| OS | {} |\n", result.os));
+    if !result.base_os.is_empty() {
+        md.push_str(&format!("| Base OS | {} |\n", result.base_os));
+    }
     if !result.user.is_empty() {
         md.push_str(&format!("| User | {} |\n", result.user));
     }
@@ -126,6 +138,10 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     md.push_str(&format!(
         "| Uncompressed size | {} |\n",
         ByteSize(result.total_size)
+    ));
+    md.push_str(&format!(
+        "| Total Layers | {} / 127 |\n",
+        result.layers.len()
     ));
     md.push_str(&format!("| Efficiency | {}% |\n", summary.score));
     md.push_str(&format!(

@@ -132,6 +132,49 @@ pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<
     Err(Error::NotFound {})
 }
 
+/// Scan a layer archive once and return the content of the first OS-release file found.
+/// Returns `(matched_path, content)` or `None` if none of the candidates exist.
+pub fn get_os_release_from_layer<R: Read>(
+    reader: R,
+    media_type: &str,
+) -> Option<(&'static str, Vec<u8>)> {
+    const CANDIDATES: &[&str] = &[
+        "etc/os-release",
+        "usr/lib/os-release",
+        "etc/alpine-release",
+        "etc/debian_version",
+        "etc/redhat-release",
+    ];
+
+    macro_rules! scan {
+        ($rdr:expr) => {{
+            let mut archive = Archive::new($rdr);
+            let entries = archive.entries().ok()?;
+            for entry in entries {
+                let mut entry = entry.ok()?;
+                let raw = entry.path().ok()?;
+                let name = raw.to_string_lossy();
+                // Normalize leading "./"
+                let name = name.trim_start_matches("./");
+                if let Some(&hit) = CANDIDATES.iter().find(|&&c| c == name) {
+                    let mut buf = Vec::new();
+                    entry.read_to_end(&mut buf).ok()?;
+                    return Some((hit, buf));
+                }
+            }
+            None
+        }};
+    }
+
+    if media_type.contains("gzip") {
+        scan!(GzipDecoder::new(reader).ok()?)
+    } else if media_type.contains("zstd") {
+        scan!(zstd::Decoder::new(reader).ok()?)
+    } else {
+        scan!(reader)
+    }
+}
+
 // 从layer数据中读取指定文件内容（流式解压，只读取目标文件）
 pub fn get_file_content_from_layer<R: Read>(
     reader: R,

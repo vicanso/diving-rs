@@ -7,7 +7,7 @@ pub use docker::{
 };
 pub use layer::{
     get_file_content_from_layer, get_file_content_from_tar, get_file_size_from_tar,
-    get_files_from_layer,
+    get_files_from_layer, get_os_release_from_layer,
 };
 pub use oci_image::{
     convert_files_to_file_tree, FileTreeItem, ImageConfig, ImageFileInfo, ImageIndex, ImageLayer,

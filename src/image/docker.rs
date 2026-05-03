@@ -16,7 +16,10 @@ use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, ti
 use substring::Substring;
 use tokio::io::AsyncWriteExt;
 
-use super::{get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer};
+use super::{
+    get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer,
+    get_os_release_from_layer,
+};
 use super::{
     layer::ImageLayerInfo,
     oci_image::{ImageFileSummary, ImageHistory, ImageManifestLayer},
@@ -203,6 +206,127 @@ pub struct BigModifiedFileInfo {
     pub gid: u64,
 }
 
+/// Parse the content of an OS release file into a human-readable OS name.
+fn parse_os_release(content: &[u8], filename: &str) -> Option<String> {
+    let text = std::str::from_utf8(content).ok()?.trim();
+    match filename {
+        "etc/alpine-release" => {
+            return Some(format!("Alpine Linux {}", text.lines().next()?.trim()));
+        }
+        "etc/debian_version" => {
+            return Some(format!("Debian {}", text.lines().next()?.trim()));
+        }
+        f if f.ends_with("redhat-release") => {
+            return Some(text.lines().next()?.trim().to_string());
+        }
+        _ => {}
+    }
+    // Parse KEY=VALUE or KEY="VALUE" (os-release / lsb-release format)
+    let mut pretty_name: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut version_id: Option<String> = None;
+    let mut version: Option<String> = None;
+    for line in text.lines() {
+        if let Some((k, v)) = line.trim().split_once('=') {
+            let v = v.trim_matches('"').trim_matches('\'').to_string();
+            match k {
+                "PRETTY_NAME" => pretty_name = Some(v),
+                "NAME" => name = Some(v),
+                "VERSION_ID" => version_id = Some(v),
+                "VERSION" => version = Some(v),
+                _ => {}
+            }
+        }
+    }
+    if let Some(pn) = pretty_name {
+        return Some(pn);
+    }
+    match (name, version.or(version_id)) {
+        (Some(n), Some(v)) => Some(format!("{} {}", n, v)),
+        (Some(n), None) => Some(n),
+        _ => None,
+    }
+}
+
+/// Fallback: scan the first few layer commands for known distro names / codenames.
+fn detect_os_from_history(layers: &[ImageLayer]) -> Option<String> {
+    const DISTROS: &[(&str, &str)] = &[
+        // Codenames checked before short names to get the more specific match first
+        ("trixie", "Debian 13 (trixie)"),
+        ("bookworm", "Debian 12 (bookworm)"),
+        ("bullseye", "Debian 11 (bullseye)"),
+        ("buster", "Debian 10 (buster)"),
+        ("noble", "Ubuntu 24.04 (Noble Numbat)"),
+        ("jammy", "Ubuntu 22.04 (Jammy Jellyfish)"),
+        ("focal", "Ubuntu 20.04 (Focal Fossa)"),
+        ("bionic", "Ubuntu 18.04 (Bionic Beaver)"),
+        ("alpine", "Alpine Linux"),
+        ("ubuntu", "Ubuntu"),
+        ("debian", "Debian"),
+        ("centos", "CentOS"),
+        ("fedora", "Fedora"),
+        ("rhel", "Red Hat Enterprise Linux"),
+        ("amazon", "Amazon Linux"),
+        ("suse", "openSUSE"),
+    ];
+    for layer in layers.iter().take(3) {
+        let cmd = layer.cmd.to_lowercase();
+        for &(pattern, display) in DISTROS {
+            if cmd.contains(pattern) {
+                return Some(format!("{} (from history)", display));
+            }
+        }
+    }
+    None
+}
+
+/// Probe the first few manifest layers for OS release files.
+/// Uses cached blobs on disk — returns empty string when blobs are not available.
+fn probe_base_os(manifest: &ImageManifest) -> String {
+    for layer in manifest.layers.iter().take(3) {
+        let path = get_blob_path(&layer.digest);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(file) = std::fs::File::open(&path) {
+            if let Some((filename, content)) =
+                get_os_release_from_layer(BufReader::new(file), &layer.media_type)
+            {
+                if let Some(name) = parse_os_release(&content, filename) {
+                    return name;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn is_pkg_cache(path: &str) -> bool {
+    path.starts_with("var/cache/apt/")
+        || path.starts_with("var/lib/apt/lists/")
+        || path.starts_with("var/cache/apk/")
+        || path.starts_with("var/cache/yum/")
+        || path.starts_with("var/cache/dnf/")
+        || path.starts_with("var/cache/pacman/")
+}
+
+fn is_dev_artifact(path: &str) -> bool {
+    let p = path;
+    // node_modules itself is fine in production; only the build cache is wasteful
+    p.starts_with("node_modules/.cache/")
+        || p.contains("/node_modules/.cache/")
+        || p.starts_with(".git/")
+        || p.contains("/.git/")
+        || p.starts_with("target/debug/")
+        || p.contains("/target/debug/")
+        || p.starts_with("__pycache__/")
+        || p.contains("/__pycache__/")
+        || p.starts_with(".gradle/")
+        || p.contains("/.gradle/")
+        || p.starts_with(".m2/")
+        || p.contains("/.m2/")
+}
+
 /// Check whether a file path looks like a sensitive/secret file.
 /// Returns a short description of the risk, or None if not sensitive.
 fn is_sensitive_file(path: &str) -> Option<&'static str> {
@@ -331,6 +455,8 @@ pub struct DockerAnalyzeResult {
     pub labels: Vec<String>,
     // 反推的 Dockerfile 内容
     pub dockerfile: String,
+    // 基础镜像 OS 指纹
+    pub base_os: String,
     // 该镜像支持的架构列表（linux 平台，来自 manifest index）
     pub supported_archs: Vec<String>,
     // 镜像分层数据
@@ -347,6 +473,8 @@ pub struct DockerAnalyzeResult {
     pub big_modified_file_list: Vec<BigModifiedFileInfo>,
     // 疑似敏感文件
     pub sensitive_files: Vec<SensitiveFileInfo>,
+    // 启发式风险标签
+    pub tags: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -955,6 +1083,8 @@ impl DockerClient {
         // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
         let mut sensitive_seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut has_pkg_cache = false;
+        let mut has_dev_artifacts = false;
         for (layer_index, history) in config.history.iter().enumerate() {
             let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
                 // 如果5分钟内
@@ -1011,6 +1141,13 @@ impl DockerClient {
                                 uid: file.uid,
                                 gid: file.gid,
                             });
+                        }
+                        // Heuristic tag detection
+                        if !has_pkg_cache && is_pkg_cache(&file.path) {
+                            has_pkg_cache = true;
+                        }
+                        if !has_dev_artifacts && is_dev_artifact(&file.path) {
+                            has_dev_artifacts = true;
                         }
                         // Sensitive file scan (skip whiteout/deleted entries)
                         if file.is_whiteout.is_none() {
@@ -1095,6 +1232,36 @@ impl DockerClient {
             }
         }
 
+        // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown"
+        let base_os = if !self.is_local() {
+            let base_os = tokio::task::block_in_place(|| probe_base_os(&manifest));
+            if base_os.is_empty() {
+                detect_os_from_history(&layers)
+                    .unwrap_or_else(|| "Scratch / Distroless (no OS identifier found)".to_string())
+            } else {
+                base_os
+            }
+        } else {
+            detect_os_from_history(&layers).unwrap_or_default()
+        };
+
+        let mut tags: Vec<String> = vec![];
+        if has_pkg_cache {
+            tags.push("[Contains Package Manager Cache]".to_string());
+        }
+        if has_dev_artifacts {
+            tags.push("[Development Artifacts]".to_string());
+        }
+        if !sensitive_files.is_empty() {
+            tags.push("[Potential Secrets]".to_string());
+        }
+        if run_user.is_empty() || run_user == "root" {
+            tags.push("[Runs as Root]".to_string());
+        }
+        if layers.len() > 30 {
+            tags.push(format!("[High Layer Count: {}]", layers.len()));
+        }
+
         Ok(DockerAnalyzeResult {
             name: image_name,
             arch: config.architecture,
@@ -1103,6 +1270,7 @@ impl DockerClient {
             envs,
             labels,
             dockerfile: reconstruct_dockerfile(&config.history),
+            base_os,
             supported_archs,
             layers,
             size: image_size,
@@ -1111,6 +1279,7 @@ impl DockerClient {
             file_summary_list,
             big_modified_file_list,
             sensitive_files,
+            tags,
         })
     }
 }
