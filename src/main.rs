@@ -60,7 +60,11 @@ fn init_logger(terminal_mode: bool) {
     // Terminal mode prints user-friendly progress to stderr and doesn't need
     // structured request-level logs by default. Web mode keeps INFO for traceable
     // server logs. LOG_LEVEL env var still overrides either default.
-    let mut level = if terminal_mode { Level::WARN } else { Level::INFO };
+    let mut level = if terminal_mode {
+        Level::WARN
+    } else {
+        Level::INFO
+    };
     if let Ok(log_level) = env::var("LOG_LEVEL") {
         if let Ok(value) = Level::from_str(log_level.as_str()) {
             level = value;
