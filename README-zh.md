@@ -11,7 +11,7 @@
 
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
 ```
 
 

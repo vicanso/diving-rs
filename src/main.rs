@@ -56,8 +56,11 @@ impl Args {
     }
 }
 
-fn init_logger() {
-    let mut level = Level::INFO;
+fn init_logger(terminal_mode: bool) {
+    // Terminal mode prints user-friendly progress to stderr and doesn't need
+    // structured request-level logs by default. Web mode keeps INFO for traceable
+    // server logs. LOG_LEVEL env var still overrides either default.
+    let mut level = if terminal_mode { Level::WARN } else { Level::INFO };
     if let Ok(log_level) = env::var("LOG_LEVEL") {
         if let Ok(value) = Level::from_str(log_level.as_str()) {
             level = value;
@@ -107,6 +110,7 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
+    eprintln!("Analyzing {}...", image);
     let result = analyze_docker_image(image_info)
         .await
         .map_err(|item| item.to_string())?;
@@ -172,10 +176,9 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
 }
 
 #[tokio::main]
-async fn run() {
+async fn run(args: Args) {
     // 启动时确保可以读取配置
     config::must_load_config();
-    let args = Args::parse();
     if args.is_terminal_type() {
         if let Some(value) = args.image {
             TRACE_ID
@@ -205,7 +208,11 @@ async fn run() {
             .layer(from_fn(access_log))
             .layer(from_fn(entry));
 
-        info!("listening on http://{}", args.listen);
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            listen = args.listen,
+            "diving-rs listening"
+        );
         let listener = tokio::net::TcpListener::bind(&args.listen)
             .await
             .unwrap_or_else(|e| {
@@ -263,6 +270,7 @@ fn main() {
         error!(category = "panic", message = e.to_string(),);
         std::process::exit(1);
     }));
-    init_logger();
-    run();
+    let args = Args::parse();
+    init_logger(args.is_terminal_type());
+    run(args);
 }

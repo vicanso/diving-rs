@@ -14,7 +14,7 @@ Note: Since the layer data needs to be downloaded from the source, such as Docke
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vicanso/http-stat-rs/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
 ```
 
 

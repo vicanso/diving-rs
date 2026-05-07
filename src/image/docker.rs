@@ -954,6 +954,11 @@ impl DockerClient {
             let token = &params.token;
             let url = format!("{}/{user}/{img}/blobs/{}", self.registry, layer.digest);
             tl_info!(url = url, "getting blob");
+            eprintln!(
+                "  > Downloading {} ({})...",
+                &layer.digest[..layer.digest.len().min(19)],
+                bytesize::ByteSize(layer.size),
+            );
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -963,6 +968,11 @@ impl DockerClient {
             tl_info!(url = url, "got blob");
         } else {
             tl_info!(digest = layer.digest, "blob cache hit");
+            eprintln!(
+                "  > Cached   {} ({})",
+                &layer.digest[..layer.digest.len().min(19)],
+                bytesize::ByteSize(layer.size),
+            );
         }
 
         let compressed_size = std::fs::metadata(&path)
@@ -1050,8 +1060,14 @@ impl DockerClient {
         Ok("".to_string())
     }
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
+        if !self.is_local() {
+            eprintln!("  > Authenticating with {}...", self.registry);
+        }
         let token = self.get_auth_token(params).await?;
         params.token = token;
+        if !self.is_local() {
+            eprintln!("  > Fetching manifest...");
+        }
         let (manifest, supported_archs) = self.get_manifest(params).await?;
         let config = self.get_image_config(params).await?;
         let user = &params.user;
@@ -1067,6 +1083,15 @@ impl DockerClient {
 
         let mut image_size = 0;
         let mut image_total_size = 0;
+        if !self.is_local() {
+            let layer_count = manifest.layers.len();
+            let total_bytes: u64 = manifest.layers.iter().map(|l| l.size).sum();
+            eprintln!(
+                "  > {} layer(s) | {} compressed",
+                layer_count,
+                bytesize::ByteSize(total_bytes),
+            );
+        }
         let info_list = self
             .get_all_layer_info(params.clone(), manifest.layers.clone())
             .await?;

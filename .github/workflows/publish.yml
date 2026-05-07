@@ -32,8 +32,8 @@ jobs:
           ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
 
           cargo build --release --target=x86_64-apple-darwin
-          mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86
-          ./.github/workflows/upload_asset.sh ./diving-darwin-x86 $GITHUB_TOKEN
+          mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86_64
+          ./.github/workflows/upload_asset.sh ./diving-darwin-x86_64 $GITHUB_TOKEN
 
   windows:
     runs-on: windows-latest
@@ -71,10 +71,10 @@ jobs:
           options: -v ${{ github.workspace }}:/home/rust/src
           run: |
             make release
-            mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86
+            mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86_64
       - name: Upload Assets
         run: |
-          ./.github/workflows/upload_asset.sh ./diving-linux-x86 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-linux-x86_64 $GITHUB_TOKEN
 
   linux-aarch64:
     runs-on: ubuntu-latest
