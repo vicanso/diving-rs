@@ -1,7 +1,6 @@
 use crate::i18n;
 use crate::image::{FileTreeItem, Op};
 use bytesize::ByteSize;
-use pad::PadStr;
 use ratatui::{prelude::*, widgets::*};
 
 use super::util;
@@ -55,14 +54,16 @@ fn add_to_file_tree_view(
     let size_width = width_list[2];
 
     let get_file_mode_str = |mode: &str| -> String {
-        mode.pad_to_width_with_alignment(permission_width, pad::Alignment::Middle)
+        util::pad_display(mode, permission_width, util::PadAlign::Middle)
     };
     let get_id_str =
-        |id: &str| -> String { id.pad_to_width_with_alignment(id_width, pad::Alignment::Right) };
+        |id: &str| -> String { util::pad_display(id, id_width, util::PadAlign::Right) };
     let get_size_str = |size: u64| -> String {
-        ByteSize(size)
-            .to_string()
-            .pad_to_width_with_alignment(size_width, pad::Alignment::Right)
+        util::pad_display(
+            &ByteSize(size).to_string(),
+            size_width,
+            util::PadAlign::Right,
+        )
     };
     let get_padding_str = |list: &[bool], is_last: bool| -> String {
         let mut arr: Vec<String> = list
@@ -150,17 +151,45 @@ pub fn new_files_widget(
         i18n::tr(opt.lang, "tui.col.filetree"),
     ];
     let mode_tips = i18n::fill(i18n::tr(opt.lang, "tui.modetips"), &[&opt.mode.to_string()]);
+    // Column widths measured by terminal display width (CJK headers occupy 2
+    // cols/char). The permission column floors to 10 because Unix mode strings
+    // (`-rwxr-xr-x`) are always 10 chars. ASCII headers keep their old widths,
+    // so the English layout is byte-identical.
+    let width_list: Vec<usize> = name_list
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let w = util::get_width(item) as usize;
+            if i == 0 {
+                w.max(10)
+            } else {
+                w
+            }
+        })
+        .collect();
     let content = Paragraph::new(vec![
         Line::from(vec![Span::styled(
             mode_tips,
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![
-            Span::from(name_list[0]),
+            Span::from(util::pad_display(
+                name_list[0],
+                width_list[0],
+                util::PadAlign::Left,
+            )),
             space_span.clone(),
-            Span::from(name_list[1]),
+            Span::from(util::pad_display(
+                name_list[1],
+                width_list[1],
+                util::PadAlign::Left,
+            )),
             space_span.clone(),
-            Span::from(name_list[2]),
+            Span::from(util::pad_display(
+                name_list[2],
+                width_list[2],
+                util::PadAlign::Left,
+            )),
             space_span.clone(),
             Span::from(name_list[3]),
         ]),
@@ -168,7 +197,6 @@ pub fn new_files_widget(
 
     let mut list = vec![];
 
-    let width_list: Vec<usize> = name_list.iter().map(|item| item.len()).collect();
     let file_tree_items = &file_tree_list[opt.selected_layer];
 
     add_to_file_tree_view(opt.mode, width_list, &mut list, file_tree_items, vec![]);

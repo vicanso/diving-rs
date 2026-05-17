@@ -1,5 +1,4 @@
 use bytesize::ByteSize;
-use pad::PadStr;
 use ratatui::{prelude::*, widgets::*};
 
 use super::util;
@@ -108,15 +107,23 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
         ]),
     ];
 
-    let count_pad_width = headers[0].len();
-    let size_pad_width = headers[1].len();
+    // Pad data cells to the header's terminal display width (CJK = 2 cols),
+    // so the unpadded header row and the padded data rows line up in any
+    // language. ASCII headers keep their old width → English is unchanged.
+    let count_pad_width = util::get_width(headers[0]) as usize;
+    let size_pad_width = util::get_width(headers[1]) as usize;
 
     for wasted in wasted_list.iter() {
-        let count_str = format!("{}", wasted.count)
-            .pad_to_width_with_alignment(count_pad_width, pad::Alignment::Right);
-        let size_str = ByteSize(wasted.total_size)
-            .to_string()
-            .pad_to_width_with_alignment(size_pad_width, pad::Alignment::Right);
+        let count_str = util::pad_display(
+            &wasted.count.to_string(),
+            count_pad_width,
+            util::PadAlign::Right,
+        );
+        let size_str = util::pad_display(
+            &ByteSize(wasted.total_size).to_string(),
+            size_pad_width,
+            util::PadAlign::Right,
+        );
         spans_list.push(Line::from(vec![
             Span::from(count_str),
             space_span.clone(),
