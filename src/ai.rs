@@ -74,9 +74,16 @@ fn first_non_empty(explicit: Option<&str>, env_key: &str) -> Option<String> {
     None
 }
 
-// Fixed DevSecOps expert persona + rules + output format (verbatim, Chinese).
-// The model is expected to answer in the same language as this prompt.
-const SYSTEM_PROMPT: &str = r#"你现在是一位极其务实、精通 Docker 底层架构（特别是 OverlayFS 分层文件系统）的 DevSecOps 资深专家。
+// Fixed DevSecOps expert persona + rules + output format. The model answers in
+// the same language as the prompt, so we pick the prompt by resolved `Lang`.
+fn system_prompt(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Zh => SYSTEM_PROMPT_ZH,
+        Lang::En => SYSTEM_PROMPT_EN,
+    }
+}
+
+const SYSTEM_PROMPT_ZH: &str = r#"你现在是一位极其务实、精通 Docker 底层架构（特别是 OverlayFS 分层文件系统）的 DevSecOps 资深专家。
 
 我将为你提供同一 Docker 镜像的深度分析数据。请严格遵循“异常驱动”与“防劣化”原则进行对比诊断。
 
@@ -96,6 +103,27 @@ const SYSTEM_PROMPT: &str = r#"你现在是一位极其务实、精通 Docker �
 
 ### 🛠️ 必须执行的修复代码
 - [给出优化后的 Dockerfile 片段，只写需要改动、增加 .dockerignore 或清理的那几行]"#;
+
+const SYSTEM_PROMPT_EN: &str = r#"You are an extremely pragmatic senior DevSecOps expert with deep mastery of Docker's underlying architecture (especially the OverlayFS layered filesystem).
+
+I will give you in-depth analysis data for the same Docker image. Perform a comparative diagnosis strictly following the "anomaly-driven" and "anti-regression" principles.
+
+[⚠️ ABSOLUTELY ENFORCED ANALYSIS RULES (CRITICAL RULES)]
+1. Extreme silence: Metrics that look good (size shrank or stayed flat, 0% waste, non-root runtime, no secret exposure) MUST NEVER be mentioned. Do not write any filler such as "no issues found" or "looks great".
+2. Bloat Detection: If a previous analysis record exists, rigorously compare the size of the new vs. old version. If the new version shows abnormal size growth, you must precisely penetrate to the exact Layer and instruction that caused it, and pin down the specific large files eating the space (e.g. a wrongly introduced build toolchain, an un-ignored .git directory, redundant static assets, etc.).
+3. OverlayFS penetration judgment (anti-fake-optimization):
+   - When you see a package-manager cache or a "Wasted space" warning, you MUST inspect the custom layers.
+   - If the custom layers contain only COPY and similar instructions and run no package-manager operations, the redundancy comes 100% from the base image. In that case it is **absolutely forbidden** to suggest adding a cross-layer `RUN rm -rf`!
+   - For redundancy baked into the base image, the only valid advice is "switch to a slimmer base", or label it "acceptable native redundancy of the base image".
+4. Permission alignment check: Comparing the old and new versions, strictly check whether the ownership (Owner) of newly introduced `COPY/ADD` files is inverted against the runtime user (User).
+
+Output the report strictly in the concise format below (if no size regression is found and there is no real anomaly that needs a hands-on fix, reply with exactly: "🟢 Image has no regression, healthy and passing"):
+
+### 🚨 Core anomalies & regression pain points
+- [State the exact size-growth numbers and the offending Layer/file, or any newly introduced security anomaly. Not one word of filler.]
+
+### 🛠️ Fix code that must be applied
+- [Give the optimized Dockerfile snippet — only the lines that must change, the .dockerignore entries to add, or the cleanup steps.]"#;
 
 #[derive(Serialize)]
 struct ChatMessage<'a> {
@@ -126,12 +154,22 @@ struct ChatResponse {
     choices: Vec<ChatChoice>,
 }
 
-fn build_user_message(prev: Option<&str>, current: &str) -> String {
+fn build_user_message(lang: Lang, prev: Option<&str>, current: &str) -> String {
+    let (prev_hdr, cur_hdr, none_hdr) = match lang {
+        Lang::Zh => (
+            "【上一次的分析记录】",
+            "【本次的分析记录】",
+            "（无上一次的分析记录）",
+        ),
+        Lang::En => (
+            "[Previous analysis]",
+            "[Current analysis]",
+            "(No previous analysis on record)",
+        ),
+    };
     match prev {
-        Some(p) => {
-            format!("【上一次的分析记录】\n{p}\n\n【本次的分析记录】\n{current}")
-        }
-        None => format!("（无上一次的分析记录）\n\n【本次的分析记录】\n{current}"),
+        Some(p) => format!("{prev_hdr}\n{p}\n\n{cur_hdr}\n{current}"),
+        None => format!("{none_hdr}\n\n{cur_hdr}\n{current}"),
     }
 }
 
@@ -187,7 +225,7 @@ pub async fn analyze_with_ai(
     let prev = read_history(image);
     write_history(image, current_md);
 
-    let user_content = build_user_message(prev.as_deref(), current_md);
+    let user_content = build_user_message(lang, prev.as_deref(), current_md);
 
     eprintln!("{}", i18n::tr(lang, "ai.analyzing"));
     if prev.is_some() {
@@ -204,7 +242,7 @@ pub async fn analyze_with_ai(
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: SYSTEM_PROMPT,
+                content: system_prompt(lang),
             },
             ChatMessage {
                 role: "user",
@@ -289,13 +327,33 @@ mod tests {
 
     #[test]
     fn user_message_marks_presence_of_prior_record() {
-        let with_prev = build_user_message(Some("OLD"), "NEW");
+        let with_prev = build_user_message(Lang::Zh, Some("OLD"), "NEW");
         assert!(with_prev.contains("【上一次的分析记录】"));
         assert!(with_prev.contains("OLD"));
         assert!(with_prev.contains("【本次的分析记录】"));
 
-        let no_prev = build_user_message(None, "NEW");
+        let no_prev = build_user_message(Lang::Zh, None, "NEW");
         assert!(no_prev.contains("（无上一次的分析记录）"));
         assert!(!no_prev.contains("【上一次的分析记录】"));
+    }
+
+    #[test]
+    fn user_message_is_localized_for_english() {
+        let with_prev = build_user_message(Lang::En, Some("OLD"), "NEW");
+        assert!(with_prev.contains("[Previous analysis]"));
+        assert!(with_prev.contains("OLD"));
+        assert!(with_prev.contains("[Current analysis]"));
+        assert!(!with_prev.contains("【本次的分析记录】"));
+
+        let no_prev = build_user_message(Lang::En, None, "NEW");
+        assert!(no_prev.contains("(No previous analysis on record)"));
+        assert!(!no_prev.contains("[Previous analysis]"));
+    }
+
+    #[test]
+    fn system_prompt_is_selected_by_language() {
+        assert!(system_prompt(Lang::Zh).contains("DevSecOps 资深专家"));
+        assert!(system_prompt(Lang::En).contains("senior DevSecOps expert"));
+        assert!(system_prompt(Lang::En).contains("🟢 Image has no regression"));
     }
 }
