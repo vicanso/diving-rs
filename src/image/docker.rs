@@ -16,7 +16,7 @@ use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 use substring::Substring;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::{
     get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer,
@@ -830,19 +830,83 @@ impl DockerClient {
         resp.bytes().await.context(JsonSnafu { url })
     }
 
-    /// Stream a blob response directly to disk without buffering the whole body.
+    /// Stream a blob response directly to disk without buffering the whole
+    /// body. Large layers from registry CDNs occasionally have the connection
+    /// reset mid-transfer (surfaces as reqwest "error decoding response
+    /// body"); retry a bounded number of times, resuming from the bytes
+    /// already on disk via an HTTP `Range` request so a multi-hundred-MiB
+    /// layer is not re-fetched from scratch.
     async fn download_blob_to_path(
         &self,
         url: String,
         headers: HashMap<String, String>,
         path: &std::path::Path,
     ) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 4;
+        let mut downloaded: u64 = 0;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut req_headers = headers.clone();
+            // Resume from where the previous attempt stopped.
+            if downloaded > 0 {
+                req_headers.insert("Range".to_string(), format!("bytes={downloaded}-"));
+            }
+            match self
+                .stream_blob_once(url.clone(), req_headers, path, &mut downloaded)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                // Only request/stream interruptions are transient; auth and
+                // other errors are permanent and must surface immediately.
+                Err(err @ Error::Request { .. }) if attempt < MAX_ATTEMPTS => {
+                    tl_info!(
+                        url = url,
+                        attempt,
+                        downloaded,
+                        err = err.to_string(),
+                        "blob download interrupted, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("loop returns on success or on the final attempt's error")
+    }
+
+    /// One streaming attempt. `downloaded` tracks bytes persisted so far and
+    /// is updated as chunks land; on a fresh start (or when the server ignores
+    /// `Range` and replies `200`) the file is truncated and `downloaded` reset.
+    async fn stream_blob_once(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+        path: &std::path::Path,
+        downloaded: &mut u64,
+    ) -> Result<()> {
+        let resuming = *downloaded > 0;
         let resp = self.send_request(url.clone(), headers).await?;
-        let mut file = tokio::fs::File::create(path).await.context(IOSnafu {})?;
+        let resumed = resuming && resp.status().as_u16() == StatusCode::PARTIAL_CONTENT.as_u16();
+        let mut file = if resumed {
+            // Server honored Range: append after the bytes already on disk.
+            let mut f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .await
+                .context(IOSnafu {})?;
+            f.seek(std::io::SeekFrom::Start(*downloaded))
+                .await
+                .context(IOSnafu {})?;
+            f
+        } else {
+            // Fresh download, or server ignored Range and sent the full body.
+            *downloaded = 0;
+            tokio::fs::File::create(path).await.context(IOSnafu {})?
+        };
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context(RequestSnafu { url: url.clone() })?;
             file.write_all(&chunk).await.context(IOSnafu {})?;
+            *downloaded += chunk.len() as u64;
         }
         file.flush().await.context(IOSnafu {})?;
         Ok(())

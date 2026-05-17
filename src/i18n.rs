@@ -427,6 +427,16 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "tui.heur") => " [heuristic]",
         (Lang::Zh, "tui.heur") => " [启发式]",
 
+        // ---- AI analysis (ai.rs, CLI stderr/stdout) -----------------------
+        (Lang::En, "ai.analyzing") => "  > Asking AI for optimization insights...",
+        (Lang::Zh, "ai.analyzing") => "  > 正在请求 AI 分析优化要点…",
+        (Lang::En, "ai.compare") => "  > Comparing against previous snapshot...",
+        (Lang::Zh, "ai.compare") => "  > 正在与上次分析快照对比…",
+        (Lang::En, "ai.report") => "AI optimization report:",
+        (Lang::Zh, "ai.report") => "AI 优化分析报告：",
+        (Lang::En, "ai.fail") => "AI analysis failed: {0}",
+        (Lang::Zh, "ai.fail") => "AI 分析失败：{0}",
+
         // Unknown key: visible, safe marker.
         (_, _) => "<missing i18n key>",
     }

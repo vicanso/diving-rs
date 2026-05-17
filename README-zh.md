@@ -4,7 +4,7 @@
 
 `diving-rs`支持多个平台，包括：linux，windows，macos，可以在[release page](https://github.com/vicanso/diving-rs/releases)下载获取。
 
-需要注意：由于镜像分层数据需要从镜像源下载，如docker hub，下载时长需要较长时间，如果超时则再次尝试即可，建议下载程序在本机执行。而对于私有化部署的镜像源，则可将diving的镜像部署运行在可访问镜像源的机器即可。
+需要注意：由于镜像分层数据需要从镜像源下载，如docker hub，下载时长需要较长时间。大分层下载中断时会自动重试并从断点续传，若仍失败再次尝试即可，建议下载程序在本机执行。而对于私有化部署的镜像源，则可将diving的镜像部署运行在可访问镜像源的机器即可。
 
 
 ## 安装
@@ -109,6 +109,37 @@ diving myimage:latest --output-file - --skip-base
 - `Press Esc or 0` 重置显示模式 
 
 ![](./assets/diving-terminal.gif)
+
+## AI 分析
+
+提供 OpenAI 兼容的 API Key 后，diving 会输出 AI 生成的优化分析报告，而不进入交互式 TUI。程序会将完整的 Markdown 分析（分层、反推的 Dockerfile、浪费空间、大文件、安全发现）发送给模型，并将其诊断结果打印到标准输出。
+
+```bash
+# 启用 AI 分析（打印报告，跳过 TUI）
+diving redis:alpine --ai-api-key sk-xxxx
+
+# 自定义 OpenAI 兼容的接口地址与模型
+diving redis:alpine \
+  --ai-api-key sk-xxxx \
+  --ai-base-url https://your-gateway/v1 \
+  --ai-model gpt-4o
+
+# Key / 接口地址 / 模型也可通过环境变量提供
+export OPENAI_API_KEY=sk-xxxx
+diving redis:alpine
+
+# 控制报告语言（同时影响终端/Markdown 输出）
+diving redis:alpine --ai-api-key sk-xxxx --lang zh
+```
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--ai-api-key` | `OPENAI_API_KEY` | — | OpenAI 兼容的 API Key。提供该参数即启用 AI 分析。 |
+| `--ai-base-url` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | 接口地址，也可直接传入完整的 `.../chat/completions` 地址。 |
+| `--ai-model` | `OPENAI_MODEL` | `gpt-4o` | 模型名称。 |
+| `--lang` | `DIVING_LANG` | 系统语言 | 输出语言：`en` 或 `zh`。 |
+
+每次运行会将本次分析快照保存到 `~/.diving/ai_history/`。下次分析同一镜像时，会把上一次的快照与本次一并发送给模型，便于其识别新老版本之间的体积劣化/膨胀。
 
 ## web
 

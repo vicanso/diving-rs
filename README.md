@@ -8,7 +8,7 @@ It does not depend on anything, including docker client.
 
 It supports multiple platforms: linux, windows and macos, you can get it from [release page](https://github.com/vicanso/diving-rs/releases).
 
-Note: Since the layer data needs to be downloaded from the source, such as Docker Hub, it may take a long time, if times out, please try again, it is recommended that the download program be executed locally. For image sources deployed privately, you can deploy the image of Diving on a machine that can access the image source.
+Note: Since the layer data needs to be downloaded from the source, such as Docker Hub, it may take a long time. Interrupted downloads of large layers are retried automatically and resume from where they stopped; if it still fails, please try again. It is recommended that the download program be executed locally. For image sources deployed privately, you can deploy the image of Diving on a machine that can access the image source.
 
 
 ## Installation
@@ -112,6 +112,37 @@ diving myimage:latest --output-file - --skip-base
 - `Press Esc or 0` reset the view mode
 
 ![](./assets/diving-terminal.gif)
+
+## AI analysis
+
+Provide an OpenAI-compatible API key to get an AI-generated optimization report instead of the interactive TUI. diving sends the full Markdown analysis (layers, reconstructed Dockerfile, wasted space, large files, security findings) to the model and prints its diagnosis to stdout.
+
+```bash
+# enable AI analysis (prints the report, skips the TUI)
+diving redis:alpine --ai-api-key sk-xxxx
+
+# custom OpenAI-compatible endpoint and model
+diving redis:alpine \
+  --ai-api-key sk-xxxx \
+  --ai-base-url https://your-gateway/v1 \
+  --ai-model gpt-4o
+
+# key / endpoint / model can also come from the environment
+export OPENAI_API_KEY=sk-xxxx
+diving redis:alpine
+
+# control the report language (also affects terminal/Markdown output)
+diving redis:alpine --ai-api-key sk-xxxx --lang zh
+```
+
+| Flag | Environment | Default | Description |
+|------|-------------|---------|-------------|
+| `--ai-api-key` | `OPENAI_API_KEY` | — | OpenAI-compatible API key. Providing it enables AI analysis. |
+| `--ai-base-url` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API base URL. A full `.../chat/completions` URL is also accepted. |
+| `--ai-model` | `OPENAI_MODEL` | `gpt-4o` | Model name. |
+| `--lang` | `DIVING_LANG` | system locale | Output language: `en` or `zh`. |
+
+Each run stores a snapshot of the analysis under `~/.diving/ai_history/`. On the next run of the same image, the previous snapshot is sent alongside the current one so the model can flag size regressions / bloat between versions.
 
 ## web
 

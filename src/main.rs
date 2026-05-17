@@ -12,6 +12,7 @@ use tracing::Level;
 use tracing::{error, info};
 use tracing_subscriber::FmtSubscriber;
 
+mod ai;
 mod config;
 mod controller;
 mod dist;
@@ -53,6 +54,15 @@ struct Args {
     /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
     #[arg(long)]
     lang: Option<String>,
+    /// OpenAI-compatible API key; enables AI analysis (or $OPENAI_API_KEY)
+    #[arg(long)]
+    ai_api_key: Option<String>,
+    /// OpenAI-compatible API base URL (or $OPENAI_BASE_URL, default OpenAI)
+    #[arg(long)]
+    ai_base_url: Option<String>,
+    /// AI model name (or $OPENAI_MODEL, default gpt-4o)
+    #[arg(long)]
+    ai_model: Option<String>,
 }
 
 impl Args {
@@ -120,6 +130,7 @@ async fn analyze(
     output_file: String,
     skip_base: bool,
     lang: i18n::Lang,
+    ai_cfg: Option<ai::AiConfig>,
 ) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
@@ -128,6 +139,16 @@ async fn analyze(
     let result = analyze_docker_image(image_info, lang)
         .await
         .map_err(|item| item.to_string())?;
+    // AI analysis takes precedence: print the model's report and skip the TUI.
+    if let Some(ai_cfg) = ai_cfg {
+        let md = markdown::to_markdown(&result, false, lang);
+        let report = ai::analyze_with_ai(&image, &md, &ai_cfg, lang)
+            .await
+            .map_err(|e| i18n::fill(i18n::tr(lang, "ai.fail"), &[&e]))?;
+        println!("{}", i18n::tr(lang, "ai.report").bold().green());
+        println!("{report}");
+        return Ok(());
+    }
     if is_ci() || !output_file.is_empty() {
         let summary = result.summary();
         let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
@@ -238,6 +259,11 @@ async fn run(args: Args) {
     config::must_load_config();
     if args.is_terminal_type() {
         let lang = i18n::Lang::resolve(args.lang.as_deref());
+        let ai_cfg = ai::AiConfig::resolve(
+            args.ai_api_key.as_deref(),
+            args.ai_base_url.as_deref(),
+            args.ai_model.as_deref(),
+        );
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
@@ -246,6 +272,7 @@ async fn run(args: Args) {
                         args.output_file.unwrap_or_default(),
                         args.skip_base,
                         lang,
+                        ai_cfg,
                     )
                     .await
                     {
