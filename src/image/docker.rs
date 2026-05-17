@@ -1,4 +1,5 @@
 use crate::config::{load_user_sensitive_patterns, must_load_config};
+use crate::i18n;
 use crate::recommend::{build_recommendations, Recommendation};
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
@@ -739,6 +740,9 @@ pub struct DockerImageParams {
     pub token: String,
     // 镜像架构
     pub arch: String,
+    // 生成建议时使用的语言（不参与序列化）
+    #[serde(skip)]
+    pub lang: crate::i18n::Lang,
 }
 
 fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
@@ -1012,9 +1016,14 @@ impl DockerClient {
             let url = format!("{}/{user}/{img}/blobs/{}", self.registry, layer.digest);
             tl_info!(url = url, "getting blob");
             eprintln!(
-                "  > Downloading {} ({})...",
-                &layer.digest[..layer.digest.len().min(19)],
-                bytesize::ByteSize(layer.size),
+                "{}",
+                i18n::fill(
+                    i18n::tr(params.lang, "prog.download"),
+                    &[
+                        &layer.digest[..layer.digest.len().min(19)],
+                        &bytesize::ByteSize(layer.size).to_string(),
+                    ]
+                )
             );
             let mut headers = HashMap::new();
             if !token.is_empty() {
@@ -1026,9 +1035,14 @@ impl DockerClient {
         } else {
             tl_info!(digest = layer.digest, "blob cache hit");
             eprintln!(
-                "  > Cached   {} ({})",
-                &layer.digest[..layer.digest.len().min(19)],
-                bytesize::ByteSize(layer.size),
+                "{}",
+                i18n::fill(
+                    i18n::tr(params.lang, "prog.cached"),
+                    &[
+                        &layer.digest[..layer.digest.len().min(19)],
+                        &bytesize::ByteSize(layer.size).to_string(),
+                    ]
+                )
             );
         }
 
@@ -1118,12 +1132,15 @@ impl DockerClient {
     }
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
         if !self.is_local() {
-            eprintln!("  > Authenticating with {}...", self.registry);
+            eprintln!(
+                "{}",
+                i18n::fill(i18n::tr(params.lang, "prog.auth"), &[&self.registry])
+            );
         }
         let token = self.get_auth_token(params).await?;
         params.token = token;
         if !self.is_local() {
-            eprintln!("  > Fetching manifest...");
+            eprintln!("{}", i18n::tr(params.lang, "prog.manifest"));
         }
         let (manifest, supported_archs) = self.get_manifest(params).await?;
         let config = self.get_image_config(params).await?;
@@ -1144,9 +1161,14 @@ impl DockerClient {
             let layer_count = manifest.layers.len();
             let total_bytes: u64 = manifest.layers.iter().map(|l| l.size).sum();
             eprintln!(
-                "  > {} layer(s) | {} compressed",
-                layer_count,
-                bytesize::ByteSize(total_bytes),
+                "{}",
+                i18n::fill(
+                    i18n::tr(params.lang, "prog.layers"),
+                    &[
+                        &layer_count.to_string(),
+                        &bytesize::ByteSize(total_bytes).to_string(),
+                    ]
+                )
             );
         }
         let info_list = self
@@ -1365,12 +1387,16 @@ impl DockerClient {
             recommendations: vec![],
         };
         // Pure derived layer — computed from the result that is already built.
-        result.recommendations = build_recommendations(&result);
+        // Localized at generation time from the resolved environment language.
+        result.recommendations = build_recommendations(&result, params.lang);
         Ok(result)
     }
 }
 
-pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyzeResult> {
+pub async fn analyze_docker_image(
+    image_info: ImageInfo,
+    lang: crate::i18n::Lang,
+) -> Result<DockerAnalyzeResult> {
     if image_info.registry == REGISTRY_LOCAL_DOCKER {
         let buf = get_buf_from_local_docker(&image_info.name)?;
         let mut tmpfile = tempfile::Builder::new().tempfile().unwrap();
@@ -1383,6 +1409,7 @@ pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyze
         let c = DockerClient::new(REGISTRY_LOCAL_FILE);
         c.analyze(&mut DockerImageParams {
             img: filename,
+            lang,
             ..Default::default()
         })
         .await
@@ -1393,6 +1420,7 @@ pub async fn analyze_docker_image(image_info: ImageInfo) -> Result<DockerAnalyze
             img: image_info.name,
             tag: image_info.tag,
             arch: image_info.arch,
+            lang,
             ..Default::default()
         })
         .await

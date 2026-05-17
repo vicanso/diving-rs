@@ -12,6 +12,7 @@
 //! vulnerability scanning are out of scope here because they need new data
 //! collection.
 
+use crate::i18n::{self, Lang};
 use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -337,8 +338,11 @@ fn find_base_layer_split(result: &DockerAnalyzeResult) -> Option<usize> {
 }
 
 /// Lint the reconstructed Dockerfile for size / cache anti-patterns.
-fn lint_dockerfile(df: &str) -> Vec<String> {
+/// Returns the localized issue list plus a language-independent flag for
+/// "apt install without cleanup" (used to pick the recommendation severity).
+fn lint_dockerfile(lang: Lang, df: &str) -> (Vec<String>, bool) {
     let mut issues: Vec<String> = Vec::new();
+    let mut has_apt_no_cleanup = false;
     let mut run_streak = 0u32;
     let mut max_streak = 0u32;
     for raw in df.lines() {
@@ -368,26 +372,21 @@ fn lint_dockerfile(df: &str) -> Vec<String> {
             let is_rootfs_bootstrap =
                 lower.contains("rootfs") || body.split_whitespace().last() == Some("/");
             if !is_rootfs_bootstrap {
-                issues.push(format!(
-                    "ADD with URL/tarball — prefer COPY or explicit download+extract: {snip}"
-                ));
+                issues.push(i18n::fill(i18n::tr(lang, "lint.add"), &[&snip]));
             }
         }
         if is_run
             && (lower.contains("apt-get install") || lower.contains("apt install"))
             && !lower.contains("rm -rf /var/lib/apt/lists")
         {
-            issues.push(format!(
-                "apt install without `rm -rf /var/lib/apt/lists/*` in the same RUN: {snip}"
-            ));
+            has_apt_no_cleanup = true;
+            issues.push(i18n::fill(i18n::tr(lang, "lint.apt"), &[&snip]));
         }
         if is_run && (lower.contains("apt-get upgrade") || lower.contains("dist-upgrade")) {
-            issues.push(format!(
-                "apt-get upgrade in a layer (non-reproducible, bloats image): {snip}"
-            ));
+            issues.push(i18n::fill(i18n::tr(lang, "lint.upgrade"), &[&snip]));
         }
         if is_run && lower.contains("pip install") && !lower.contains("--no-cache-dir") {
-            issues.push(format!("pip install without `--no-cache-dir`: {snip}"));
+            issues.push(i18n::fill(i18n::tr(lang, "lint.pip"), &[&snip]));
         }
         if is_run
             && (lower.contains("npm install")
@@ -397,20 +396,19 @@ fn lint_dockerfile(df: &str) -> Vec<String> {
             && !lower.contains("--production")
             && !lower.contains("npm ci")
         {
-            issues.push(format!("npm/yarn install without cache cleanup: {snip}"));
+            issues.push(i18n::fill(i18n::tr(lang, "lint.npm"), &[&snip]));
         }
         if is_run && (lower.contains("chown -r") || lower.contains("chmod -r")) {
-            issues.push(format!(
-                "recursive chown/chmod in RUN duplicates the tree — use `COPY --chown`: {snip}"
-            ));
+            issues.push(i18n::fill(i18n::tr(lang, "lint.chown"), &[&snip]));
         }
     }
     if max_streak >= 3 {
-        issues.push(format!(
-            "{max_streak} consecutive RUN instructions — merge with `&&` to cut layers"
+        issues.push(i18n::fill(
+            i18n::tr(lang, "lint.runstreak"),
+            &[&max_streak.to_string()],
         ));
     }
-    issues
+    (issues, has_apt_no_cleanup)
 }
 
 /// Detects a secret-looking `KEY=VALUE` assignment without echoing the value.
@@ -451,9 +449,9 @@ fn truncate_sample(mut paths: Vec<String>) -> (Vec<String>, usize) {
     (paths, total)
 }
 
-fn more_note(shown: usize, total: usize) -> String {
+fn more_note(lang: Lang, shown: usize, total: usize) -> String {
     if total > shown {
-        format!(" (+{} more)", total - shown)
+        i18n::fill(i18n::tr(lang, "frag.more"), &[&(total - shown).to_string()])
     } else {
         String::new()
     }
@@ -461,8 +459,12 @@ fn more_note(shown: usize, total: usize) -> String {
 
 /// Produce all recommendations for an analysis result, ordered by severity
 /// (high → info) so the most important items render first.
-pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation> {
+pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Recommendation> {
     let mut out: Vec<Recommendation> = Vec::new();
+    // Localization helpers: `t` = static catalog entry, `f` = entry with
+    // `{0}`,`{1}`,… placeholders substituted.
+    let t = |k: &str| -> String { i18n::tr(lang, k).to_string() };
+    let f = |k: &str, args: &[&str]| -> String { i18n::fill(i18n::tr(lang, k), args) };
 
     let mut leaves: Vec<Leaf> = Vec::new();
     for tree in &result.file_tree_list {
@@ -492,17 +494,15 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: severity.into(),
-            title: "Reclaim wasted space".into(),
-            detail: format!(
-                "{} ({:.1}% of the image) is occupied by files that a later \
-                 layer overwrites or deletes. Because each layer is immutable, \
-                 those bytes still ship.",
-                bytesize::ByteSize(summary.wasted_size),
-                summary.wasted_percent * 100.0
+            title: t("rec.wasted.title"),
+            detail: f(
+                "rec.wasted.detail",
+                &[
+                    &bytesize::ByteSize(summary.wasted_size).to_string(),
+                    &format!("{:.1}", summary.wasted_percent * 100.0),
+                ],
             ),
-            dockerfile_hint: "Create and clean up the data in the *same* RUN instruction so \
-                 the bytes never enter a layer."
-                .into(),
+            dockerfile_hint: t("rec.wasted.hint"),
             est_saved_bytes: summary.wasted_size,
             heuristic: false,
             paths,
@@ -524,17 +524,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_MEDIUM.into(),
-                title: "Remove package manager cache".into(),
-                detail: format!(
-                    "{} of apt/apk/yum/dnf/pacman cache is baked into the image \
-                     across {} file(s){}.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.pkgcache.title"),
+                detail: f(
+                    "rec.pkgcache.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "apt: `rm -rf /var/lib/apt/lists/*` in the same RUN; \
-                     apk: `apk add --no-cache`; yum/dnf: `yum clean all`."
-                    .into(),
+                dockerfile_hint: t("rec.pkgcache.hint"),
                 est_saved_bytes: size,
                 heuristic: false,
                 paths: sample,
@@ -557,17 +556,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_MEDIUM.into(),
-                title: "Exclude development artifacts".into(),
-                detail: format!(
-                    "{} of build/SCM artifacts ({} file(s){}) such as .git, \
-                     build caches or debug output is shipped.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.devart.title"),
+                detail: f(
+                    "rec.devart.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Add a .dockerignore and/or use a multi-stage build so these \
-                     never reach the final stage."
-                    .into(),
+                dockerfile_hint: t("rec.devart.hint"),
                 est_saved_bytes: size,
                 heuristic: false,
                 paths: sample,
@@ -580,13 +578,9 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: SEVERITY_LOW.into(),
-            title: "Reduce layer count".into(),
-            detail: format!(
-                "The image has {} layers (limit is 127). Many small layers add \
-                 metadata overhead and slow pulls.",
-                result.layers.len()
-            ),
-            dockerfile_hint: "Merge consecutive RUN instructions with `&&`.".into(),
+            title: t("rec.layercount.title"),
+            detail: f("rec.layercount.detail", &[&result.layers.len().to_string()]),
+            dockerfile_hint: t("rec.layercount.hint"),
             est_saved_bytes: 0,
             heuristic: false,
             paths: vec![],
@@ -606,12 +600,13 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: SEVERITY_INFO.into(),
-            title: "Large files added in recent layers".into(),
-            detail: format!(
-                "{} across {} file(s) was added in the most recent layers — \
-                 review whether each is required at runtime.",
-                bytesize::ByteSize(total_big),
-                result.big_modified_file_list.len()
+            title: t("rec.bigfiles.title"),
+            detail: f(
+                "rec.bigfiles.detail",
+                &[
+                    &bytesize::ByteSize(total_big).to_string(),
+                    &result.big_modified_file_list.len().to_string(),
+                ],
             ),
             dockerfile_hint: String::new(),
             est_saved_bytes: 0,
@@ -635,15 +630,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Editor/OS junk files".into(),
-                detail: format!(
-                    "{} of editor/OS junk ({} file(s){}) — .DS_Store, Thumbs.db, \
-                     .vscode/.idea, vim swap files — is shipped.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.junk.title"),
+                detail: f(
+                    "rec.junk.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Add these patterns to .dockerignore.".into(),
+                dockerfile_hint: t("rec.junk.hint"),
                 est_saved_bytes: size,
                 heuristic: false,
                 paths: sample,
@@ -665,28 +661,21 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             && !bo.contains("alpine")
             && !bo.contains("distroless");
         if full_distro {
-            let mut detail = format!(
-                "Base OS is `{}`, a full distribution. A slimmer base cuts both \
-                 image size and CVE surface substantially.",
-                result.base_os
-            );
+            let mut detail = f("rec.slimbase.detail", &[&result.base_os]);
             if let Some(cut) = find_base_layer_split(result) {
                 let n = cut.min(result.layers.len());
                 let base_sz: u64 = result.layers[..n].iter().map(|l| l.size).sum();
-                detail.push_str(&format!(
-                    " Detected base ≈ {} across {} layer(s).",
-                    bytesize::ByteSize(base_sz),
-                    n
+                detail.push_str(&f(
+                    "rec.slimbase.extra",
+                    &[&bytesize::ByteSize(base_sz).to_string(), &n.to_string()],
                 ));
             }
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Consider a slimmer base image".into(),
+                title: t("rec.slimbase.title"),
                 detail,
-                dockerfile_hint: "Switch to a `-slim`, `alpine`, or distroless base \
-                     (verify glibc / runtime needs first)."
-                    .into(),
+                dockerfile_hint: t("rec.slimbase.hint"),
                 est_saved_bytes: 0,
                 heuristic: true,
                 paths: vec![],
@@ -727,16 +716,15 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: sev.into(),
-                title: "Oversized layer(s)".into(),
-                detail: format!(
-                    "{} layer(s) each exceed {} (or 30% of the image). Slimming \
-                     the dominant instruction has the biggest size impact.",
-                    big.len(),
-                    bytesize::ByteSize(threshold)
+                title: t("rec.oversized.title"),
+                detail: f(
+                    "rec.oversized.detail",
+                    &[
+                        &big.len().to_string(),
+                        &bytesize::ByteSize(threshold).to_string(),
+                    ],
                 ),
-                dockerfile_hint: "Audit the command that builds this layer; remove \
-                     caches/intermediate files within the same RUN."
-                    .into(),
+                dockerfile_hint: t("rec.oversized.hint"),
                 est_saved_bytes: 0,
                 heuristic: false,
                 paths,
@@ -746,9 +734,9 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
 
     // Dockerfile anti-patterns (reconstructed from image history).
     {
-        let issues = lint_dockerfile(&result.dockerfile);
+        let (issues, has_apt_no_cleanup) = lint_dockerfile(lang, &result.dockerfile);
         if !issues.is_empty() {
-            let severity = if issues.iter().any(|i| i.contains("apt install without")) {
+            let severity = if has_apt_no_cleanup {
                 SEVERITY_MEDIUM
             } else {
                 SEVERITY_LOW
@@ -757,15 +745,12 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: severity.into(),
-                title: "Dockerfile anti-patterns".into(),
-                detail: format!(
-                    "{} build-instruction issue(s){} that inflate image size or \
-                     break layer caching (reconstructed from history — verify \
-                     against the real Dockerfile).",
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.dflint.title"),
+                detail: f(
+                    "rec.dflint.detail",
+                    &[&total.to_string(), &more_note(lang, sample.len(), total)],
                 ),
-                dockerfile_hint: "Apply the fix noted inline on each item below.".into(),
+                dockerfile_hint: t("rec.dflint.hint"),
                 est_saved_bytes: 0,
                 heuristic: true,
                 paths: sample,
@@ -789,18 +774,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Build-only files in runtime image".into(),
-                detail: format!(
-                    "{} of likely build-time-only files ({} file(s){}) — static \
-                     libs (.a/.o), headers (.h), .pyc, JS source maps. Verify \
-                     they are not loaded at runtime before stripping.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.buildonly.title"),
+                detail: f(
+                    "rec.buildonly.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Move compilation to a builder stage and copy only runtime \
-                     outputs into the final stage."
-                    .into(),
+                dockerfile_hint: t("rec.buildonly.hint"),
                 est_saved_bytes: size,
                 heuristic: true,
                 paths: sample,
@@ -822,17 +805,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Documentation / man / locale data".into(),
-                detail: format!(
-                    "{} of docs, man pages, info and locale files ({} file(s){}) \
-                     is rarely needed in a container.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.doclocale.title"),
+                detail: f(
+                    "rec.doclocale.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Use distro minimization (e.g. dpkg `path-exclude`, \
-                     `apk --no-cache`, or a -slim/distroless base)."
-                    .into(),
+                dockerfile_hint: t("rec.doclocale.hint"),
                 est_saved_bytes: size,
                 heuristic: true,
                 paths: sample,
@@ -854,16 +836,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Log / temp files baked into image".into(),
-                detail: format!(
-                    "{} of log or temporary files ({} file(s){}) is shipped; \
-                     these belong to runtime, not the image.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.logtemp.title"),
+                detail: f(
+                    "rec.logtemp.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Clean /var/log and /tmp at the end of the RUN that creates them."
-                    .into(),
+                dockerfile_hint: t("rec.logtemp.hint"),
                 est_saved_bytes: size,
                 heuristic: true,
                 paths: sample,
@@ -885,18 +867,16 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
-                title: "Build toolchain present in final image".into(),
-                detail: format!(
-                    "{} of compiler/build tools ({} found{}) are present. They \
-                     enlarge the image and widen the attack surface if the app \
-                     does not compile at runtime.",
-                    bytesize::ByteSize(size),
-                    total,
-                    more_note(sample.len(), total)
+                title: t("rec.toolchain.title"),
+                detail: f(
+                    "rec.toolchain.detail",
+                    &[
+                        &bytesize::ByteSize(size).to_string(),
+                        &total.to_string(),
+                        &more_note(lang, sample.len(), total),
+                    ],
                 ),
-                dockerfile_hint: "Install build deps in a builder stage; keep only runtime \
-                     packages in the final stage."
-                    .into(),
+                dockerfile_hint: t("rec.toolchain.hint"),
                 est_saved_bytes: size,
                 heuristic: true,
                 paths: sample,
@@ -916,17 +896,12 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         out.push(Recommendation {
             category: CATEGORY_SECURITY.into(),
             severity: SEVERITY_HIGH.into(),
-            title: "Potential secrets in image".into(),
-            detail: format!(
-                "{} suspected secret/credential file(s) detected. Deleting them \
-                 in a later layer does NOT help — the earlier layer still \
-                 contains the bytes and is recoverable.",
-                result.sensitive_files.len()
+            title: t("rec.secfiles.title"),
+            detail: f(
+                "rec.secfiles.detail",
+                &[&result.sensitive_files.len().to_string()],
             ),
-            dockerfile_hint: "Never COPY secrets in; use BuildKit `--mount=type=secret` or \
-                 runtime env/secret managers, then rebuild (squashing alone is \
-                 not enough if the secret was committed upstream)."
-                .into(),
+            dockerfile_hint: t("rec.secfiles.hint"),
             est_saved_bytes: 0,
             heuristic: false,
             paths,
@@ -959,20 +934,17 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         }
         if !hits.is_empty() {
             let (sample, total) = truncate_sample(hits);
+            let entword = if total == 1 {
+                t("word.entry_sg")
+            } else {
+                t("word.entry_pl")
+            };
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_HIGH.into(),
-                title: "Secrets in image metadata".into(),
-                detail: format!(
-                    "{} environment variable/label/Dockerfile entr{} look like \
-                     hardcoded credentials. Image metadata is world-readable via \
-                     `docker inspect`.",
-                    total,
-                    if total == 1 { "y" } else { "ies" }
-                ),
-                dockerfile_hint: "Pass secrets at runtime (env/secret manager); do not bake \
-                     them into ENV/ARG/LABEL."
-                    .into(),
+                title: t("rec.secmeta.title"),
+                detail: f("rec.secmeta.detail", &[&total.to_string(), &entword]),
+                dockerfile_hint: t("rec.secmeta.hint"),
                 est_saved_bytes: 0,
                 heuristic: false,
                 paths: sample,
@@ -995,15 +967,9 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_HIGH.into(),
-                title: "World-readable secret files".into(),
-                detail: format!(
-                    "{} suspected secret file(s) are readable by every user and \
-                     process in the container (others-read bit set).",
-                    total
-                ),
-                dockerfile_hint: "Restrict permissions (`chmod 600`) or, better, \
-                     don't ship the secret at all."
-                    .into(),
+                title: t("rec.worldread.title"),
+                detail: f("rec.worldread.detail", &[&total.to_string()]),
+                dockerfile_hint: t("rec.worldread.hint"),
                 est_saved_bytes: 0,
                 heuristic: false,
                 paths: sample,
@@ -1015,11 +981,9 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         out.push(Recommendation {
             category: CATEGORY_SECURITY.into(),
             severity: SEVERITY_MEDIUM.into(),
-            title: "Container runs as root".into(),
-            detail: "No non-root USER is set, so the process runs as root by \
-                     default — a privilege-escalation risk if compromised."
-                .into(),
-            dockerfile_hint: "Add a dedicated user and `USER nonroot` before CMD.".into(),
+            title: t("rec.runasroot.title"),
+            detail: t("rec.runasroot.detail"),
+            dockerfile_hint: t("rec.runasroot.hint"),
             est_saved_bytes: 0,
             heuristic: false,
             paths: vec![],
@@ -1039,19 +1003,17 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
         }
         if !setid.is_empty() {
             let (sample, total) = truncate_sample(setid);
+            let binword = if total == 1 {
+                t("word.binary_sg")
+            } else {
+                t("word.binary_pl")
+            };
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_MEDIUM.into(),
-                title: "setuid/setgid binaries".into(),
-                detail: format!(
-                    "{} setuid/setgid binar{} present — common privilege-\
-                     escalation targets.",
-                    total,
-                    if total == 1 { "y" } else { "ies" }
-                ),
-                dockerfile_hint: "Strip the bits you don't need: \
-                     `RUN find / -perm /6000 -type f -exec chmod a-s {} +`."
-                    .into(),
+                title: t("rec.setuid.title"),
+                detail: f("rec.setuid.detail", &[&total.to_string(), &binword]),
+                dockerfile_hint: t("rec.setuid.hint"),
                 est_saved_bytes: 0,
                 heuristic: false,
                 paths: sample,
@@ -1062,13 +1024,9 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_MEDIUM.into(),
-                title: "World-writable files".into(),
-                detail: format!(
-                    "{} world-writable file(s) — any process/user in the \
-                     container can tamper with them.",
-                    total
-                ),
-                dockerfile_hint: "Tighten permissions (e.g. `chmod o-w`).".into(),
+                title: t("rec.worldwrite.title"),
+                detail: f("rec.worldwrite.detail", &[&total.to_string()]),
+                dockerfile_hint: t("rec.worldwrite.hint"),
                 est_saved_bytes: 0,
                 heuristic: false,
                 paths: sample,
@@ -1113,14 +1071,10 @@ pub fn build_recommendations(result: &DockerAnalyzeResult) -> Vec<Recommendation
                 out.push(Recommendation {
                     category: CATEGORY_SIZE.into(),
                     severity: SEVERITY_INFO.into(),
-                    title: "Net reclaimable estimate (de-duplicated)".into(),
-                    detail: format!(
-                        "Roughly {} is reclaimable in total once overlap between \
-                         the recommendations above is removed. This is the \
-                         de-duplicated upper bound — do NOT add up the \
-                         individual cards (the same file is often counted by \
-                         several rules).",
-                        bytesize::ByteSize(net)
+                    title: t("rec.netreclaim.title"),
+                    detail: f(
+                        "rec.netreclaim.detail",
+                        &[&bytesize::ByteSize(net).to_string()],
                     ),
                     dockerfile_hint: String::new(),
                     est_saved_bytes: net,
@@ -1176,7 +1130,7 @@ mod tests {
         // A default result has no USER set, so the only finding should be the
         // "runs as root" security check — and it must not panic on total_size 0.
         let r = DockerAnalyzeResult::default();
-        let recs = build_recommendations(&r);
+        let recs = build_recommendations(&r, Lang::En);
         assert!(recs.iter().all(|x| x.category == CATEGORY_SECURITY));
         assert!(recs.iter().any(|x| x.title == "Container runs as root"));
     }
@@ -1211,18 +1165,26 @@ mod tests {
                   ADD https://example.com/app.tar.gz /tmp/\n\
                   RUN pip install flask\n\
                   RUN chown -R app:app /srv";
-        let issues = lint_dockerfile(df);
+        let (issues, has_apt) = lint_dockerfile(Lang::En, df);
+        assert!(has_apt);
         assert!(issues.iter().any(|i| i.contains("apt install without")));
         assert!(issues.iter().any(|i| i.contains("ADD with URL/tarball")));
         assert!(issues.iter().any(|i| i.contains("--no-cache-dir")));
         assert!(issues.iter().any(|i| i.contains("recursive chown/chmod")));
         // A clean instruction sequence yields nothing.
-        assert!(lint_dockerfile("CMD [\"/app\"]\nEXPOSE 8080").is_empty());
+        assert!(lint_dockerfile(Lang::En, "CMD [\"/app\"]\nEXPOSE 8080")
+            .0
+            .is_empty());
         // The base-image rootfs bootstrap must NOT be flagged (not user-controlled).
-        assert!(
-            lint_dockerfile("ADD alpine-minirootfs-3.23.4-aarch64.tar.gz / # buildkit").is_empty()
-        );
-        assert!(lint_dockerfile("ADD file:abc123 in /").is_empty());
+        assert!(lint_dockerfile(
+            Lang::En,
+            "ADD alpine-minirootfs-3.23.4-aarch64.tar.gz / # buildkit"
+        )
+        .0
+        .is_empty());
+        assert!(lint_dockerfile(Lang::En, "ADD file:abc123 in /")
+            .0
+            .is_empty());
     }
 
     #[test]
@@ -1245,7 +1207,7 @@ mod tests {
             file_tree_list: vec![vec![dir]],
             ..Default::default()
         };
-        let recs = build_recommendations(&r);
+        let recs = build_recommendations(&r, Lang::En);
         let net = recs
             .iter()
             .find(|x| x.title.starts_with("Net reclaimable"))

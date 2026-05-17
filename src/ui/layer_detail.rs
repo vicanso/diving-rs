@@ -2,6 +2,7 @@ use chrono::{DateTime, Local, TimeZone};
 use ratatui::{prelude::*, widgets::*};
 
 use super::util;
+use crate::i18n;
 use crate::image::ImageLayer;
 
 pub struct DetailWidget<'a> {
@@ -12,6 +13,7 @@ pub struct DetailWidget<'a> {
 }
 pub struct DetailWidgetOption {
     pub width: u16,
+    pub lang: i18n::Lang,
 }
 // 创建layer详细信息的widget
 pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> DetailWidget<'_> {
@@ -27,12 +29,21 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
     };
 
     let paragraph = Paragraph::new(Line::from(vec![
-        Span::styled("Created:", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            i18n::tr(opt.lang, "tui.created"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::from(create_at),
-        Span::styled("Command:", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            i18n::tr(opt.lang, "tui.command"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::from(cmd),
     ]))
-    .block(util::create_block(" Layer Details "))
+    .block(util::create_block(i18n::tr(
+        opt.lang,
+        "tui.layerdetails.title",
+    )))
     .alignment(Alignment::Left)
     .wrap(Wrap { trim: true });
     // 拆分左侧栏

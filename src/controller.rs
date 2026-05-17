@@ -1,5 +1,6 @@
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
+use crate::i18n;
 use crate::image::{analyze_docker_image, get_file_content_from_layer, parse_image_info};
 use crate::markdown;
 use crate::store::get_blob_path;
@@ -35,6 +36,8 @@ struct AnalyzeParams {
     image: String,
     format: Option<String>,
     skip_base: Option<bool>,
+    /// Recommendation language: `en` or `zh`. Falls back to server env.
+    lang: Option<String>,
 }
 
 fn get_latest_image_cache() -> &'static Mutex<LruCache<String, ()>> {
@@ -52,10 +55,11 @@ fn add_to_latest_image_cache(name: &str) {
 
 async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
     let image_info = parse_image_info(&params.image);
-    let result = analyze_docker_image(image_info).await?;
+    let lang = i18n::Lang::resolve(params.lang.as_deref());
+    let result = analyze_docker_image(image_info, lang).await?;
     add_to_latest_image_cache(&params.image);
     if params.format.as_deref() == Some("markdown") {
-        let md = markdown::to_markdown(&result, params.skip_base.unwrap_or(false));
+        let md = markdown::to_markdown(&result, params.skip_base.unwrap_or(false), lang);
         return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
     }
     Ok(Json(result).into_response())

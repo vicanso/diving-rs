@@ -1,4 +1,5 @@
 use self::image_detail::ImageDetailWidgetOption;
+use crate::i18n;
 use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageLayer};
 use crate::recommend::Recommendation;
 use crossterm::{
@@ -45,6 +46,8 @@ struct WidgetState {
     summary: DockerAnalyzeSummary,
     // 优化建议
     recommendations: Vec<Recommendation>,
+    // 界面语言
+    lang: crate::i18n::Lang,
 }
 
 static LAYERS_WIDGET: &str = "layers";
@@ -115,7 +118,7 @@ impl WidgetState {
     }
 }
 
-pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
+pub fn run_app(result: DockerAnalyzeResult, lang: i18n::Lang) -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -137,6 +140,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         size: result.size,
         total_size: result.total_size,
         recommendations: result.recommendations,
+        lang,
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
         active: LAYERS_WIDGET.to_string(),
@@ -236,6 +240,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         layers::LayersWidgetOption {
             is_active: state.is_layers_widget_active(),
             selected_layer: state.selected_layer,
+            lang: state.lang,
         },
     );
     let layer = state
@@ -246,6 +251,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         layer,
         layer_detail::DetailWidgetOption {
             width: chunks[0].width,
+            lang: state.lang,
         },
     );
 
@@ -268,6 +274,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         size: state.size,
         summary: state.summary.clone(),
         recommendations: state.recommendations.clone(),
+        lang: state.lang,
     });
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);
@@ -281,6 +288,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
             selected_layer: state.selected_layer,
             area: chunks[1],
             mode: state.file_tree_mode,
+            lang: state.lang,
         },
     );
     if state.file_count != files_widget.file_count {

@@ -3,6 +3,7 @@ use pad::PadStr;
 use ratatui::{prelude::*, widgets::*};
 
 use super::util;
+use crate::i18n;
 use crate::image::DockerAnalyzeSummary;
 use crate::recommend::Recommendation;
 
@@ -18,6 +19,7 @@ pub struct ImageDetailWidgetOption {
     pub size: u64,
     pub summary: DockerAnalyzeSummary,
     pub recommendations: Vec<Recommendation>,
+    pub lang: i18n::Lang,
 }
 
 pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailWidget<'a> {
@@ -58,7 +60,11 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
 
     // 生成浪费空间的文件列表
     let space_span = Span::from("   ");
-    let headers = ["Count", "Total Space", "Path"];
+    let headers = [
+        i18n::tr(opt.lang, "tui.col.count"),
+        i18n::tr(opt.lang, "tui.col.totspace"),
+        i18n::tr(opt.lang, "tui.col.path"),
+    ];
     let mut name = opt.name;
     if !opt.arch.is_empty() {
         name += &format!("({}/{})", opt.os, opt.arch);
@@ -66,28 +72,28 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
     let mut spans_list = vec![
         Line::from(vec![
             Span::styled(
-                "Image name: ",
+                i18n::tr(opt.lang, "tui.imgname"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(name),
         ]),
         Line::from(vec![
             Span::styled(
-                "Total Image size: ",
+                i18n::tr(opt.lang, "tui.totsize"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(format!("{} / {}", ByteSize(total_size), ByteSize(size),)),
         ]),
         Line::from(vec![
             Span::styled(
-                "Potential wasted space: ",
+                i18n::tr(opt.lang, "tui.potwasted"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(ByteSize(wasted_size).to_string()),
         ]),
         Line::from(vec![
             Span::styled(
-                "Image efficiency score: ",
+                i18n::tr(opt.lang, "tui.effscore"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::from(format!("{score} %")),
@@ -123,7 +129,7 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
     if !opt.recommendations.is_empty() {
         spans_list.push(Line::from(vec![]));
         spans_list.push(Line::from(vec![Span::styled(
-            "Optimization Recommendations",
+            i18n::tr(opt.lang, "tui.recs"),
             Style::default().add_modifier(Modifier::BOLD),
         )]));
         for r in opt.recommendations.iter() {
@@ -135,21 +141,35 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             };
             let mut suffix = String::new();
             if r.est_saved_bytes > 0 {
-                suffix = format!(" (~{} saved)", ByteSize(r.est_saved_bytes));
+                suffix = i18n::fill(
+                    i18n::tr(opt.lang, "cli.saved"),
+                    &[&ByteSize(r.est_saved_bytes).to_string()],
+                );
             }
             if r.heuristic {
-                suffix += " [heuristic]";
+                suffix += i18n::tr(opt.lang, "tui.heur");
             }
             spans_list.push(Line::from(vec![
                 Span::styled(
-                    format!("[{}] ", r.severity.to_uppercase()),
+                    format!(
+                        "[{}] ",
+                        i18n::tr(opt.lang, &format!("sev.{}", r.severity)).to_uppercase()
+                    ),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::from(format!("{} — {}{}", r.category, r.title, suffix)),
+                Span::from(format!(
+                    "{} — {}{}",
+                    i18n::tr(opt.lang, &format!("cat.{}", r.category)),
+                    r.title,
+                    suffix
+                )),
             ]));
         }
     }
 
-    let widget = Paragraph::new(spans_list).block(util::create_block(" Image Details "));
+    let widget = Paragraph::new(spans_list).block(util::create_block(i18n::tr(
+        opt.lang,
+        "tui.imgdetails.title",
+    )));
     ImageDetailWidget { widget }
 }

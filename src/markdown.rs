@@ -2,6 +2,7 @@ use bytesize::ByteSize;
 use chrono::DateTime;
 use std::cmp::Reverse;
 
+use crate::i18n::{self, Lang};
 use crate::image::{DockerAnalyzeResult, FileTreeItem, Op};
 
 fn cmd_to_dockerfile_line(cmd: &str) -> Option<String> {
@@ -94,9 +95,14 @@ fn find_user_layer_start(result: &DockerAnalyzeResult) -> Option<usize> {
     }
 }
 
-pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
+pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) -> String {
     let summary = result.summary();
     let mut md = String::with_capacity(4096);
+    // Localization helpers: `t` = static catalog entry, `f` = entry with
+    // `{0}`,`{1}`,… placeholders. Markdown punctuation stays in code so the
+    // English output is byte-identical to the pre-i18n version.
+    let t = |k: &str| -> String { i18n::tr(lang, k).to_string() };
+    let f = |k: &str, args: &[&str]| -> String { i18n::fill(i18n::tr(lang, k), args) };
 
     // Always detect the base/user boundary for stats; only skip layers when requested.
     let user_layer_start = find_user_layer_start(result);
@@ -104,11 +110,11 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     let is_base_layer = |i: usize| -> bool { auto_start.is_some_and(|start| i < start) };
 
     // Title
-    md.push_str(&format!("# Image Analysis: {}\n\n", result.name));
+    md.push_str(&format!("# {}: {}\n\n", t("md.title"), result.name));
 
     // Risk tags
     if !result.tags.is_empty() {
-        md.push_str("## Risk Tags\n\n");
+        md.push_str(&format!("## {}\n\n", t("md.risktags")));
         for tag in &result.tags {
             md.push_str(&format!("- `{}`\n", tag));
         }
@@ -116,36 +122,44 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
     }
 
     // Image info table
-    md.push_str("## Image Info\n\n");
-    md.push_str("| Field | Value |\n|-------|-------|\n");
+    md.push_str(&format!("## {}\n\n", t("md.imginfo")));
+    md.push_str(&format!(
+        "| {} | {} |\n|-------|-------|\n",
+        t("md.col.field"),
+        t("md.col.value")
+    ));
     let arch_display = if result.supported_archs.is_empty() {
         result.arch.clone()
     } else {
         format!("{} ({})", result.arch, result.supported_archs.join(", "))
     };
-    md.push_str(&format!("| Architecture | {} |\n", arch_display));
-    md.push_str(&format!("| OS | {} |\n", result.os));
+    md.push_str(&format!("| {} | {} |\n", t("md.f.arch"), arch_display));
+    md.push_str(&format!("| {} | {} |\n", t("md.f.os"), result.os));
     if !result.base_os.is_empty() {
-        md.push_str(&format!("| Base OS | {} |\n", result.base_os));
+        md.push_str(&format!("| {} | {} |\n", t("md.f.baseos"), result.base_os));
     }
     if !result.user.is_empty() {
-        md.push_str(&format!("| User | {} |\n", result.user));
+        md.push_str(&format!("| {} | {} |\n", t("md.f.user"), result.user));
     }
     md.push_str(&format!(
-        "| Compressed size | {} |\n",
+        "| {} | {} |\n",
+        t("md.f.csize"),
         ByteSize(result.size)
     ));
     md.push_str(&format!(
-        "| Uncompressed size | {} |\n",
+        "| {} | {} |\n",
+        t("md.f.usize"),
         ByteSize(result.total_size)
     ));
     md.push_str(&format!(
-        "| Total Layers | {} / 127 |\n",
+        "| {} | {} / 127 |\n",
+        t("md.f.layers"),
         result.layers.len()
     ));
-    md.push_str(&format!("| Efficiency | {}% |\n", summary.score));
+    md.push_str(&format!("| {} | {}% |\n", t("md.f.eff"), summary.score));
     md.push_str(&format!(
-        "| Wasted space | {} ({:.1}%) |\n",
+        "| {} | {} ({:.1}%) |\n",
+        t("md.f.wasted"),
         ByteSize(summary.wasted_size),
         summary.wasted_percent * 100.0
     ));
@@ -154,10 +168,16 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         let base_size: u64 = base_layers.iter().map(|l| l.size).sum();
         let base_unpack: u64 = base_layers.iter().map(|l| l.unpack_size).sum();
         md.push_str(&format!(
-            "| Base image | {} layers, {} compressed / {} uncompressed |\n",
-            start,
-            ByteSize(base_size),
-            ByteSize(base_unpack),
+            "| {} | {} |\n",
+            t("md.f.baseimg"),
+            f(
+                "md.baseimg.val",
+                &[
+                    &start.to_string(),
+                    &ByteSize(base_size).to_string(),
+                    &ByteSize(base_unpack).to_string(),
+                ]
+            )
         ));
     }
     md.push('\n');
@@ -173,7 +193,7 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         result.dockerfile.clone()
     };
     if !dockerfile.is_empty() {
-        md.push_str("## Dockerfile (reconstructed)\n\n");
+        md.push_str(&format!("## {}\n\n", t("md.dockerfile")));
         md.push_str("```dockerfile\n");
         md.push_str(&dockerfile);
         md.push_str("\n```\n\n");
@@ -181,7 +201,7 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Environment variables
     if !result.envs.is_empty() {
-        md.push_str("## Environment Variables\n\n");
+        md.push_str(&format!("## {}\n\n", t("md.envs")));
         for env in &result.envs {
             md.push_str(&format!("- `{}`\n", env));
         }
@@ -190,7 +210,7 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Labels
     if !result.labels.is_empty() {
-        md.push_str("## Labels\n\n");
+        md.push_str(&format!("## {}\n\n", t("md.labels")));
         for label in &result.labels {
             md.push_str(&format!("- `{}`\n", label));
         }
@@ -199,11 +219,15 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Wasted space
     if !summary.wasted_list.is_empty() {
-        md.push_str("## Wasted Space\n\n");
-        md.push_str("Files overwritten or deleted in a later layer (top 20 by size):\n\n");
-        md.push_str(
-            "| Path | Total Wasted | Occurrences |\n|------|-------------|-------------|\n",
-        );
+        md.push_str(&format!("## {}\n\n", t("md.wasted")));
+        md.push_str(&t("md.wasted.desc"));
+        md.push_str("\n\n");
+        md.push_str(&format!(
+            "| {} | {} | {} |\n|------|-------------|-------------|\n",
+            t("md.col.path"),
+            t("md.col.totwasted"),
+            t("md.col.occ")
+        ));
         for item in summary.wasted_list.iter().take(20) {
             md.push_str(&format!(
                 "| `{}` | {} | {} |\n",
@@ -217,8 +241,14 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Large modified files
     if !result.big_modified_file_list.is_empty() {
-        md.push_str("## Large Files Added in Recent Layers\n\n");
-        md.push_str("| Path | Size | Mode | Owner |\n|------|------|------|-------|\n");
+        md.push_str(&format!("## {}\n\n", t("md.bigfiles")));
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n|------|------|------|-------|\n",
+            t("md.col.path"),
+            t("md.col.size"),
+            t("md.col.mode"),
+            t("md.col.owner")
+        ));
         for item in &result.big_modified_file_list {
             md.push_str(&format!(
                 "| `{}` | {} | `{}` | {}:{} |\n",
@@ -234,22 +264,31 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Security warnings
     if !result.sensitive_files.is_empty() {
-        md.push_str("## ⚠️ Security Warnings (Potential Secrets)\n\n");
-        md.push_str("| Path | Size | Layer | Risk |\n|------|------|-------|------|\n");
+        md.push_str(&format!("## {}\n\n", t("md.secwarn")));
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n|------|------|-------|------|\n",
+            t("md.col.path"),
+            t("md.col.size"),
+            t("md.col.layer"),
+            t("md.col.risk")
+        ));
         const SECRETS_LIMIT: usize = 30;
         for item in result.sensitive_files.iter().take(SECRETS_LIMIT) {
             md.push_str(&format!(
-                "| `{}` | {} | Layer {} | {} |\n",
+                "| `{}` | {} | {} | {} |\n",
                 item.path,
                 ByteSize(item.size),
-                item.layer_index + 1,
+                f("md.cell.layer", &[&(item.layer_index + 1).to_string()]),
                 item.reason,
             ));
         }
         if result.sensitive_files.len() > SECRETS_LIMIT {
             md.push_str(&format!(
-                "\n*… and {} more — see JSON output for the full list.*\n",
-                result.sensitive_files.len() - SECRETS_LIMIT
+                "\n{}\n",
+                f(
+                    "md.secmore",
+                    &[&(result.sensitive_files.len() - SECRETS_LIMIT).to_string()]
+                )
             ));
         }
         md.push('\n');
@@ -257,43 +296,40 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
 
     // Optimization recommendations (derived from the analysis data)
     if !result.recommendations.is_empty() {
-        md.push_str("## Optimization Recommendations\n\n");
+        md.push_str(&format!("## {}\n\n", t("md.recs")));
         let icon = |sev: &str| match sev {
             "high" => "🔴",
             "medium" => "🟠",
             "low" => "🟡",
             _ => "ℹ️",
         };
-        let cat = |c: &str| -> String {
-            match c {
-                "size" => "Size".to_string(),
-                "necessity" => "Necessity".to_string(),
-                "security" => "Security".to_string(),
-                other => other.to_string(),
-            }
-        };
         for r in &result.recommendations {
             md.push_str(&format!(
                 "### {} {} — {} ({}){}\n\n",
                 icon(&r.severity),
                 r.title,
-                cat(&r.category),
-                r.severity,
-                if r.heuristic { " · heuristic" } else { "" },
+                i18n::tr(lang, &format!("md.cat.{}", r.category)),
+                i18n::tr(lang, &format!("sev.{}", r.severity)),
+                if r.heuristic {
+                    t("md.heuristic")
+                } else {
+                    String::new()
+                },
             ));
             md.push_str(&r.detail);
             md.push_str("\n\n");
             if r.est_saved_bytes > 0 {
                 md.push_str(&format!(
-                    "- **Potential savings:** {}\n",
+                    "- **{}:** {}\n",
+                    t("md.potsavings"),
                     ByteSize(r.est_saved_bytes)
                 ));
             }
             if !r.dockerfile_hint.is_empty() {
-                md.push_str(&format!("- **Fix:** {}\n", r.dockerfile_hint));
+                md.push_str(&format!("- **{}:** {}\n", t("md.fix"), r.dockerfile_hint));
             }
             if !r.paths.is_empty() {
-                md.push_str("- **Affected:**\n");
+                md.push_str(&format!("- **{}:**\n", t("md.affected")));
                 for p in &r.paths {
                     md.push_str(&format!("  - `{}`\n", p));
                 }
@@ -307,13 +343,15 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         .filter(|&i| is_base_layer(i))
         .count();
     let skip_note = if skipped > 0 {
-        format!(" — {} base layers auto-detected and hidden", skipped)
+        f("md.skipnote", &[&skipped.to_string()])
     } else {
         String::new()
     };
     md.push_str(&format!(
-        "## Layers ({} total{})\n\n",
+        "## {} ({} {}{})\n\n",
+        t("md.layers"),
         result.layers.len(),
+        t("md.total"),
         skip_note
     ));
 
@@ -322,10 +360,15 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             continue;
         }
         md.push_str(&format!(
-            "### Layer {} — {} compressed / {} uncompressed\n\n",
-            i + 1,
-            ByteSize(layer.size),
-            ByteSize(layer.unpack_size),
+            "### {}\n\n",
+            f(
+                "md.layerhead",
+                &[
+                    &(i + 1).to_string(),
+                    &ByteSize(layer.size).to_string(),
+                    &ByteSize(layer.unpack_size).to_string(),
+                ]
+            )
         ));
 
         if !layer.cmd.is_empty() {
@@ -334,11 +377,12 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             } else {
                 layer.cmd.clone()
             };
-            md.push_str(&format!("**Command:** `{}`\n\n", cmd));
+            md.push_str(&format!("**{}:** `{}`\n\n", t("md.command"), cmd));
         }
 
         if layer.empty {
-            md.push_str("*Empty layer — no file changes.*\n\n");
+            md.push_str(&t("md.emptylayer"));
+            md.push_str("\n\n");
             continue;
         }
 
@@ -353,18 +397,25 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             let has_changes =
                 !files.added.is_empty() || !files.modified.is_empty() || !files.removed.is_empty();
             if !has_changes {
-                md.push_str("*No file changes recorded for this layer.*\n\n");
+                md.push_str(&t("md.nochanges"));
+                md.push_str("\n\n");
                 continue;
             }
 
-            md.push_str(
-                "| Change | Path | Size | Mode | Owner |\n\
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n\
                  |--------|------|------|------|-------|\n",
-            );
+                t("md.col.change"),
+                t("md.col.path"),
+                t("md.col.size"),
+                t("md.col.mode"),
+                t("md.col.owner"),
+            ));
 
             for e in &files.removed {
                 md.push_str(&format!(
-                    "| Removed | `{}` | {} | `{}` | {}:{} |\n",
+                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
+                    t("md.op.removed"),
                     e.path,
                     ByteSize(e.size),
                     e.mode,
@@ -374,7 +425,8 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             }
             for e in &files.modified {
                 md.push_str(&format!(
-                    "| Modified | `{}` | {} | `{}` | {}:{} |\n",
+                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
+                    t("md.op.modified"),
                     e.path,
                     ByteSize(e.size),
                     e.mode,
@@ -388,7 +440,8 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             const ADDED_LIMIT: usize = 50;
             for e in files.added.iter().take(ADDED_LIMIT) {
                 md.push_str(&format!(
-                    "| Added | `{}` | {} | `{}` | {}:{} |\n",
+                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
+                    t("md.op.added"),
                     e.path,
                     ByteSize(e.size),
                     e.mode,
@@ -398,8 +451,11 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
             }
             if files.added.len() > ADDED_LIMIT {
                 md.push_str(&format!(
-                    "| … | *{} more files not shown* | | | |\n",
-                    files.added.len() - ADDED_LIMIT
+                    "| … | {} | | | |\n",
+                    f(
+                        "md.moremfiles",
+                        &[&(files.added.len() - ADDED_LIMIT).to_string()]
+                    )
                 ));
             }
 

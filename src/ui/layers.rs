@@ -1,4 +1,5 @@
 use super::util;
+use crate::i18n;
 use crate::image::ImageLayer;
 use bytesize::ByteSize;
 use pad::PadStr;
@@ -13,6 +14,7 @@ pub struct LayersWidget<'a> {
 pub struct LayersWidgetOption {
     pub is_active: bool,
     pub selected_layer: usize,
+    pub lang: crate::i18n::Lang,
 }
 // 创建layer列表的widget
 pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> LayersWidget<'a> {
@@ -53,16 +55,20 @@ pub fn new_layers_widget<'a>(layers: &[ImageLayer], opt: LayersWidgetOption) -> 
         rows.push(Row::new(cells).style(style).height(1))
     }
 
-    let headers = ["Index", "Size", "Command"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().add_modifier(Modifier::BOLD)));
+    let headers = [
+        i18n::tr(opt.lang, "tui.col.index"),
+        i18n::tr(opt.lang, "tui.col.size"),
+        i18n::tr(opt.lang, "tui.col.command"),
+    ]
+    .into_iter()
+    .map(|h| Cell::from(h).style(Style::default().add_modifier(Modifier::BOLD)));
     // title + header + border bottom
     let height = 3 + rows.len();
     let header = Row::new(headers).height(1);
     // TODO 如何调整生命周期
-    let mut title = " Layers ";
+    let mut title = i18n::tr(opt.lang, "tui.layers.title");
     if opt.is_active {
-        title = " ● Layers ";
+        title = i18n::tr(opt.lang, "tui.layers.title_active");
     }
     let widget = Table::new(
         rows,

@@ -1,8 +1,8 @@
+use crate::i18n;
+use crate::image::{FileTreeItem, Op};
 use bytesize::ByteSize;
 use pad::PadStr;
 use ratatui::{prelude::*, widgets::*};
-
-use crate::image::{FileTreeItem, Op};
 
 use super::util;
 
@@ -11,6 +11,7 @@ pub struct FilesWidgetOption {
     pub selected_layer: usize,
     pub area: Rect,
     pub mode: u8,
+    pub lang: i18n::Lang,
 }
 
 pub struct FilesWidget<'a> {
@@ -131,9 +132,9 @@ pub fn new_files_widget(
     opt: FilesWidgetOption,
 ) -> FilesWidget<'_> {
     // TODO 如何调整生命周期
-    let mut title = " Current Layer Contents ";
+    let mut title = i18n::tr(opt.lang, "tui.files.title");
     if opt.is_active {
-        title = " ● Current Layer Contents ";
+        title = i18n::tr(opt.lang, "tui.files.title_active");
     }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -142,11 +143,13 @@ pub fn new_files_widget(
         .split(opt.area);
 
     let space_span = Span::from("   ");
-    let name_list = ["Permission", " UID:GID ", "     Size", "FileTree"];
-    let mode_tips = format!(
-        "Esc|0: All   1: Modified/Removed   2: File >= 1MB   |  Current: {}",
-        opt.mode
-    );
+    let name_list = [
+        i18n::tr(opt.lang, "tui.col.perm"),
+        i18n::tr(opt.lang, "tui.col.uidgid"),
+        i18n::tr(opt.lang, "tui.col.fsize"),
+        i18n::tr(opt.lang, "tui.col.filetree"),
+    ];
+    let mode_tips = i18n::fill(i18n::tr(opt.lang, "tui.modetips"), &[&opt.mode.to_string()]);
     let content = Paragraph::new(vec![
         Line::from(vec![Span::styled(
             mode_tips,

@@ -16,6 +16,7 @@ mod config;
 mod controller;
 mod dist;
 mod error;
+mod i18n;
 mod image;
 mod markdown;
 mod middleware;
@@ -49,6 +50,9 @@ struct Args {
     /// Auto-detect and hide base image layers in Markdown output
     #[arg(long, default_value_t = false)]
     skip_base: bool,
+    /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
+    #[arg(long)]
+    lang: Option<String>,
 }
 
 impl Args {
@@ -111,12 +115,17 @@ fn is_ci() -> bool {
 }
 
 // 分析镜像（错误直接以字符串返回）
-async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<(), String> {
+async fn analyze(
+    image: String,
+    output_file: String,
+    skip_base: bool,
+    lang: i18n::Lang,
+) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
-    eprintln!("Analyzing {}...", image);
-    let result = analyze_docker_image(image_info)
+    eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
+    let result = analyze_docker_image(image_info, lang)
         .await
         .map_err(|item| item.to_string())?;
     if is_ci() || !output_file.is_empty() {
@@ -124,19 +133,37 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
         let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
         let highest_wasted_bytes = config::get_highest_wasted_bytes();
         let highest_user_wasted_percent = config::get_highest_user_wasted_percent();
-        println!("{}", "Analyze result:".bold().green());
-        println!("  efficiency: {} %", summary.score);
+        println!("{}", i18n::tr(lang, "cli.result").bold().green());
         println!(
-            "  wasted bytes: {} bytes ({})",
-            summary.wasted_size,
-            ByteSize(summary.wasted_size)
+            "{}",
+            i18n::fill(
+                i18n::tr(lang, "cli.efficiency"),
+                &[&summary.score.to_string()]
+            )
+        );
+        println!(
+            "{}",
+            i18n::fill(
+                i18n::tr(lang, "cli.wasted"),
+                &[
+                    &summary.wasted_size.to_string(),
+                    &ByteSize(summary.wasted_size).to_string(),
+                ]
+            )
         );
         if !result.recommendations.is_empty() {
-            println!("{}", "Optimization recommendations:".bold().green());
+            println!("{}", i18n::tr(lang, "cli.recs").bold().green());
             for r in &result.recommendations {
-                let tag = format!("[{}/{}]", r.severity, r.category);
+                let tag = format!(
+                    "[{}/{}]",
+                    i18n::tr(lang, &format!("sev.{}", r.severity)),
+                    i18n::tr(lang, &format!("cat.{}", r.category)),
+                );
                 let saved = if r.est_saved_bytes > 0 {
-                    format!(" (~{} saved)", ByteSize(r.est_saved_bytes))
+                    i18n::fill(
+                        i18n::tr(lang, "cli.saved"),
+                        &[&ByteSize(r.est_saved_bytes).to_string()],
+                    )
                 } else {
                     String::new()
                 };
@@ -151,27 +178,34 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
         }
 
         let mut passed = true;
+        let fail = i18n::tr(lang, "cli.fail").red().to_string();
         if summary.score < lowest_efficiency {
             println!(
-                "{}: lowest efficiency check, lowest: {}",
-                "FAIL".red(),
-                lowest_efficiency
+                "{}",
+                i18n::fill(
+                    i18n::tr(lang, "cli.check.eff"),
+                    &[&fail, &lowest_efficiency.to_string()]
+                )
             );
             passed = false;
         }
         if summary.wasted_size > highest_wasted_bytes {
             println!(
-                "{}: highest wasted bytes check, highest: {}",
-                "FAIL".red(),
-                ByteSize(highest_wasted_bytes)
+                "{}",
+                i18n::fill(
+                    i18n::tr(lang, "cli.check.bytes"),
+                    &[&fail, &ByteSize(highest_wasted_bytes).to_string()]
+                )
             );
             passed = false;
         }
         if summary.wasted_percent > highest_user_wasted_percent {
             println!(
-                "{}: highest user wasted percent check, highest: {:.2}",
-                "FAIL".red(),
-                highest_user_wasted_percent
+                "{}",
+                i18n::fill(
+                    i18n::tr(lang, "cli.check.pct"),
+                    &[&fail, &format!("{highest_user_wasted_percent:.2}")]
+                )
             );
             passed = false;
         }
@@ -180,7 +214,7 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
                 || output_file.ends_with(".md")
                 || output_file.ends_with(".markdown");
             let content = if is_markdown {
-                markdown::to_markdown(&result, skip_base)
+                markdown::to_markdown(&result, skip_base, lang)
             } else {
                 serde_json::to_string(&result).map_err(|err| err.to_string())?
             };
@@ -190,10 +224,10 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
                 fs::write(output_file, content).map_err(|err| err.to_string())?;
             }
         } else if !passed {
-            return Err("CI check fail".to_string());
+            return Err(i18n::tr(lang, "cli.cifail").to_string());
         }
     } else {
-        ui::run_app(result).map_err(|item| item.to_string())?;
+        ui::run_app(result, lang).map_err(|item| item.to_string())?;
     }
     Ok(())
 }
@@ -203,11 +237,17 @@ async fn run(args: Args) {
     // 启动时确保可以读取配置
     config::must_load_config();
     if args.is_terminal_type() {
+        let lang = i18n::Lang::resolve(args.lang.as_deref());
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    if let Err(err) =
-                        analyze(value, args.output_file.unwrap_or_default(), args.skip_base).await
+                    if let Err(err) = analyze(
+                        value,
+                        args.output_file.unwrap_or_default(),
+                        args.skip_base,
+                        lang,
+                    )
+                    .await
                     {
                         error!(err, "analyze image fail");
                         std::process::exit(1)
