@@ -1,4 +1,5 @@
 use crate::config::{load_user_sensitive_patterns, must_load_config};
+use crate::recommend::{build_recommendations, Recommendation};
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -327,6 +328,55 @@ fn is_dev_artifact(path: &str) -> bool {
         || p.contains("/.m2/")
 }
 
+/// Public CA trust stores hold *public* certificates, not secrets, so they
+/// must not trip the cert/key extension heuristics.
+///
+/// Deliberately scoped: private keys conventionally live in
+/// `.../ssl/private/`, which is NOT excluded here and stays flagged.
+fn is_public_ca_store(pl: &str, fl: &str) -> bool {
+    // Directories whose entire content is public trust certificates.
+    const CA_DIRS: &[&str] = &[
+        "etc/ssl/certs/",
+        "etc/ssl1.1/certs/",
+        "etc/pki/tls/certs/",
+        "etc/pki/ca-trust/",
+        "etc/ca-certificates/",
+        "usr/share/ca-certificates/",
+        "usr/local/share/ca-certificates/",
+        "usr/lib/ssl/certs/",
+    ];
+    if CA_DIRS
+        .iter()
+        .any(|d| pl.starts_with(d) || pl.contains(&format!("/{d}")))
+    {
+        return true;
+    }
+    // Combined system CA bundle files (the distro/OpenSSL default bundle).
+    const CA_BUNDLES: &[&str] = &[
+        "ca-certificates.crt",
+        "ca-bundle.crt",
+        "ca-bundle.pem",
+        "tls-ca-bundle.pem",
+        "cacert.pem",
+    ];
+    if CA_BUNDLES.contains(&fl) {
+        return true;
+    }
+    // The default OpenSSL bundle is `.../ssl/cert.pem` (Alpine ships it under
+    // etc/ssl and etc/ssl1.1). Scope to an ssl/tls dir so a stray user
+    // `cert.pem` elsewhere is still flagged.
+    if fl == "cert.pem"
+        && (pl.starts_with("etc/ssl")
+            || pl.starts_with("etc/pki/tls")
+            || pl.contains("/ssl/")
+            || pl.contains("/ssl1.1/")
+            || pl.contains("/tls/"))
+    {
+        return true;
+    }
+    false
+}
+
 /// Check whether a file path looks like a sensitive/secret file.
 /// Returns a short description of the risk, or None if not sensitive.
 fn is_sensitive_file(path: &str) -> Option<&'static str> {
@@ -348,6 +398,11 @@ fn is_sensitive_file(path: &str) -> Option<&'static str> {
     // AWS credentials
     if pl.contains("/.aws/credentials") {
         return Some("AWS credentials");
+    }
+    // Public CA trust stores are public certs, not secrets — skip the
+    // cert/key extension heuristics for them (private-key dirs stay flagged).
+    if is_public_ca_store(&pl, &fl) {
+        return None;
     }
     // Private key / certificate file extensions
     if fl.ends_with(".pem")
@@ -475,6 +530,8 @@ pub struct DockerAnalyzeResult {
     pub sensitive_files: Vec<SensitiveFileInfo>,
     // 启发式风险标签
     pub tags: Vec<String>,
+    // 体积/必要性/安全优化建议（由分析数据派生）
+    pub recommendations: Vec<Recommendation>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -1287,7 +1344,7 @@ impl DockerClient {
             tags.push(format!("[High Layer Count: {}]", layers.len()));
         }
 
-        Ok(DockerAnalyzeResult {
+        let mut result = DockerAnalyzeResult {
             name: image_name,
             arch: config.architecture,
             os: config.os,
@@ -1305,7 +1362,11 @@ impl DockerClient {
             big_modified_file_list,
             sensitive_files,
             tags,
-        })
+            recommendations: vec![],
+        };
+        // Pure derived layer — computed from the result that is already built.
+        result.recommendations = build_recommendations(&result);
+        Ok(result)
     }
 }
 
@@ -1395,5 +1456,27 @@ mod tests {
         assert_eq!(info.arch, "arm64");
         assert_eq!(info.tag, "alpine");
         assert_eq!(info.name, "redis");
+    }
+
+    #[test]
+    fn ca_bundles_are_not_flagged_as_secrets() {
+        // Public trust stores must not be flagged.
+        assert_eq!(is_sensitive_file("etc/ssl/cert.pem"), None);
+        assert_eq!(is_sensitive_file("etc/ssl1.1/cert.pem"), None);
+        assert_eq!(is_sensitive_file("etc/ssl/certs/ca-certificates.crt"), None);
+        assert_eq!(is_sensitive_file("etc/pki/tls/certs/ca-bundle.crt"), None);
+        assert_eq!(
+            is_sensitive_file("usr/share/ca-certificates/mozilla/GlobalSign.crt"),
+            None
+        );
+    }
+
+    #[test]
+    fn real_private_keys_still_flagged() {
+        // Private-key locations must stay flagged after the CA exclusion.
+        assert!(is_sensitive_file("etc/ssl/private/server.key").is_some());
+        assert!(is_sensitive_file("app/config/id_rsa").is_some());
+        assert!(is_sensitive_file("home/user/secret.pem").is_some());
+        assert!(is_sensitive_file("opt/app/keystore.jks").is_some());
     }
 }

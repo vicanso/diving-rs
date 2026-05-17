@@ -25,4 +25,7 @@ export default {
   pathLabel: "路径",
   latestAnalyzeImagesTitle: "最近分析的镜像列表",
   modifiedAddedLargeFileTitle: "修改或新增的大文件",
+  recommendationsTitle: "优化建议",
+  recSavedLabel: "预计可节省",
+  recFixLabel: "建议",
 };

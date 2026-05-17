@@ -1,5 +1,6 @@
 use self::image_detail::ImageDetailWidgetOption;
 use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageLayer};
+use crate::recommend::Recommendation;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -42,6 +43,8 @@ struct WidgetState {
     // 文件树模式
     file_tree_mode: u8,
     summary: DockerAnalyzeSummary,
+    // 优化建议
+    recommendations: Vec<Recommendation>,
 }
 
 static LAYERS_WIDGET: &str = "layers";
@@ -133,6 +136,7 @@ pub fn run_app(result: DockerAnalyzeResult) -> Result<(), Box<dyn Error>> {
         file_tree_list: result.file_tree_list,
         size: result.size,
         total_size: result.total_size,
+        recommendations: result.recommendations,
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
         active: LAYERS_WIDGET.to_string(),
@@ -263,6 +267,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         total_size: state.total_size,
         size: state.size,
         summary: state.summary.clone(),
+        recommendations: state.recommendations.clone(),
     });
     f.render_widget(layers_widget.widget, left_chunks[0]);
     f.render_widget(detail_widget.widget, left_chunks[1]);

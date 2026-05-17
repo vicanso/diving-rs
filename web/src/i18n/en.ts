@@ -27,4 +27,7 @@ export default {
   pathLabel: "Path",
   latestAnalyzeImagesTitle: "Latest Analyze Images",
   modifiedAddedLargeFileTitle: "Modified Or Add Large File",
+  recommendationsTitle: "Optimization Recommendations",
+  recSavedLabel: "potential savings",
+  recFixLabel: "Fix",
 };

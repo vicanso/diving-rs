@@ -255,6 +255,53 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool) -> String {
         md.push('\n');
     }
 
+    // Optimization recommendations (derived from the analysis data)
+    if !result.recommendations.is_empty() {
+        md.push_str("## Optimization Recommendations\n\n");
+        let icon = |sev: &str| match sev {
+            "high" => "🔴",
+            "medium" => "🟠",
+            "low" => "🟡",
+            _ => "ℹ️",
+        };
+        let cat = |c: &str| -> String {
+            match c {
+                "size" => "Size".to_string(),
+                "necessity" => "Necessity".to_string(),
+                "security" => "Security".to_string(),
+                other => other.to_string(),
+            }
+        };
+        for r in &result.recommendations {
+            md.push_str(&format!(
+                "### {} {} — {} ({}){}\n\n",
+                icon(&r.severity),
+                r.title,
+                cat(&r.category),
+                r.severity,
+                if r.heuristic { " · heuristic" } else { "" },
+            ));
+            md.push_str(&r.detail);
+            md.push_str("\n\n");
+            if r.est_saved_bytes > 0 {
+                md.push_str(&format!(
+                    "- **Potential savings:** {}\n",
+                    ByteSize(r.est_saved_bytes)
+                ));
+            }
+            if !r.dockerfile_hint.is_empty() {
+                md.push_str(&format!("- **Fix:** {}\n", r.dockerfile_hint));
+            }
+            if !r.paths.is_empty() {
+                md.push_str("- **Affected:**\n");
+                for p in &r.paths {
+                    md.push_str(&format!("  - `{}`\n", p));
+                }
+            }
+            md.push('\n');
+        }
+    }
+
     // Per-layer breakdown
     let skipped = (0..result.layers.len())
         .filter(|&i| is_base_layer(i))

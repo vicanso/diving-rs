@@ -4,6 +4,7 @@ use ratatui::{prelude::*, widgets::*};
 
 use super::util;
 use crate::image::DockerAnalyzeSummary;
+use crate::recommend::Recommendation;
 
 pub struct ImageDetailWidget<'a> {
     pub widget: Paragraph<'a>,
@@ -16,6 +17,7 @@ pub struct ImageDetailWidgetOption {
     pub total_size: u64,
     pub size: u64,
     pub summary: DockerAnalyzeSummary,
+    pub recommendations: Vec<Recommendation>,
 }
 
 pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailWidget<'a> {
@@ -116,6 +118,36 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             space_span.clone(),
             Span::from(format!("/{}", wasted.path)),
         ]))
+    }
+
+    if !opt.recommendations.is_empty() {
+        spans_list.push(Line::from(vec![]));
+        spans_list.push(Line::from(vec![Span::styled(
+            "Optimization Recommendations",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]));
+        for r in opt.recommendations.iter() {
+            let color = match r.severity.as_str() {
+                "high" => Color::Red,
+                "medium" => Color::Yellow,
+                "low" => Color::Green,
+                _ => Color::Cyan,
+            };
+            let mut suffix = String::new();
+            if r.est_saved_bytes > 0 {
+                suffix = format!(" (~{} saved)", ByteSize(r.est_saved_bytes));
+            }
+            if r.heuristic {
+                suffix += " [heuristic]";
+            }
+            spans_list.push(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", r.severity.to_uppercase()),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::from(format!("{} — {}{}", r.category, r.title, suffix)),
+            ]));
+        }
     }
 
     let widget = Paragraph::new(spans_list).block(util::create_block(" Image Details "));

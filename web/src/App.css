@@ -181,3 +181,54 @@ ul.bigModifiedFileList li {
   bottom: 0;
   right: 0;
 }
+
+.recommendationList {
+  margin: 0;
+  padding: 0;
+}
+ul.recommendationList li.recommendationItem {
+  list-style: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+ul.recommendationList.dark li.recommendationItem {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.recommendationHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recommendationBadge {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.recommendationTitle {
+  font-weight: 700;
+}
+.recommendationSaved {
+  font-size: 12px;
+  opacity: 0.75;
+}
+.recommendationDetail {
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.recommendationHint {
+  margin-top: 6px;
+  font-size: 13px;
+}
+ul.recommendationPaths {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+ul.recommendationPaths li {
+  list-style: disc;
+  font-size: 12px;
+  line-height: 1.6;
+}

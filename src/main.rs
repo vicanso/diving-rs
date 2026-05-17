@@ -19,6 +19,7 @@ mod error;
 mod image;
 mod markdown;
 mod middleware;
+mod recommend;
 mod store;
 mod task_local;
 mod ui;
@@ -130,6 +131,24 @@ async fn analyze(image: String, output_file: String, skip_base: bool) -> Result<
             summary.wasted_size,
             ByteSize(summary.wasted_size)
         );
+        if !result.recommendations.is_empty() {
+            println!("{}", "Optimization recommendations:".bold().green());
+            for r in &result.recommendations {
+                let tag = format!("[{}/{}]", r.severity, r.category);
+                let saved = if r.est_saved_bytes > 0 {
+                    format!(" (~{} saved)", ByteSize(r.est_saved_bytes))
+                } else {
+                    String::new()
+                };
+                let colored = match r.severity.as_str() {
+                    "high" => tag.red(),
+                    "medium" => tag.yellow(),
+                    "low" => tag.green(),
+                    _ => tag.cyan(),
+                };
+                println!("  {colored} {}{saved}", r.title);
+            }
+        }
 
         let mut passed = true;
         if summary.score < lowest_efficiency {

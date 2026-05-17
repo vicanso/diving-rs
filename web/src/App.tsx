@@ -44,6 +44,18 @@ interface ImageAnalyzeResult {
   fileTreeList: FileTreeList[][];
   fileSummaryList: FileSummaryList[];
   bigModifiedFileList: ModifiedFile[];
+  recommendations?: Recommendation[];
+}
+
+interface Recommendation {
+  category: string;
+  severity: string;
+  title: string;
+  detail: string;
+  dockerfileHint: string;
+  estSavedBytes: number;
+  heuristic: boolean;
+  paths: string[];
 }
 
 interface Layer {
@@ -455,6 +467,7 @@ interface AppState {
   arch: string;
   latestAnalyzeImages: string[];
   bigModifiedFileList: ModifiedFile[];
+  recommendations: Recommendation[];
 }
 
 interface LatestImages {
@@ -494,6 +507,7 @@ class App extends Component<object, AppState> {
       arch,
       latestAnalyzeImages: [],
       bigModifiedFileList: [],
+      recommendations: [],
       version: "",
     };
   }
@@ -546,6 +560,7 @@ class App extends Component<object, AppState> {
         currentLayer: 0,
         gotResult: true,
         bigModifiedFileList: data.bigModifiedFileList,
+        recommendations: data.recommendations || [],
       });
     } catch (err: any) {
       let msg = err?.message as string;
@@ -577,6 +592,7 @@ class App extends Component<object, AppState> {
       arch,
       latestAnalyzeImages,
       bigModifiedFileList,
+      recommendations,
       version,
     } = this.state;
     const onToggleExpand = (key: string) => {
@@ -870,6 +886,65 @@ class App extends Component<object, AppState> {
         </div>
       );
     };
+    const getRecommendationsView = () => {
+      if (!recommendations || recommendations.length === 0) {
+        return <></>;
+      }
+      const severityColor: Record<string, string> = {
+        high: "#cf1322",
+        medium: "#d46b08",
+        low: "#d4b106",
+        info: "#0958d9",
+      };
+      const list = recommendations.map((r, idx) => {
+        const color = severityColor[r.severity] || "#0958d9";
+        return (
+          <li key={`${r.title}-${idx}`} className="recommendationItem">
+            <div className="recommendationHead">
+              <span
+                className="recommendationBadge"
+                style={{ backgroundColor: color }}
+              >
+                {r.severity.toUpperCase()} · {r.category}
+                {r.heuristic ? " · heuristic" : ""}
+              </span>
+              <span className="recommendationTitle">{r.title}</span>
+              {r.estSavedBytes > 0 && (
+                <span className="recommendationSaved">
+                  ~{prettyBytes(r.estSavedBytes)} {i18nGet("recSavedLabel")}
+                </span>
+              )}
+            </div>
+            <div className="recommendationDetail">{r.detail}</div>
+            {r.dockerfileHint && (
+              <div className="recommendationHint">
+                <b>{i18nGet("recFixLabel")}:</b> {r.dockerfileHint}
+              </div>
+            )}
+            {r.paths && r.paths.length > 0 && (
+              <ul className="recommendationPaths">
+                {r.paths.map((p) => (
+                  <li key={p}>
+                    <code>{p}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        );
+      });
+      let className = "recommendationList";
+      if (isDarkMode()) {
+        className += " dark";
+      }
+      return (
+        <div className="mtop30">
+          <Card title={i18nGet("recommendationsTitle")}>
+            <ul className={className}>{list}</ul>
+          </Card>
+        </div>
+      );
+    };
     const getSearchView = () => {
       const size = "large";
       const selectBefore = (
@@ -998,6 +1073,7 @@ class App extends Component<object, AppState> {
                 {getLayerContentView()}
                 {getWastedSummaryView()}
                 {getBigModifiedFileView()}
+                {getRecommendationsView()}
               </div>
             </Content>
           )}

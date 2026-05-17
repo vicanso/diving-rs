@@ -1,5 +1,5 @@
 use crate::dist::{get_static_file, StaticFile};
-use crate::error::HTTPResult;
+use crate::error::{HTTPError, HTTPResult};
 use crate::image::{analyze_docker_image, get_file_content_from_layer, parse_image_info};
 use crate::markdown;
 use crate::store::get_blob_path;
@@ -113,7 +113,7 @@ async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFil
     let path = get_blob_path(&params.digest);
     let (name, content) = tokio::task::block_in_place(|| -> HTTPResult<(String, Vec<u8>)> {
         let file = std::fs::File::open(&path)
-            .map_err(|e| crate::error::HTTPError::new_with_category(&e.to_string(), "blob"))?;
+            .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))?;
         let content = get_file_content_from_layer(
             std::io::BufReader::new(file),
             &params.media_type,
