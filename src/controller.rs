@@ -59,7 +59,9 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
     let result = analyze_docker_image(image_info, lang).await?;
     add_to_latest_image_cache(&params.image);
     if params.format.as_deref() == Some("markdown") {
-        let md = markdown::to_markdown(&result, params.skip_base.unwrap_or(false), lang);
+        // Base layers are hidden by default (matches the CLI); pass
+        // `skipBase=false` to include them.
+        let md = markdown::to_markdown(&result, params.skip_base.unwrap_or(true), lang);
         return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
     }
     Ok(Json(result).into_response())

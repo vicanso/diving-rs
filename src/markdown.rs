@@ -359,6 +359,25 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
         if is_base_layer(i) {
             continue;
         }
+        // Empty (metadata-only) layers — ARG/ENV/LABEL/WORKDIR/… — carry no
+        // files. A full heading + command + "empty" note per layer (often a
+        // long consecutive run of them) bloats the report and the AI payload,
+        // so collapse each to a single compact line.
+        if layer.empty {
+            let mut line = f("md.emptyline", &[&(i + 1).to_string()]);
+            if !layer.cmd.is_empty() {
+                let cmd = if layer.cmd.len() > 300 {
+                    format!("{}…", &layer.cmd[..300])
+                } else {
+                    layer.cmd.clone()
+                };
+                line.push_str(&format!(" · `{cmd}`"));
+            }
+            md.push_str(&line);
+            md.push('\n');
+            continue;
+        }
+
         md.push_str(&format!(
             "### {}\n\n",
             f(
@@ -378,12 +397,6 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
                 layer.cmd.clone()
             };
             md.push_str(&format!("**{}:** `{}`\n\n", t("md.command"), cmd));
-        }
-
-        if layer.empty {
-            md.push_str(&t("md.emptylayer"));
-            md.push_str("\n\n");
-            continue;
         }
 
         if let Some(tree) = result.file_tree_list.get(i) {

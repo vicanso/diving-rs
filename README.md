@@ -99,11 +99,11 @@ diving redis:alpine --output-file result.json
 # save analysis result as Markdown (detected by .md extension)
 diving redis:alpine --output-file result.md
 
-# print Markdown to stdout (all layers shown by default)
+# print Markdown to stdout (base image layers auto-detected and hidden by default)
 diving myimage:latest --output-file -
 
-# add --skip-base to auto-detect and hide base image layers via timestamp gap
-diving myimage:latest --output-file - --skip-base
+# add --no-skip-base to include the base image layers
+diving myimage:latest --output-file - --no-skip-base
 ```
 
 - `Current Layer Contents` only show the files of current layer
@@ -115,7 +115,7 @@ diving myimage:latest --output-file - --skip-base
 
 ## AI analysis
 
-Provide an OpenAI-compatible API key to get an AI-generated optimization report instead of the interactive TUI. diving sends the full Markdown analysis (layers, reconstructed Dockerfile, wasted space, large files, security findings) to the model and prints its diagnosis to stdout.
+Provide an OpenAI-compatible API key to get an AI-generated optimization report instead of the interactive TUI. diving sends the full Markdown analysis (layers, reconstructed Dockerfile, wasted space, large files, security findings) to the model and prints its diagnosis to stdout. When the ENTRYPOINT/CMD points to a script inside the image, that script's content is read from the layers and included so the model can review what the container actually runs.
 
 ```bash
 # enable AI analysis (prints the report, skips the TUI)
@@ -143,6 +143,34 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 | `--lang` | `DIVING_LANG` | system locale | Output language: `en` or `zh`. |
 
 Each run stores a snapshot of the analysis under `~/.diving/ai_history/`. On the next run of the same image, the previous snapshot is sent alongside the current one so the model can flag size regressions / bloat between versions.
+
+## WeCom push
+
+Pass a WeCom (企业微信) group-bot webhook to push the result straight into a chat instead of opening the TUI. Content is chosen smartly so it always fits the bot's ~4096-byte markdown limit:
+
+- with `--ai-api-key` set → the concise AI report is pushed
+- without AI → a short summary (efficiency score, wasted space, optimization recommendations)
+
+```bash
+# push using the bot key (expanded to the standard webhook URL)
+diving redis:alpine --wecom-webhook 693a91f6-7aoc-4bc4-97a0-0ec2sifa5aaa
+
+# or the full webhook URL
+diving redis:alpine --wecom-webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY"
+
+# push the AI report instead of the summary
+diving redis:alpine --ai-api-key sk-xxxx --wecom-webhook KEY
+
+# the webhook can also come from the environment
+export WECOM_WEBHOOK=KEY
+diving redis:alpine
+```
+
+| Flag | Environment | Default | Description |
+|------|-------------|---------|-------------|
+| `--wecom-webhook` | `WECOM_WEBHOOK` | — | WeCom group-bot webhook URL, or a bare bot key (expanded automatically). Providing it pushes the result and skips the TUI. |
+
+Oversized content is truncated to the WeCom limit with a `… (truncated)` marker.
 
 ## web
 
@@ -180,7 +208,7 @@ Analyze a Docker image and return the result.
 |-----------|------|----------|-------------|
 | `image` | string | yes | Image reference (same formats as terminal mode) |
 | `format` | string | no | Set to `markdown` to return a Markdown report instead of JSON |
-| `skipBase` | bool | no | When `format=markdown`, auto-detect and hide base image layers via timestamp gap |
+| `skipBase` | bool | no | When `format=markdown`, auto-detect and hide base image layers (default `true`); set `false` to include them |
 
 **Examples:**
 
@@ -194,6 +222,6 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine%3Farch%3Darm64"
 # Markdown report
 curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 
-# Markdown report with base layers hidden
-curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=true"
+# Markdown report including base layers (hidden by default)
+curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```

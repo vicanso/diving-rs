@@ -8,8 +8,12 @@
 
 use crate::config;
 use crate::i18n::{self, Lang};
+use crate::image::{get_file_content_from_layer, parse_image_info, DockerAnalyzeResult};
+use crate::store::get_blob_path;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::warn;
@@ -178,8 +182,23 @@ fn history_dir() -> PathBuf {
 }
 
 /// Map an image reference to a safe, collision-resistant filename.
+///
+/// The key is the image *identity* — registry / user / name (+ arch) — with
+/// the **tag and digest deliberately dropped**. Internal/CI images are
+/// retagged on every build (e.g. `…/finance-operations:v1.0.0-05151400648`),
+/// so keying on the tag would create a brand-new snapshot every run and the
+/// bloat/regression comparison could never trigger. Arch is kept because a
+/// different architecture is a genuinely different image, not a regression.
 fn history_key(image: &str) -> String {
-    let mut key: String = image
+    let info = parse_image_info(image);
+    // Strip an `@sha256:…` digest if it rode along on the name component.
+    let name = info.name.split('@').next().unwrap_or(info.name.as_str());
+    let mut identity = format!("{}/{}/{}", info.registry, info.user, name);
+    if !info.arch.is_empty() {
+        identity.push('@');
+        identity.push_str(&info.arch);
+    }
+    let mut key: String = identity
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
@@ -281,6 +300,148 @@ pub async fn analyze_with_ai(
     Ok(content)
 }
 
+// Per-script and overall caps so a huge startup script can't blow the model's
+// context window.
+const SCRIPT_MAX_BYTES: usize = 16 * 1024;
+const MAX_SCRIPTS: usize = 4;
+
+// Interpreters/launchers that are not themselves the script of interest — when
+// ENTRYPOINT is `["bash", "/app/start.sh"]` we want `start.sh`, not `bash`.
+const NON_SCRIPT: &[&str] = &[
+    "sh",
+    "bash",
+    "dash",
+    "ash",
+    "ksh",
+    "zsh",
+    "env",
+    "exec",
+    "tini",
+    "/bin/sh",
+    "/bin/bash",
+    "/usr/bin/env",
+    "/sbin/tini",
+    "/usr/bin/tini",
+];
+const SCRIPT_EXTS: &[&str] = &[
+    ".sh", ".bash", ".dash", ".ksh", ".py", ".rb", ".pl", ".js", ".ts",
+];
+
+fn looks_like_script(tok: &str) -> bool {
+    if tok.is_empty() || tok.starts_with('-') || NON_SCRIPT.contains(&tok) {
+        return false;
+    }
+    let lower = tok.to_ascii_lowercase();
+    tok.contains('/') || SCRIPT_EXTS.iter().any(|e| lower.ends_with(e))
+}
+
+/// Parse a Docker instruction argument list: the JSON exec form `["a","b"]`
+/// (what image history records) or a plain shell string.
+fn parse_arg_list(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    if raw.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
+            return v;
+        }
+    }
+    raw.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+/// Pull ENTRYPOINT/CMD argument tokens out of the reconstructed Dockerfile.
+/// The last ENTRYPOINT and last CMD win (later instructions override earlier).
+fn entrypoint_cmd_tokens(dockerfile: &str) -> Vec<String> {
+    let mut entry: Option<String> = None;
+    let mut cmd: Option<String> = None;
+    for line in dockerfile.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("ENTRYPOINT ") {
+            entry = Some(rest.trim().to_string());
+        } else if let Some(rest) = l.strip_prefix("CMD ") {
+            cmd = Some(rest.trim().to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for raw in [entry, cmd].into_iter().flatten() {
+        out.extend(parse_arg_list(&raw));
+    }
+    out
+}
+
+// A NUL byte in the head strongly implies a compiled binary, not a script.
+fn is_probably_text(bytes: &[u8]) -> bool {
+    !bytes[..bytes.len().min(8000)].contains(&0)
+}
+
+/// Read `token`'s bytes from the cached layer blobs. The topmost layer that
+/// contains it wins (later layers override earlier ones). Best-effort: any
+/// I/O error just means "not here, keep looking".
+fn read_from_layers(result: &DockerAnalyzeResult, token: &str) -> Option<Vec<u8>> {
+    let trimmed = token.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Docker layer tars usually store paths without a leading slash, some with
+    // a "./" prefix — try both spellings.
+    let names = [trimmed.to_string(), format!("./{trimmed}")];
+    for layer in result.layers.iter().rev() {
+        let blob = get_blob_path(&layer.digest);
+        if !blob.is_file() {
+            continue;
+        }
+        for name in &names {
+            let Ok(file) = fs::File::open(&blob) else {
+                continue;
+            };
+            if let Ok(bytes) =
+                get_file_content_from_layer(BufReader::new(file), &layer.media_type, name)
+            {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// Locate the ENTRYPOINT/CMD startup script(s), read their content from the
+/// layers, and render a Markdown section to append to the AI payload so the
+/// model can reason about what the container actually runs. Returns an empty
+/// string when nothing script-like can be located. Decompresses layers, so
+/// callers should run it off the async path.
+pub fn entrypoint_scripts_md(result: &DockerAnalyzeResult, lang: Lang) -> String {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut blocks: Vec<String> = Vec::new();
+    for tok in entrypoint_cmd_tokens(&result.dockerfile) {
+        if blocks.len() >= MAX_SCRIPTS {
+            break;
+        }
+        if !looks_like_script(&tok) || !seen.insert(tok.clone()) {
+            continue;
+        }
+        let Some(bytes) = read_from_layers(result, &tok) else {
+            continue;
+        };
+        if !is_probably_text(&bytes) {
+            continue;
+        }
+        let truncated = bytes.len() > SCRIPT_MAX_BYTES;
+        let slice = &bytes[..bytes.len().min(SCRIPT_MAX_BYTES)];
+        let mut body = String::from_utf8_lossy(slice).into_owned();
+        if truncated {
+            body.push('\n');
+            body.push_str(i18n::tr(lang, "ai.script.truncated"));
+        }
+        blocks.push(format!("### `{tok}`\n\n```sh\n{body}\n```"));
+    }
+    if blocks.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## {}\n\n{}",
+        i18n::tr(lang, "ai.script.title"),
+        blocks.join("\n\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,13 +477,33 @@ mod tests {
     }
 
     #[test]
-    fn history_key_sanitizes_unsafe_chars() {
-        assert_eq!(history_key("redis:alpine"), "redis_alpine.md");
+    fn history_key_drops_tag_and_sanitizes() {
+        // Tag dropped; key is the registry/repo identity, path-safe.
+        assert_eq!(
+            history_key("redis:alpine"),
+            "https___index.docker.io_v2_library_redis.md"
+        );
+        // Private registry + arch kept, tag dropped.
         assert_eq!(
             history_key("registry.example.com/user/img:v1?arch=arm64"),
-            "registry.example.com_user_img_v1_arch_arm64.md"
+            "https___registry.example.com_v2_user_img_arm64.md"
         );
-        assert_eq!(history_key(""), "_.md");
+        // Degenerate input still yields a safe, non-empty name.
+        assert_eq!(history_key(""), "https___index.docker.io_v2_library_.md");
+    }
+
+    #[test]
+    fn history_key_is_stable_across_changing_tags() {
+        // The reported case: an internal image retagged every CI build must
+        // map to ONE snapshot so successive builds remain comparable.
+        let a = history_key("dockertest.gf.com.cn/gfstore/finance-operations:v1.0.0-05151400648");
+        let b = history_key("dockertest.gf.com.cn/gfstore/finance-operations:v2.3.1-09301122334");
+        assert_eq!(a, b);
+        assert!(!a.contains("05151400648"));
+        assert_eq!(
+            a,
+            "https___dockertest.gf.com.cn_v2_gfstore_finance-operations.md"
+        );
     }
 
     #[test]
@@ -355,5 +536,48 @@ mod tests {
         assert!(system_prompt(Lang::Zh).contains("DevSecOps 资深专家"));
         assert!(system_prompt(Lang::En).contains("senior DevSecOps expert"));
         assert!(system_prompt(Lang::En).contains("🟢 Image has no regression"));
+    }
+
+    #[test]
+    fn parse_arg_list_handles_exec_and_shell_form() {
+        assert_eq!(
+            parse_arg_list(r#"["docker-entrypoint.sh", "redis-server"]"#),
+            vec!["docker-entrypoint.sh", "redis-server"]
+        );
+        assert_eq!(
+            parse_arg_list("nginx -g daemon off;"),
+            vec!["nginx", "-g", "daemon", "off;"]
+        );
+    }
+
+    #[test]
+    fn entrypoint_cmd_tokens_last_instruction_wins() {
+        let df = "FROM x\n\
+                  ENTRYPOINT [\"/old.sh\"]\n\
+                  CMD [\"a\"]\n\
+                  ENTRYPOINT [\"docker-entrypoint.sh\"]\n\
+                  CMD [\"redis-server\"]";
+        assert_eq!(
+            entrypoint_cmd_tokens(df),
+            vec!["docker-entrypoint.sh", "redis-server"]
+        );
+    }
+
+    #[test]
+    fn looks_like_script_filters_interpreters_and_flags() {
+        assert!(looks_like_script("/usr/local/bin/docker-entrypoint.sh"));
+        assert!(looks_like_script("entrypoint.sh"));
+        assert!(looks_like_script("/app/run"));
+        assert!(!looks_like_script("redis-server"));
+        assert!(!looks_like_script("bash"));
+        assert!(!looks_like_script("/bin/sh"));
+        assert!(!looks_like_script("-c"));
+        assert!(!looks_like_script(""));
+    }
+
+    #[test]
+    fn binary_content_is_rejected() {
+        assert!(is_probably_text(b"#!/bin/sh\nexec \"$@\"\n"));
+        assert!(!is_probably_text(b"\x7fELF\x00\x01binary"));
     }
 }

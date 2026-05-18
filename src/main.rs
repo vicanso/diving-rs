@@ -26,6 +26,7 @@ mod store;
 mod task_local;
 mod ui;
 mod util;
+mod wecom;
 
 use controller::new_router;
 use image::{analyze_docker_image, parse_image_info};
@@ -48,9 +49,9 @@ struct Args {
     /// The result output file
     #[arg(short, long)]
     output_file: Option<String>,
-    /// Auto-detect and hide base image layers in Markdown output
-    #[arg(long, default_value_t = false)]
-    skip_base: bool,
+    /// Include base image layers in the analysis (auto-detected and hidden by default)
+    #[arg(long)]
+    no_skip_base: bool,
     /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
     #[arg(long)]
     lang: Option<String>,
@@ -63,6 +64,9 @@ struct Args {
     /// AI model name (or $OPENAI_MODEL, default gpt-4o)
     #[arg(long)]
     ai_model: Option<String>,
+    /// WeCom (企业微信) group-bot webhook URL or key; pushes the result there (or $WECOM_WEBHOOK)
+    #[arg(long)]
+    wecom_webhook: Option<String>,
 }
 
 impl Args {
@@ -131,6 +135,7 @@ async fn analyze(
     skip_base: bool,
     lang: i18n::Lang,
     ai_cfg: Option<ai::AiConfig>,
+    wecom_cfg: Option<wecom::WecomConfig>,
 ) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
@@ -141,12 +146,30 @@ async fn analyze(
         .map_err(|item| item.to_string())?;
     // AI analysis takes precedence: print the model's report and skip the TUI.
     if let Some(ai_cfg) = ai_cfg {
-        let md = markdown::to_markdown(&result, false, lang);
+        let mut md = markdown::to_markdown(&result, skip_base, lang);
+        // Inline the actual ENTRYPOINT/CMD startup script(s) so the model can
+        // reason about what the container really runs. Decompresses layers, so
+        // keep it off the async executor.
+        let scripts = tokio::task::block_in_place(|| ai::entrypoint_scripts_md(&result, lang));
+        if !scripts.is_empty() {
+            md.push_str("\n\n");
+            md.push_str(&scripts);
+        }
         let report = ai::analyze_with_ai(&image, &md, &ai_cfg, lang)
             .await
             .map_err(|e| i18n::fill(i18n::tr(lang, "ai.fail"), &[&e]))?;
         println!("{}", i18n::tr(lang, "ai.report").bold().green());
         println!("{report}");
+        // Smart selection: with AI enabled, push the concise AI report.
+        if let Some(wecom_cfg) = wecom_cfg.as_ref() {
+            push_to_wecom(wecom_cfg, &image, &report, lang).await?;
+        }
+        return Ok(());
+    }
+    // WeCom push without AI: send a concise summary and skip the TUI.
+    if let Some(wecom_cfg) = wecom_cfg.as_ref() {
+        let summary = wecom_summary(&result, lang);
+        push_to_wecom(wecom_cfg, &image, &summary, lang).await?;
         return Ok(());
     }
     if is_ci() || !output_file.is_empty() {
@@ -253,6 +276,60 @@ async fn analyze(
     Ok(())
 }
 
+// 将分析结果（AI 报告或精简摘要）推送到企微机器人
+async fn push_to_wecom(
+    cfg: &wecom::WecomConfig,
+    image: &str,
+    content: &str,
+    lang: i18n::Lang,
+) -> Result<(), String> {
+    eprintln!("{}", i18n::tr(lang, "wecom.sending"));
+    let msg = format!(
+        "## {}: {}\n\n{}",
+        i18n::tr(lang, "wecom.title"),
+        image,
+        content
+    );
+    wecom::send_markdown(cfg, &msg)
+        .await
+        .map_err(|e| i18n::fill(i18n::tr(lang, "wecom.fail"), &[&e]))?;
+    println!("{}", i18n::tr(lang, "wecom.sent").bold().green());
+    Ok(())
+}
+
+// 无 AI 时推送的精简摘要：效率分 / 浪费空间 / 优化建议
+fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> String {
+    let summary = result.summary();
+    let mut s = format!(
+        "**{}:** {} %\n**{}:** {} bytes ({})\n",
+        i18n::tr(lang, "md.f.eff"),
+        summary.score,
+        i18n::tr(lang, "md.f.wasted"),
+        summary.wasted_size,
+        ByteSize(summary.wasted_size),
+    );
+    if !result.recommendations.is_empty() {
+        s.push_str(&format!("\n### {}\n", i18n::tr(lang, "md.recs")));
+        for r in &result.recommendations {
+            let tag = format!(
+                "[{}/{}]",
+                i18n::tr(lang, &format!("sev.{}", r.severity)),
+                i18n::tr(lang, &format!("cat.{}", r.category)),
+            );
+            let saved = if r.est_saved_bytes > 0 {
+                i18n::fill(
+                    i18n::tr(lang, "cli.saved"),
+                    &[&ByteSize(r.est_saved_bytes).to_string()],
+                )
+            } else {
+                String::new()
+            };
+            s.push_str(&format!("- {} {}{}\n", tag, r.title, saved));
+        }
+    }
+    s
+}
+
 #[tokio::main]
 async fn run(args: Args) {
     // 启动时确保可以读取配置
@@ -264,15 +341,20 @@ async fn run(args: Args) {
             args.ai_base_url.as_deref(),
             args.ai_model.as_deref(),
         );
+        let wecom_cfg = wecom::WecomConfig::resolve(args.wecom_webhook.as_deref());
+        // Base layers are auto-detected and hidden by default; --no-skip-base
+        // opts back in.
+        let skip_base = !args.no_skip_base;
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
                     if let Err(err) = analyze(
                         value,
                         args.output_file.unwrap_or_default(),
-                        args.skip_base,
+                        skip_base,
                         lang,
                         ai_cfg,
+                        wecom_cfg,
                     )
                     .await
                     {

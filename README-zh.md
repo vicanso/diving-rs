@@ -96,11 +96,11 @@ diving redis:alpine --output-file result.json
 # 将分析结果保存为 Markdown 格式（通过 .md 后缀自动识别）
 diving redis:alpine --output-file result.md
 
-# 将 Markdown 分析结果直接输出到控制台（默认显示全部层）
+# 将 Markdown 分析结果直接输出到控制台（默认已自动识别并隐藏基础镜像层）
 diving myimage:latest --output-file -
 
-# 加上 --skip-base 通过时间戳间隔自动识别并隐藏基础镜像的层
-diving myimage:latest --output-file - --skip-base
+# 加上 --no-skip-base 可包含基础镜像层
+diving myimage:latest --output-file - --no-skip-base
 ```
 
 - `Current Layer Contents` 仅显示当前层的所有文件
@@ -112,7 +112,7 @@ diving myimage:latest --output-file - --skip-base
 
 ## AI 分析
 
-提供 OpenAI 兼容的 API Key 后，diving 会输出 AI 生成的优化分析报告，而不进入交互式 TUI。程序会将完整的 Markdown 分析（分层、反推的 Dockerfile、浪费空间、大文件、安全发现）发送给模型，并将其诊断结果打印到标准输出。
+提供 OpenAI 兼容的 API Key 后，diving 会输出 AI 生成的优化分析报告，而不进入交互式 TUI。程序会将完整的 Markdown 分析（分层、反推的 Dockerfile、浪费空间、大文件、安全发现）发送给模型，并将其诊断结果打印到标准输出。当 ENTRYPOINT/CMD 指向镜像内的脚本时，会从分层中读取该脚本内容一并发送，便于模型审查容器实际运行的逻辑。
 
 ```bash
 # 启用 AI 分析（打印报告，跳过 TUI）
@@ -140,6 +140,34 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 | `--lang` | `DIVING_LANG` | 系统语言 | 输出语言：`en` 或 `zh`。 |
 
 每次运行会将本次分析快照保存到 `~/.diving/ai_history/`。下次分析同一镜像时，会把上一次的快照与本次一并发送给模型，便于其识别新老版本之间的体积劣化/膨胀。
+
+## 企微推送
+
+指定企业微信群机器人 webhook，即可把分析结果直接推送到群里，而不进入交互式 TUI。推送内容会智能选择，确保不超过机器人 ~4096 字节的 markdown 上限：
+
+- 已设置 `--ai-api-key` → 推送精简的 AI 报告
+- 未启用 AI → 推送精简摘要（效率评分、浪费空间、优化建议）
+
+```bash
+# 使用机器人 key（自动展开为标准 webhook 地址）
+diving redis:alpine --wecom-webhook 693a91f6-7aoc-4bc4-97a0-0ec2sifa5aaa
+
+# 或使用完整 webhook 地址
+diving redis:alpine --wecom-webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY"
+
+# 推送 AI 报告而非摘要
+diving redis:alpine --ai-api-key sk-xxxx --wecom-webhook KEY
+
+# webhook 也可通过环境变量提供
+export WECOM_WEBHOOK=KEY
+diving redis:alpine
+```
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--wecom-webhook` | `WECOM_WEBHOOK` | — | 企业微信群机器人 webhook 地址，或裸 key（自动展开）。提供该参数即推送结果并跳过 TUI。 |
+
+超长内容会截断到企微上限并附 `… (truncated)` 提示。
 
 ## web
 
@@ -177,7 +205,7 @@ diving --mode web --listen 0.0.0.0:8080
 |------|------|------|------|
 | `image` | string | 是 | 镜像引用（格式与命令行模式相同） |
 | `format` | string | 否 | 设为 `markdown` 时返回 Markdown 报告，默认返回 JSON |
-| `skipBase` | bool | 否 | 当 `format=markdown` 时，通过时间戳间隔自动识别并隐藏基础镜像的层 |
+| `skipBase` | bool | 否 | 当 `format=markdown` 时，自动识别并隐藏基础镜像层（默认 `true`）；设为 `false` 则包含 |
 
 **示例：**
 
@@ -191,6 +219,6 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine%3Farch%3Darm64"
 # Markdown 报告
 curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 
-# Markdown 报告并隐藏基础镜像层
-curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=true"
+# Markdown 报告并包含基础镜像层（默认隐藏）
+curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```

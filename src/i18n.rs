@@ -362,6 +362,8 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "md.command") => "命令",
         (Lang::En, "md.emptylayer") => "*Empty layer — no file changes.*",
         (Lang::Zh, "md.emptylayer") => "*空层——无文件变更。*",
+        (Lang::En, "md.emptyline") => "- **Layer {0}** · empty layer",
+        (Lang::Zh, "md.emptyline") => "- **第 {0} 层** · 空层",
         (Lang::En, "md.nochanges") => "*No file changes recorded for this layer.*",
         (Lang::Zh, "md.nochanges") => "*该层未记录文件变更。*",
         (Lang::En, "md.col.change") => "Change",
@@ -436,6 +438,20 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "ai.report") => "AI 优化分析报告：",
         (Lang::En, "ai.fail") => "AI analysis failed: {0}",
         (Lang::Zh, "ai.fail") => "AI 分析失败：{0}",
+        (Lang::En, "ai.script.title") => "Entrypoint / CMD scripts",
+        (Lang::Zh, "ai.script.title") => "入口/启动脚本（ENTRYPOINT/CMD）",
+        (Lang::En, "ai.script.truncated") => "… (script truncated)",
+        (Lang::Zh, "ai.script.truncated") => "……（脚本已截断）",
+
+        // ---- WeCom push (wecom.rs, CLI stderr/stdout) ---------------------
+        (Lang::En, "wecom.title") => "diving analysis report",
+        (Lang::Zh, "wecom.title") => "diving 分析报告",
+        (Lang::En, "wecom.sending") => "  > Pushing result to WeCom bot...",
+        (Lang::Zh, "wecom.sending") => "  > 正在推送结果到企微机器人…",
+        (Lang::En, "wecom.sent") => "Result pushed to WeCom bot.",
+        (Lang::Zh, "wecom.sent") => "结果已推送到企微机器人。",
+        (Lang::En, "wecom.fail") => "WeCom push failed: {0}",
+        (Lang::Zh, "wecom.fail") => "企微推送失败：{0}",
 
         // Unknown key: visible, safe marker.
         (_, _) => "<missing i18n key>",
