@@ -7,6 +7,7 @@ on:
 env:
   GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
   CARGO_TERM_COLOR: always
+  IMAGE_NAME: vicanso/diving
 
 jobs:
   macos:
@@ -95,16 +96,27 @@ jobs:
       - name: Upload Assets
         run: |
           ./.github/workflows/upload_asset.sh ./diving-linux-aarch64 $GITHUB_TOKEN
-  docker:
-    runs-on: ubuntu-latest
+  # Build each architecture on its native runner and push only the per-arch
+  # digest. The `docker-merge` job below assembles the final multi-arch
+  # manifest at `IMAGE_NAME:<version>`. Splitting like this avoids QEMU
+  # emulation, which roughly halves total wall time vs. the old setup.
+  docker-build:
     timeout-minutes: 3600
-    steps: 
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      matrix:
+        platform:
+          - { arch: "linux/amd64", tag: "amd64", runs-on: "ubuntu-24.04" }
+          - { arch: "linux/arm64", tag: "arm64", runs-on: "ubuntu-24.04-arm" }
+    steps:
       - name: Change Swap Space
         run: |
           swapon --show=NAME | tail -n 1
           df -lh
-          du -sh /usr/local/lib/android
-          sudo rm -rf /usr/local/lib/android
+          if [ -d /usr/local/lib/android ]; then
+            du -sh /usr/local/lib/android
+            sudo rm -rf /usr/local/lib/android
+          fi
           export SWAP_FILE=$(swapon --show=NAME | tail -n 1)
           sudo swapoff $SWAP_FILE
           sudo rm $SWAP_FILE
@@ -122,35 +134,68 @@ jobs:
           swapon --show
           df -lh
           echo
+          arch
       - name: Checkout
-        uses: actions/checkout@v3
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: |
-            vicanso/diving
-          tags: |
-            type=semver,pattern={{version}}
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: actions/checkout@v4
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       - name: Available platforms
         run: echo ${{ steps.buildx.outputs.platforms }}
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-      - name: Build and push
+      - name: Build and push by digest
         id: docker_build
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
-          platforms: linux/amd64, linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-      - name: Image digest
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform.arch }}
+          # Push by digest only: no per-arch (:amd64/:arm64) tag is created
+          # on Docker Hub. The `docker-merge` job below assembles the single
+          # versioned manifest.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
         run: |
-          echo ${{ steps.docker_build.outputs.digest }}
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.docker_build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-merge:
+    runs-on: ubuntu-24.04
+    needs: [docker-build]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Extract version from Git tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+      - name: Create and push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE_NAME }}:${{ env.VERSION }} \
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
