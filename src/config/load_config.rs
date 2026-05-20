@@ -10,6 +10,9 @@ use std::{fs, path::PathBuf};
 pub struct DivingConfig {
     pub layer_path: Option<String>,
     pub layer_ttl: Option<String>,
+    // Analysis-result cache directory (default: ~/.diving/analysis). Shares
+    // `layer_ttl` for cleanup.
+    pub analysis_path: Option<String>,
     pub threads: Option<usize>,
     pub lowest_efficiency: Option<f64>,
     pub highest_wasted_bytes: Option<ByteSize>,
@@ -61,6 +64,23 @@ pub fn get_layer_path() -> &'static PathBuf {
         fs::create_dir_all(&layer_path)
             .expect("failed to create layer cache directory: check permissions");
         layer_path
+    })
+}
+
+// 获取或初始化分析结果缓存目录
+pub fn get_analysis_path() -> &'static PathBuf {
+    static ANALYSIS_PATH: OnceCell<PathBuf> = OnceCell::new();
+    ANALYSIS_PATH.get_or_init(|| {
+        let config_path = get_config_path();
+        let config = must_load_config();
+        let file = config
+            .analysis_path
+            .clone()
+            .unwrap_or_else(|| "analysis".to_string());
+        let path = config_path.join(file);
+        fs::create_dir_all(&path)
+            .expect("failed to create analysis cache directory: check permissions");
+        path
     })
 }
 

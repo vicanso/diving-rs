@@ -1201,6 +1201,41 @@ impl DockerClient {
         }
         Ok("".to_string())
     }
+    /// Issue HEAD on the manifest endpoint to obtain the
+    /// `Docker-Content-Digest` header — used as a content-addressable
+    /// cache key for the full analysis result. Any failure (network,
+    /// 4xx/5xx, missing header, malformed value) returns `None` so the
+    /// caller falls through to the full analysis. Never bubbles an error.
+    async fn head_manifest_digest(&self, params: &DockerImageParams) -> Option<String> {
+        if self.is_local() {
+            return None;
+        }
+        let user = &params.user;
+        let img = &params.img;
+        let tag = &params.tag;
+        let token = &params.token;
+        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        let client = Client::builder().build().ok()?;
+        let accepts = [
+            MEDIA_TYPE_IMAGE_INDEX,
+            MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
+            MEDIA_TYPE_MANIFEST_LIST,
+        ];
+        let mut req = client.head(url).timeout(Duration::from_secs(30));
+        req = req.header("Accept", accepts.join(", "));
+        if !token.is_empty() {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.headers()
+            .get("Docker-Content-Digest")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    }
+
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
         if !self.is_local() && !params.quiet {
             eprintln!(
@@ -1210,6 +1245,31 @@ impl DockerClient {
         }
         let token = self.get_auth_token(params).await?;
         params.token = token;
+
+        // Analysis-result cache. HEAD the manifest to get a
+        // `Docker-Content-Digest`; if present and the cache file exists +
+        // matches the current schema, return the cached result and skip
+        // the entire layer-fetch + file-tree pipeline. Any HEAD failure
+        // (network/4xx/5xx/missing header) is swallowed so the normal
+        // flow always remains the fallback path.
+        let cache_digest: Option<String> = self.head_manifest_digest(params).await;
+        if let Some(digest) = cache_digest.as_deref() {
+            if let Some(mut cached) = crate::store::read_analysis(digest, &params.arch).await {
+                tl_info!(digest = digest, "analysis cache hit");
+                if !params.quiet {
+                    let short = &digest[..digest.len().min(19)];
+                    eprintln!(
+                        "{}",
+                        i18n::fill(i18n::tr(params.lang, "prog.cache.hit"), &[short])
+                    );
+                }
+                // Recommendations are language-specific and are not stored
+                // in the cache — rebuild for the current request's lang.
+                cached.recommendations = build_recommendations(&cached, params.lang);
+                return Ok(cached);
+            }
+        }
+
         if !self.is_local() && !params.quiet {
             eprintln!("{}", i18n::tr(params.lang, "prog.manifest"));
         }
@@ -1460,6 +1520,14 @@ impl DockerClient {
         // Pure derived layer — computed from the result that is already built.
         // Localized at generation time from the resolved environment language.
         result.recommendations = build_recommendations(&result, params.lang);
+
+        // Best-effort cache write. Skips silently on any error (logged
+        // inside `write_analysis`) and only runs when HEAD earlier gave
+        // us a digest to key on.
+        if let Some(digest) = cache_digest.as_deref() {
+            crate::store::write_analysis(digest, &params.arch, &result).await;
+        }
+
         Ok(result)
     }
 }

@@ -264,6 +264,8 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "prog.download") => "  > 正在下载 {0}（{1}）…",
         (Lang::En, "prog.cached") => "  > Cached   {0} ({1})",
         (Lang::Zh, "prog.cached") => "  > 已缓存 {0}（{1}）",
+        (Lang::En, "prog.cache.hit") => "  > Loaded analysis from cache ({0})",
+        (Lang::Zh, "prog.cache.hit") => "  > 命中分析缓存（{0}）",
 
         // ---- Markdown report skeleton (markdown.rs) -----------------------
         (Lang::En, "md.title") => "Image Analysis",

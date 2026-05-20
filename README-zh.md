@@ -20,7 +20,8 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh |
 默认配置文件为`~/.diving/config.yml`，其配置选项如下：
 
 - `layer_path`: 分层数据缓存的目录，默认为`~/.diving/layers`
-- `layer_ttl`: 分层数据缓存的有效期，默认为`90d`，若超过指定时间未再访问则该 layer 被清除
+- `layer_ttl`: 分层数据缓存与分析结果缓存的有效期，默认为`90d`，若超过指定时间未再访问则该条目被清除
+- `analysis_path`: 分析结果缓存目录，默认为`~/.diving/analysis`
 - `cleanup_interval_hours`: 扫描并清除过期缓存的间隔时间（单位：小时），默认为`1`
 - `threads`: 并行下载 layer 的线程数，默认为逻辑 CPU 核心数
 - `lowest_efficiency`: CI 检查——最低可接受的镜像效率（0–1），默认为`0.95`
@@ -37,6 +38,15 @@ lowest_efficiency: 0.95
 highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1
 ```
+
+## 缓存
+
+diving 在 `~/.diving/` 下维护两层缓存，均受 `layer_ttl` 控制并每小时清理一次：
+
+- **Layer blobs**（`~/.diving/layers/`）——从 registry 下载的压缩 layer，按 layer digest 索引。命中时省去网络下载，但解压与文件树构建仍会运行。
+- **分析结果**（`~/.diving/analysis/`）——完整的 `DockerAnalyzeResult` JSON，以「`HEAD` 镜像 manifest 返回的 `Docker-Content-Digest` + 请求的架构」为键。命中时**整条流水线被短路**——不再拉 layer、不解压、不走文件树。
+
+分析缓存是**内容寻址**的：当 `:latest` 这类可变 tag 被重新推送时，digest 自然变化，缓存条目自动失效。如果 `HEAD` 探测失败（网络、4xx/5xx、缺少 header 等任何原因），diving 会静默回退到完整分析流程——缓存绝不会阻塞请求。
 
 ## sensitive-files
 

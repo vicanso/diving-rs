@@ -23,8 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh |
 The config file is `~/.diving/config.yml`, the options:
 
 - `layer_path`: The path of layer cache, default is `~/.diving/layers`
-- `layer_ttl`: The TTL of cached layer blobs, default is `90d`. A layer is purged if it has not been accessed for the specified duration
-- `cleanup_interval_hours`: How often (in hours) the layer cache is scanned for expired entries, default is `1`
+- `layer_ttl`: The TTL of cached layer blobs AND analysis results, default is `90d`. An entry is purged if it has not been accessed for the specified duration
+- `analysis_path`: The path of the analysis-result cache, default is `~/.diving/analysis`
+- `cleanup_interval_hours`: How often (in hours) the caches are scanned for expired entries, default is `1`
 - `threads`: Number of threads for parallel layer downloads, default is the number of logical CPUs
 - `lowest_efficiency`: CI check — minimum acceptable efficiency score (0–1), default is `0.95`
 - `highest_wasted_bytes`: CI check — maximum wasted bytes, default is `20971520` (20 MB)
@@ -40,6 +41,15 @@ lowest_efficiency: 0.95
 highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1
 ```
+
+## cache
+
+diving keeps two on-disk caches under `~/.diving/`, both governed by `layer_ttl` and swept hourly:
+
+- **Layer blobs** (`~/.diving/layers/`) — compressed layer downloads from the registry, keyed by layer digest. A hit skips the network download; decompression and file-tree construction still run.
+- **Analysis results** (`~/.diving/analysis/`) — fully analyzed `DockerAnalyzeResult` JSON, keyed by the `Docker-Content-Digest` returned by a `HEAD` against the manifest endpoint plus the requested architecture. A hit short-circuits the entire pipeline (no layer fetch, no decompression, no file-tree walk).
+
+The analysis cache is **content-addressable**, so re-pushing a mutable tag like `:latest` automatically invalidates the entry. If the `HEAD` probe fails for any reason (network, 4xx/5xx, missing header) diving silently falls back to the full analysis — caching never blocks a request.
 
 ## sensitive-files
 

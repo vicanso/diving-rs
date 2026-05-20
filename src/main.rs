@@ -31,7 +31,7 @@ mod wecom;
 use controller::new_router;
 use image::{analyze_docker_image, parse_image_info};
 use middleware::{access_log, entry};
-use store::clear_blob_files;
+use store::{clear_analysis_files, clear_blob_files};
 use task_local::{generate_trace_id, TRACE_ID};
 
 /// A tool for exploring each layer in a docker image.
@@ -120,6 +120,12 @@ fn start_cleanup_task() {
             } else {
                 info!("clear blob files success");
             }
+            // Sweep stale analysis-result cache entries using the same TTL.
+            if let Err(err) = clear_analysis_files().await {
+                error!(err = err.to_string(), "clear analysis cache fail");
+            } else {
+                info!("clear analysis cache success");
+            }
         }
     });
 }
@@ -139,6 +145,10 @@ async fn analyze(
 ) -> Result<(), String> {
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
+    // Analysis-cache sweep is best-effort — never fail the CLI on cleanup.
+    if let Err(err) = clear_analysis_files().await {
+        tracing::warn!(err = err.to_string(), "clear analysis cache fail");
+    }
     let image_info = parse_image_info(&image);
     eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
     let result = analyze_docker_image(image_info, lang, false)
