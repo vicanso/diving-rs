@@ -56,7 +56,8 @@ fn add_to_latest_image_cache(name: &str) {
 async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
     let image_info = parse_image_info(&params.image);
     let lang = i18n::Lang::resolve(params.lang.as_deref());
-    let result = analyze_docker_image(image_info, lang).await?;
+    // Web mode: suppress stderr progress logs (download/cached/auth/manifest/layers).
+    let result = analyze_docker_image(image_info, lang, true).await?;
     add_to_latest_image_cache(&params.image);
     if params.format.as_deref() == Some("markdown") {
         // Base layers are hidden by default (matches the CLI); pass

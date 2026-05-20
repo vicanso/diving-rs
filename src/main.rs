@@ -141,7 +141,7 @@ async fn analyze(
     clear_blob_files().await.map_err(|item| item.to_string())?;
     let image_info = parse_image_info(&image);
     eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
-    let result = analyze_docker_image(image_info, lang)
+    let result = analyze_docker_image(image_info, lang, false)
         .await
         .map_err(|item| item.to_string())?;
     // AI analysis takes precedence: print the model's report and skip the TUI.

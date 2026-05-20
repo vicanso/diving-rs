@@ -743,6 +743,9 @@ pub struct DockerImageParams {
     // 生成建议时使用的语言（不参与序列化）
     #[serde(skip)]
     pub lang: crate::i18n::Lang,
+    // 抑制 stderr 进度日志（web 模式下置 true，避免污染服务端日志）
+    #[serde(skip)]
+    pub quiet: bool,
 }
 
 fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
@@ -1079,16 +1082,18 @@ impl DockerClient {
             let token = &params.token;
             let url = format!("{}/{user}/{img}/blobs/{}", self.registry, layer.digest);
             tl_info!(url = url, "getting blob");
-            eprintln!(
-                "{}",
-                i18n::fill(
-                    i18n::tr(params.lang, "prog.download"),
-                    &[
-                        &layer.digest[..layer.digest.len().min(19)],
-                        &bytesize::ByteSize(layer.size).to_string(),
-                    ]
-                )
-            );
+            if !params.quiet {
+                eprintln!(
+                    "{}",
+                    i18n::fill(
+                        i18n::tr(params.lang, "prog.download"),
+                        &[
+                            &layer.digest[..layer.digest.len().min(19)],
+                            &bytesize::ByteSize(layer.size).to_string(),
+                        ]
+                    )
+                );
+            }
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
@@ -1098,16 +1103,18 @@ impl DockerClient {
             tl_info!(url = url, "got blob");
         } else {
             tl_info!(digest = layer.digest, "blob cache hit");
-            eprintln!(
-                "{}",
-                i18n::fill(
-                    i18n::tr(params.lang, "prog.cached"),
-                    &[
-                        &layer.digest[..layer.digest.len().min(19)],
-                        &bytesize::ByteSize(layer.size).to_string(),
-                    ]
-                )
-            );
+            if !params.quiet {
+                eprintln!(
+                    "{}",
+                    i18n::fill(
+                        i18n::tr(params.lang, "prog.cached"),
+                        &[
+                            &layer.digest[..layer.digest.len().min(19)],
+                            &bytesize::ByteSize(layer.size).to_string(),
+                        ]
+                    )
+                );
+            }
         }
 
         let compressed_size = std::fs::metadata(&path)
@@ -1195,7 +1202,7 @@ impl DockerClient {
         Ok("".to_string())
     }
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
-        if !self.is_local() {
+        if !self.is_local() && !params.quiet {
             eprintln!(
                 "{}",
                 i18n::fill(i18n::tr(params.lang, "prog.auth"), &[&self.registry])
@@ -1203,7 +1210,7 @@ impl DockerClient {
         }
         let token = self.get_auth_token(params).await?;
         params.token = token;
-        if !self.is_local() {
+        if !self.is_local() && !params.quiet {
             eprintln!("{}", i18n::tr(params.lang, "prog.manifest"));
         }
         let (manifest, supported_archs) = self.get_manifest(params).await?;
@@ -1221,7 +1228,7 @@ impl DockerClient {
 
         let mut image_size = 0;
         let mut image_total_size = 0;
-        if !self.is_local() {
+        if !self.is_local() && !params.quiet {
             let layer_count = manifest.layers.len();
             let total_bytes: u64 = manifest.layers.iter().map(|l| l.size).sum();
             eprintln!(
@@ -1460,6 +1467,7 @@ impl DockerClient {
 pub async fn analyze_docker_image(
     image_info: ImageInfo,
     lang: crate::i18n::Lang,
+    quiet: bool,
 ) -> Result<DockerAnalyzeResult> {
     if image_info.registry == REGISTRY_LOCAL_DOCKER {
         let buf = get_buf_from_local_docker(&image_info.name)?;
@@ -1474,6 +1482,7 @@ pub async fn analyze_docker_image(
         c.analyze(&mut DockerImageParams {
             img: filename,
             lang,
+            quiet,
             ..Default::default()
         })
         .await
@@ -1485,6 +1494,7 @@ pub async fn analyze_docker_image(
             tag: image_info.tag,
             arch: image_info.arch,
             lang,
+            quiet,
             ..Default::default()
         })
         .await
