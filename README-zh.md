@@ -183,7 +183,9 @@ docker run -d --restart=always \
   vicanso/diving
 ```
 
-容器以 `rust` 用户（UID 1000，GID 1000）而非 root 运行。上方的 `chown` 命令将宿主机目录的所有权交给该用户，省略此步骤会导致容器无法写入 layer 缓存文件而启动失败。
+容器以非 root 身份（UID `1000:1000`）运行。上方的 `chown` 命令将宿主机目录的所有权交给该 UID，省略此步骤会导致容器无法写入 layer 缓存文件而启动失败。
+
+镜像基于 `gcr.io/distroless/base-debian12`（无 shell、无包管理器、glibc 运行时）。由于内部不含 `wget`/`curl`，未设置 Dockerfile 级别的 `HEALTHCHECK`——请改用编排层探针访问 `GET /ping`（Kubernetes `livenessProbe`、Docker Compose 中的外部 `curl` sidecar 等）。
 
 如需修改监听地址，可通过 `--listen` 参数指定：
 
