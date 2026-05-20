@@ -2,6 +2,7 @@ use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
 use bytesize::ByteSize;
 use clap::Parser;
 use colored::*;
+use mimalloc::MiMalloc;
 use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -11,6 +12,13 @@ use tower::ServiceBuilder;
 use tracing::Level;
 use tracing::{error, info};
 use tracing_subscriber::FmtSubscriber;
+
+// mimalloc replaces the system allocator process-wide. On the multi-threaded
+// reqwest + tar/zstd decompression workload it typically delivers ~10–20%
+// throughput / lower latency vs. glibc malloc, especially under concurrent
+// web requests.
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 mod ai;
 mod config;

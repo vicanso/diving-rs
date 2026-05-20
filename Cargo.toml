@@ -27,6 +27,9 @@ libflate = "2.3.0"
 lru = "0.18.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
+# Replaces the system allocator with mimalloc to reduce lock contention and
+# fragmentation on the multi-threaded reqwest + tar/zstd decompression hot path.
+mimalloc = { version = "0.1", default-features = false }
 nanoid = "0.5.0"
 once_cell = "1.21.4"
 pad = "0.1.6"
