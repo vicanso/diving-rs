@@ -106,8 +106,8 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         // ---- recommendation details (use {0}, {1}, … placeholders) --------
         (Lang::En, "rec.wasted.detail") => "{0} ({1}% of the image) is occupied by files that a later layer overwrites or deletes. Because each layer is immutable, those bytes still ship.",
         (Lang::Zh, "rec.wasted.detail") => "{0}（占镜像 {1}%）被后续层覆盖或删除的文件占用。由于每一层都是不可变的，这些字节仍会随镜像分发。",
-        (Lang::En, "rec.pkgcache.detail") => "{0} of apt/apk/yum/dnf/pacman cache is baked into the image across {1} file(s){2}.",
-        (Lang::Zh, "rec.pkgcache.detail") => "{0} 的 apt/apk/yum/dnf/pacman 缓存被打进镜像，共 {1} 个文件{2}。",
+        (Lang::En, "rec.pkgcache.detail") => "{0} of package-manager cache (OS: apt/apk/yum/dnf/pacman; language: pip/npm/yarn/cargo/go/composer/gem) is baked into the image across {1} file(s){2}.",
+        (Lang::Zh, "rec.pkgcache.detail") => "{0} 的包管理器缓存（系统：apt/apk/yum/dnf/pacman；语言生态：pip/npm/yarn/cargo/go/composer/gem）被打进镜像，共 {1} 个文件{2}。",
         (Lang::En, "rec.devart.detail") => "{0} of build/SCM artifacts ({1} file(s){2}) such as .git, build caches or debug output is shipped.",
         (Lang::Zh, "rec.devart.detail") => "{0} 的构建/版本控制产物（{1} 个文件{2}），如 .git、构建缓存或调试输出被打进镜像。",
         (Lang::En, "rec.layercount.detail") => "The image has {0} layers (limit is 127). Many small layers add metadata overhead and slow pulls.",
@@ -150,8 +150,8 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         // ---- recommendation fix hints -------------------------------------
         (Lang::En, "rec.wasted.hint") => "Create and clean up the data in the *same* RUN instruction so the bytes never enter a layer.",
         (Lang::Zh, "rec.wasted.hint") => "在*同一条* RUN 指令内创建并清理数据，使这些字节根本不进入任何层。",
-        (Lang::En, "rec.pkgcache.hint") => "apt: `rm -rf /var/lib/apt/lists/*` in the same RUN; apk: `apk add --no-cache`; yum/dnf: `yum clean all`.",
-        (Lang::Zh, "rec.pkgcache.hint") => "apt：同一 RUN 内 `rm -rf /var/lib/apt/lists/*`；apk：`apk add --no-cache`；yum/dnf：`yum clean all`。",
+        (Lang::En, "rec.pkgcache.hint") => "apt: `rm -rf /var/lib/apt/lists/*` in the same RUN; apk: `apk add --no-cache`; yum/dnf: `yum clean all`. For language tools: `pip install --no-cache-dir`, `npm ci && npm cache clean --force`, `go clean -cache -modcache`, `cargo --locked` + clean target; or use BuildKit `--mount=type=cache` for transient caches.",
+        (Lang::Zh, "rec.pkgcache.hint") => "apt：同一 RUN 内 `rm -rf /var/lib/apt/lists/*`；apk：`apk add --no-cache`；yum/dnf：`yum clean all`。语言生态用 `pip install --no-cache-dir`、`npm ci && npm cache clean --force`、`go clean -cache -modcache`，或在 BuildKit 中用 `--mount=type=cache` 挂载临时缓存。",
         (Lang::En, "rec.devart.hint") => "Add a .dockerignore and/or use a multi-stage build so these never reach the final stage.",
         (Lang::Zh, "rec.devart.hint") => "添加 .dockerignore 并/或使用多阶段构建，使这些产物不进入最终阶段。",
         (Lang::En, "rec.layercount.hint") => "Merge consecutive RUN instructions with `&&`.",

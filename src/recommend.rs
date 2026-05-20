@@ -88,28 +88,70 @@ fn collect_leaves(items: &[FileTreeItem], prefix: &str, out: &mut Vec<Leaf>) {
 }
 
 fn is_pkg_cache(path: &str) -> bool {
-    path.starts_with("var/cache/apt/")
+    // OS-level package manager caches.
+    if path.starts_with("var/cache/apt/")
         || path.starts_with("var/lib/apt/lists/")
         || path.starts_with("var/cache/apk/")
         || path.starts_with("var/cache/yum/")
         || path.starts_with("var/cache/dnf/")
         || path.starts_with("var/cache/pacman/")
+        || path.starts_with("var/cache/zypp/")
+    {
+        return true;
+    }
+    // Language ecosystem caches. Match at path start or after a slash so the
+    // fragments behave like real path segments and don't catch unrelated
+    // directory names.
+    const LANG_CACHE_FRAGS: &[&str] = &[
+        ".cache/pip/",
+        ".npm/_cacache/",
+        ".cache/yarn/",
+        ".yarn/cache/",
+        ".cache/go-build/",
+        "go/pkg/mod/cache/",
+        ".cargo/registry/",
+        ".cargo/git/db/",
+        ".composer/cache/",
+        ".gem/cache/",
+    ];
+    if LANG_CACHE_FRAGS
+        .iter()
+        .any(|f| path.starts_with(f) || path.contains(&format!("/{}", f)))
+    {
+        return true;
+    }
+    // Fixed container locations used by language toolchains.
+    path.starts_with("usr/local/bundle/cache/")
+        || path.starts_with("usr/local/cargo/registry/")
+        || path.starts_with("opt/conda/pkgs/")
 }
 
 fn is_dev_artifact(path: &str) -> bool {
-    let p = path;
-    p.starts_with("node_modules/.cache/")
-        || p.contains("/node_modules/.cache/")
-        || p.starts_with(".git/")
-        || p.contains("/.git/")
-        || p.starts_with("target/debug/")
-        || p.contains("/target/debug/")
-        || p.starts_with("__pycache__/")
-        || p.contains("/__pycache__/")
-        || p.starts_with(".gradle/")
-        || p.contains("/.gradle/")
-        || p.starts_with(".m2/")
-        || p.contains("/.m2/")
+    // Each fragment is a real path segment we want to match either at the
+    // path root or after a `/`. Framework caches (`.next/cache/`, etc.) must
+    // be matched specifically so the framework's runtime files (`.next/server/...`)
+    // are not flagged.
+    const FRAGS: &[&str] = &[
+        "node_modules/.cache/",
+        ".git/",
+        "target/debug/",
+        "__pycache__/",
+        ".gradle/",
+        ".m2/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        ".tox/",
+        ".next/cache/",
+        ".nuxt/cache/",
+        ".angular/cache/",
+        ".parcel-cache/",
+        ".ipynb_checkpoints/",
+        ".eslintcache",
+    ];
+    FRAGS
+        .iter()
+        .any(|f| path.starts_with(f) || path.contains(&format!("/{}", f)))
 }
 
 /// Build-time-only artifacts that almost never need to ship in a runtime image.
@@ -145,12 +187,61 @@ fn is_toolchain_binary(path: &str) -> bool {
     let f = path.rsplit('/').next().unwrap_or(path);
     let in_bin = path.starts_with("usr/bin/")
         || path.starts_with("usr/local/bin/")
-        || path.starts_with("bin/");
-    in_bin
-        && matches!(
-            f,
-            "gcc" | "g++" | "cc" | "c++" | "ld" | "as" | "make" | "cmake" | "clang" | "rustc"
-        )
+        || path.starts_with("bin/")
+        || path.starts_with("usr/local/go/bin/");
+    if !in_bin {
+        return false;
+    }
+    const TOOLS: &[&str] = &[
+        // C/C++ compilers
+        "gcc",
+        "g++",
+        "cc",
+        "c++",
+        "clang",
+        "clang++",
+        // assembler / linker
+        "as",
+        "ld",
+        "ld.gold",
+        "ld.lld",
+        // binutils
+        "ar",
+        "nm",
+        "objcopy",
+        "objdump",
+        "ranlib",
+        "strip",
+        "readelf",
+        "addr2line",
+        // build orchestration
+        "make",
+        "cmake",
+        "ninja",
+        "meson",
+        // autotools
+        "autoconf",
+        "autoreconf",
+        "automake",
+        "libtool",
+        "libtoolize",
+        "m4",
+        "bison",
+        "flex",
+        "yacc",
+        "pkg-config",
+        // language toolchains rarely needed at runtime
+        "rustc",
+        "cargo",
+        "go",
+        "gofmt",
+        "javac",
+        "jar",
+        "mvn",
+        "python3-config",
+        "python-config",
+    ];
+    TOOLS.contains(&f)
 }
 
 fn mode_chars(mode: &str) -> Option<Vec<char>> {
@@ -1236,5 +1327,98 @@ mod tests {
         assert!(!is_editor_os_junk("usr/bin/app"));
         assert!(is_world_readable("-rw-r--r--"));
         assert!(!is_world_readable("-rw-------"));
+    }
+
+    #[test]
+    fn pkg_cache_covers_os_and_language_ecosystems() {
+        // OS package managers (existing behaviour).
+        assert!(is_pkg_cache("var/cache/apt/archives/foo.deb"));
+        assert!(is_pkg_cache("var/lib/apt/lists/foo"));
+        assert!(is_pkg_cache("var/cache/apk/index"));
+        assert!(is_pkg_cache("var/cache/dnf/x"));
+        assert!(is_pkg_cache("var/cache/zypp/packages/foo"));
+        // Language ecosystem caches.
+        assert!(is_pkg_cache("root/.cache/pip/wheels/abc.whl"));
+        assert!(is_pkg_cache("home/app/.cache/pip/http/00/aa"));
+        assert!(is_pkg_cache("root/.npm/_cacache/index-v5/00/foo"));
+        assert!(is_pkg_cache("root/.cache/yarn/v6/npm-foo"));
+        assert!(is_pkg_cache("usr/local/share/.cache/yarn/v6/x"));
+        assert!(is_pkg_cache("app/.yarn/cache/foo.zip"));
+        assert!(is_pkg_cache("root/.cache/go-build/00/aa"));
+        assert!(is_pkg_cache("go/pkg/mod/cache/download/sumdb/x"));
+        assert!(is_pkg_cache("root/.cargo/registry/cache/index/foo.crate"));
+        assert!(is_pkg_cache("usr/local/cargo/registry/cache/foo"));
+        assert!(is_pkg_cache("root/.composer/cache/files/x"));
+        assert!(is_pkg_cache("usr/local/bundle/cache/foo.gem"));
+        assert!(is_pkg_cache("opt/conda/pkgs/numpy-1.26.0/x"));
+        // Negatives — must NOT be flagged.
+        assert!(!is_pkg_cache("usr/bin/python3"));
+        assert!(!is_pkg_cache("app/main.py"));
+        assert!(!is_pkg_cache("usr/lib/x86_64-linux-gnu/libc.so.6"));
+        // A directory whose name only *contains* a cache name without the
+        // path-segment boundary must not match.
+        assert!(!is_pkg_cache("app/my.cache/pipx/foo"));
+    }
+
+    #[test]
+    fn dev_artifact_covers_framework_caches() {
+        // Existing behaviour.
+        assert!(is_dev_artifact("app/.git/HEAD"));
+        assert!(is_dev_artifact("srv/__pycache__/foo.cpython-311.pyc"));
+        assert!(is_dev_artifact("usr/src/app/node_modules/.cache/babel/foo"));
+        // New framework caches.
+        assert!(is_dev_artifact("app/.pytest_cache/v/cache/lastfailed"));
+        assert!(is_dev_artifact("app/.mypy_cache/3.11/foo.json"));
+        assert!(is_dev_artifact("app/.ruff_cache/0.1.0/foo"));
+        assert!(is_dev_artifact("app/.tox/py311/lib/x"));
+        assert!(is_dev_artifact("web/.next/cache/webpack/foo.pack"));
+        assert!(is_dev_artifact("web/.nuxt/cache/foo"));
+        assert!(is_dev_artifact("web/.angular/cache/16.0.0/foo"));
+        assert!(is_dev_artifact("web/.parcel-cache/foo"));
+        assert!(is_dev_artifact("nb/.ipynb_checkpoints/foo.ipynb"));
+        assert!(is_dev_artifact(".eslintcache"));
+        // `.next/<not-cache>` is required by Next.js at runtime — must NOT flag.
+        assert!(!is_dev_artifact("web/.next/server/pages/index.js"));
+        assert!(!is_dev_artifact("usr/lib/foo.so"));
+    }
+
+    #[test]
+    fn toolchain_binary_covers_binutils_autotools_and_langs() {
+        // Existing.
+        assert!(is_toolchain_binary("usr/bin/gcc"));
+        assert!(is_toolchain_binary("usr/local/bin/clang"));
+        // Binutils.
+        assert!(is_toolchain_binary("usr/bin/ar"));
+        assert!(is_toolchain_binary("usr/bin/nm"));
+        assert!(is_toolchain_binary("usr/bin/strip"));
+        assert!(is_toolchain_binary("usr/bin/objdump"));
+        assert!(is_toolchain_binary("usr/bin/readelf"));
+        // Autotools.
+        assert!(is_toolchain_binary("usr/bin/autoconf"));
+        assert!(is_toolchain_binary("usr/bin/automake"));
+        assert!(is_toolchain_binary("usr/bin/libtool"));
+        assert!(is_toolchain_binary("usr/bin/pkg-config"));
+        assert!(is_toolchain_binary("usr/bin/m4"));
+        assert!(is_toolchain_binary("usr/bin/bison"));
+        // Build orchestration.
+        assert!(is_toolchain_binary("usr/bin/ninja"));
+        assert!(is_toolchain_binary("usr/bin/meson"));
+        // Language toolchains.
+        assert!(is_toolchain_binary("usr/local/go/bin/go"));
+        assert!(is_toolchain_binary("usr/local/go/bin/gofmt"));
+        assert!(is_toolchain_binary("usr/bin/javac"));
+        assert!(is_toolchain_binary("usr/bin/mvn"));
+        assert!(is_toolchain_binary("usr/local/bin/cargo"));
+        assert!(is_toolchain_binary("usr/local/bin/rustc"));
+        assert!(is_toolchain_binary("usr/bin/python3-config"));
+        // Runtime tools must NOT be flagged (these legitimately ship in many
+        // runtime images).
+        assert!(!is_toolchain_binary("usr/bin/python3"));
+        assert!(!is_toolchain_binary("usr/bin/node"));
+        assert!(!is_toolchain_binary("usr/bin/curl"));
+        assert!(!is_toolchain_binary("usr/bin/git"));
+        // Outside known bin roots — never flag.
+        assert!(!is_toolchain_binary("opt/myapp/gcc"));
+        assert!(!is_toolchain_binary("home/dev/local/bin/gcc"));
     }
 }
