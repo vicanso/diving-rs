@@ -49,7 +49,12 @@ RUN apt-get update \
 COPY --from=builder /diving-rs/target/release/diving /usr/local/bin/diving
 COPY --from=builder --chown=1000:1000 /home/rust /home/rust
 
-ENV RUST_ENV=production
+# `USER 1000:1000` does not create an `/etc/passwd` entry, and Docker
+# does not auto-set `$HOME` for a numeric UID. Without this, $HOME
+# would inherit `/root` from the parent image — UID 1000 can't write
+# there and `~/.diving` creation panics with EACCES.
+ENV RUST_ENV=production \
+    HOME=/home/rust
 
 USER 1000:1000
 WORKDIR /home/rust
