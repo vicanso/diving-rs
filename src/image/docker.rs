@@ -1,6 +1,7 @@
 use crate::config::{load_user_sensitive_patterns, must_load_config};
 use crate::i18n;
 use crate::recommend::{build_recommendations, Recommendation};
+use crate::util::get_http_client;
 use crate::{task_local::*, tl_info};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -8,7 +9,6 @@ use http::StatusCode;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
@@ -24,7 +24,10 @@ use super::{
 };
 use super::{
     layer::ImageLayerInfo,
-    oci_image::{ImageFileSummary, ImageHistory, ImageManifestLayer},
+    oci_image::{
+        detect_cross_layer_duplicates, DuplicateGroup, ImageFileSummary, ImageHistory,
+        ImageManifestLayer,
+    },
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
@@ -38,8 +41,6 @@ use crate::{
 pub enum Error {
     #[snafu(display("IO fail: {source}"))]
     IO { source: std::io::Error },
-    #[snafu(display("Build request {} fail: {}", url, source))]
-    Build { source: reqwest::Error, url: String },
     #[snafu(display("Request {} fail: {}", url, source))]
     Request { source: reqwest::Error, url: String },
     #[snafu(display("Parse {} json fail: {}", url, source))]
@@ -533,6 +534,10 @@ pub struct DockerAnalyzeResult {
     pub tags: Vec<String>,
     // 体积/必要性/安全优化建议（由分析数据派生）
     pub recommendations: Vec<Recommendation>,
+    // 跨层重复文件组（同内容 hash 出现在不同 layer），由 `--no-verify-dup`
+    // 关闭；旧版本/旧 cache 反序列化时为空 vec。
+    #[serde(default)]
+    pub duplicate_groups: Vec<DuplicateGroup>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -746,6 +751,11 @@ pub struct DockerImageParams {
     // 抑制 stderr 进度日志（web 模式下置 true，避免污染服务端日志）
     #[serde(skip)]
     pub quiet: bool,
+    // 是否运行跨层重复文件检测（默认 true）；`--no-verify-dup` 关闭后
+    // 还会同时跳过 analysis cache 的读写，避免缓存里出现「未检测」的
+    // 不完整结果。
+    #[serde(skip)]
+    pub verify_dup: bool,
 }
 
 fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
@@ -798,30 +808,59 @@ impl DockerClient {
         url: String,
         headers: HashMap<String, String>,
     ) -> Result<reqwest::Response> {
-        let mut builder = Client::builder()
-            .build()
-            .context(BuildSnafu { url: url.clone() })?
-            .get(url.clone());
-        builder = builder.timeout(Duration::from_secs(30 * 60));
-        for (key, value) in headers {
-            builder = builder.header(key, value);
-        }
-        let resp = builder
-            .send()
-            .await
-            .context(RequestSnafu { url: url.clone() })?;
-        if resp.status().as_u16() >= StatusCode::UNAUTHORIZED.as_u16() {
-            let err = resp
-                .json::<DockerRequestErrorResp>()
+        // Single retry on HTTP 429. Docker Hub anonymous pulls are
+        // throttled tightly (e.g. 200 requests / 6h / IP), and one short
+        // wait usually clears the rate-limit window. We honor the
+        // `Retry-After` header when present (integer seconds), fall back
+        // to 5s otherwise, and cap at 60s so a misconfigured registry
+        // can't stall the analysis indefinitely.
+        const MAX_ATTEMPTS: u32 = 2;
+        const MAX_BACKOFF_SECS: u64 = 60;
+        const DEFAULT_BACKOFF_SECS: u64 = 5;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut builder = get_http_client()
+                .get(url.clone())
+                .timeout(Duration::from_secs(30 * 60));
+            for (key, value) in headers.iter() {
+                builder = builder.header(key.as_str(), value.as_str());
+            }
+            let resp = builder
+                .send()
                 .await
-                .context(JsonSnafu { url: url.clone() })?;
-            return Err(Error::Docker {
-                message: err.errors[0].message.clone(),
-                code: err.errors[0].code.clone(),
-                url,
-            });
+                .context(RequestSnafu { url: url.clone() })?;
+            let status = resp.status();
+            if status.as_u16() == 429 && attempt < MAX_ATTEMPTS {
+                let wait_secs = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(DEFAULT_BACKOFF_SECS)
+                    .min(MAX_BACKOFF_SECS);
+                tl_info!(
+                    url = url.as_str(),
+                    wait_secs = wait_secs,
+                    attempt = attempt,
+                    "registry returned 429; backing off before retry"
+                );
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+            if status.as_u16() >= StatusCode::UNAUTHORIZED.as_u16() {
+                let err = resp
+                    .json::<DockerRequestErrorResp>()
+                    .await
+                    .context(JsonSnafu { url: url.clone() })?;
+                return Err(Error::Docker {
+                    message: err.errors[0].message.clone(),
+                    code: err.errors[0].code.clone(),
+                    url,
+                });
+            }
+            return Ok(resp);
         }
-        Ok(resp)
+        unreachable!("send_request retry loop always returns or continues")
     }
 
     async fn get_bytes(
@@ -1133,7 +1172,15 @@ impl DockerClient {
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
         let trace_id = TRACE_ID.with(clone_value_from_task_local);
-        let threads = must_load_config().threads.unwrap_or(layers.len()).max(1);
+        // Default cap: `min(layers.len(), 2 × logical CPUs)`. Decompression
+        // is CPU-bound — oversubscribing beyond ~2× yields no extra
+        // throughput, only scheduler contention. Without this cap a 50-layer
+        // image would spawn 50 concurrent decompression tasks regardless of
+        // host CPU count. An explicit `threads:` in `config.yml` overrides.
+        let threads = must_load_config()
+            .threads
+            .unwrap_or_else(|| layers.len().min(num_cpus::get() * 2))
+            .max(1);
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(threads));
 
         let mut handles = Vec::with_capacity(layers.len());
@@ -1166,11 +1213,9 @@ impl DockerClient {
         let img = &params.img;
         let tag = &params.tag;
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
-        let mut builder = Client::builder()
-            .build()
-            .context(BuildSnafu { url: url.clone() })?
-            .head(url.clone());
-        builder = builder.timeout(Duration::from_secs(5 * 60));
+        let builder = get_http_client()
+            .head(url.clone())
+            .timeout(Duration::from_secs(5 * 60));
         let resp = builder
             .send()
             .await
@@ -1215,7 +1260,7 @@ impl DockerClient {
         let tag = &params.tag;
         let token = &params.token;
         let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
-        let client = Client::builder().build().ok()?;
+        let client = get_http_client();
         let accepts = [
             MEDIA_TYPE_IMAGE_INDEX,
             MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
@@ -1252,7 +1297,15 @@ impl DockerClient {
         // the entire layer-fetch + file-tree pipeline. Any HEAD failure
         // (network/4xx/5xx/missing header) is swallowed so the normal
         // flow always remains the fallback path.
-        let cache_digest: Option<String> = self.head_manifest_digest(params).await;
+        // Only consult / populate the analysis cache when duplicate
+        // detection is enabled — otherwise we'd risk reading or writing an
+        // incomplete result. With `--no-verify-dup`, we go straight to a
+        // fresh analyze + skip cache write at the end.
+        let cache_digest: Option<String> = if params.verify_dup {
+            self.head_manifest_digest(params).await
+        } else {
+            None
+        };
         if let Some(digest) = cache_digest.as_deref() {
             if let Some(mut cached) = crate::store::read_analysis(digest, &params.arch).await {
                 tl_info!(digest = digest, "analysis cache hit");
@@ -1516,7 +1569,15 @@ impl DockerClient {
             sensitive_files,
             tags,
             recommendations: vec![],
+            duplicate_groups: vec![],
         };
+        // Cross-layer duplicate detection runs before recommendations so the
+        // recommend layer can emit a card based on the populated groups.
+        // Skipped under `--no-verify-dup` for performance-sensitive CI.
+        if params.verify_dup {
+            result.duplicate_groups =
+                detect_cross_layer_duplicates(&result.layers, &result.file_tree_list);
+        }
         // Pure derived layer — computed from the result that is already built.
         // Localized at generation time from the resolved environment language.
         result.recommendations = build_recommendations(&result, params.lang);
@@ -1536,6 +1597,7 @@ pub async fn analyze_docker_image(
     image_info: ImageInfo,
     lang: crate::i18n::Lang,
     quiet: bool,
+    verify_dup: bool,
 ) -> Result<DockerAnalyzeResult> {
     if image_info.registry == REGISTRY_LOCAL_DOCKER {
         let buf = get_buf_from_local_docker(&image_info.name)?;
@@ -1551,6 +1613,7 @@ pub async fn analyze_docker_image(
             img: filename,
             lang,
             quiet,
+            verify_dup,
             ..Default::default()
         })
         .await
@@ -1563,6 +1626,7 @@ pub async fn analyze_docker_image(
             arch: image_info.arch,
             lang,
             quiet,
+            verify_dup,
             ..Default::default()
         })
         .await

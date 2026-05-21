@@ -664,6 +664,56 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         }
     }
 
+    // Cross-layer duplicate files (multi-stage builders that re-copied
+    // node_modules, .so files, model weights, etc. into the runtime stage).
+    // Populated by `detect_cross_layer_duplicates` during analysis; empty
+    // when `--no-verify-dup` was set (or no large duplicates exist).
+    if !result.duplicate_groups.is_empty() {
+        let total_wasted: u64 = result.duplicate_groups.iter().map(|g| g.total_wasted).sum();
+        let group_count = result.duplicate_groups.len();
+        let severity = if total_wasted >= 50_000_000 {
+            SEVERITY_HIGH
+        } else if total_wasted >= 5_000_000 {
+            SEVERITY_MEDIUM
+        } else {
+            SEVERITY_LOW
+        };
+        // Sample paths from the worst-offending groups, formatted with
+        // their layer index so the user can jump to the offending stage.
+        let mut paths: Vec<String> = Vec::new();
+        for g in result.duplicate_groups.iter().take(PATH_SAMPLE_LIMIT) {
+            let extra = g.count.saturating_sub(1);
+            let sample_path = g
+                .paths
+                .first()
+                .map(|p| format!("L{} {}", p.layer_index + 1, p.path))
+                .unwrap_or_default();
+            paths.push(format!(
+                "{} × {} ({} extra) — {}",
+                sample_path,
+                bytesize::ByteSize(g.size),
+                extra,
+                &g.hash[..g.hash.len().min(12)]
+            ));
+        }
+        out.push(Recommendation {
+            category: CATEGORY_SIZE.into(),
+            severity: severity.into(),
+            title: t("rec.crossdup.title"),
+            detail: f(
+                "rec.crossdup.detail",
+                &[
+                    &bytesize::ByteSize(total_wasted).to_string(),
+                    &group_count.to_string(),
+                ],
+            ),
+            dockerfile_hint: t("rec.crossdup.hint"),
+            est_saved_bytes: total_wasted,
+            heuristic: false,
+            paths,
+        });
+    }
+
     // High layer count.
     if result.layers.len() > 30 {
         out.push(Recommendation {

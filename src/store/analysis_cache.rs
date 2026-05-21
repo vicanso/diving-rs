@@ -28,7 +28,11 @@ use crate::image::DockerAnalyzeResult;
 /// Bump when the on-disk payload format changes incompatibly with prior
 /// releases. Mismatched entries are treated as cache misses and the
 /// cleanup sweep will eventually remove them.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: added `DockerAnalyzeResult::duplicate_groups` (cross-layer dup
+/// detection). v1 caches lack the field and would silently surface zero
+/// duplicates; bump forces a one-time re-analysis.
+const SCHEMA_VERSION: u32 = 2;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

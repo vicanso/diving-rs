@@ -10,6 +10,7 @@ use crate::config;
 use crate::i18n::{self, Lang};
 use crate::image::{get_file_content_from_layer, parse_image_info, DockerAnalyzeResult};
 use crate::store::get_blob_path;
+use crate::util::get_http_client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -251,11 +252,6 @@ pub async fn analyze_with_ai(
         eprintln!("{}", i18n::tr(lang, "ai.compare"));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let body = ChatRequest {
         model: &cfg.model,
         messages: vec![
@@ -272,8 +268,11 @@ pub async fn analyze_with_ai(
         stream: false,
     };
 
-    let resp = client
+    // Inference can be slow; the per-request timeout overrides the
+    // shared client's default-less setting.
+    let resp = get_http_client()
         .post(cfg.endpoint())
+        .timeout(Duration::from_secs(5 * 60))
         .bearer_auth(&cfg.api_key)
         .json(&body)
         .send()

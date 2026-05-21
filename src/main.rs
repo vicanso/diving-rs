@@ -60,6 +60,10 @@ struct Args {
     /// Include base image layers in the analysis (auto-detected and hidden by default)
     #[arg(long)]
     no_skip_base: bool,
+    /// Skip cross-layer duplicate file detection (and its analysis cache),
+    /// trading the dup card for a faster cold analysis. Useful in CI.
+    #[arg(long)]
+    no_verify_dup: bool,
     /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
     #[arg(long)]
     lang: Option<String>,
@@ -147,6 +151,7 @@ async fn analyze(
     image: String,
     output_file: String,
     skip_base: bool,
+    verify_dup: bool,
     lang: i18n::Lang,
     ai_cfg: Option<ai::AiConfig>,
     wecom_cfg: Option<wecom::WecomConfig>,
@@ -159,7 +164,7 @@ async fn analyze(
     }
     let image_info = parse_image_info(&image);
     eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
-    let result = analyze_docker_image(image_info, lang, false)
+    let result = analyze_docker_image(image_info, lang, false, verify_dup)
         .await
         .map_err(|item| item.to_string())?;
     // AI analysis takes precedence: print the model's report and skip the TUI.
@@ -348,7 +353,6 @@ fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> Strin
     s
 }
 
-#[tokio::main]
 async fn run(args: Args) {
     // 启动时确保可以读取配置
     config::must_load_config();
@@ -363,6 +367,9 @@ async fn run(args: Args) {
         // Base layers are auto-detected and hidden by default; --no-skip-base
         // opts back in.
         let skip_base = !args.no_skip_base;
+        // Cross-layer duplicate detection is on by default; --no-verify-dup
+        // skips it (and bypasses the analysis cache).
+        let verify_dup = !args.no_verify_dup;
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
@@ -370,6 +377,7 @@ async fn run(args: Args) {
                         value,
                         args.output_file.unwrap_or_default(),
                         skip_base,
+                        verify_dup,
                         lang,
                         ai_cfg,
                         wecom_cfg,
@@ -454,13 +462,28 @@ async fn shutdown_signal() {
 }
 
 fn main() {
-    // Because we need to get the local offset before Tokio spawns any threads, our `main`
-    // function cannot use `tokio::main`.
+    // `OffsetTime::local_rfc_3339` (in init_logger) must read the local
+    // timezone before Tokio spawns any worker threads — so we build the
+    // runtime explicitly here instead of using `#[tokio::main]`. As a
+    // bonus, this lets us size the worker pool from `config.threads`,
+    // unifying the "how parallel?" knob across tokio and the per-image
+    // layer semaphore.
     std::panic::set_hook(Box::new(|e| {
         error!(category = "panic", message = e.to_string(),);
         std::process::exit(1);
     }));
     let args = Args::parse();
     init_logger(args.is_terminal_type());
-    run(args);
+
+    let worker_threads = config::must_load_config()
+        .threads
+        .unwrap_or_else(num_cpus::get)
+        .max(1);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(worker_threads)
+        .build()
+        .unwrap_or_else(|e| panic!("failed to build tokio runtime: {e}"))
+        .block_on(run(args));
 }

@@ -26,7 +26,7 @@ The config file is `~/.diving/config.yml`, the options:
 - `layer_ttl`: The TTL of cached layer blobs AND analysis results, default is `90d`. An entry is purged if it has not been accessed for the specified duration
 - `analysis_path`: The path of the analysis-result cache, default is `~/.diving/analysis`
 - `cleanup_interval_hours`: How often (in hours) the caches are scanned for expired entries, default is `1`
-- `threads`: Number of threads for parallel layer downloads, default is the number of logical CPUs
+- `threads`: Concurrent layer fetch + decompression tasks, default is `min(layers.len(), 2 × logical CPUs)`. Setting it explicitly always wins (raise on fast networks with lots of layers, lower if other workloads share the host)
 - `lowest_efficiency`: CI check — minimum acceptable efficiency score (0–1), default is `0.95`
 - `highest_wasted_bytes`: CI check — maximum wasted bytes, default is `20971520` (20 MB)
 - `highest_user_wasted_percent`: CI check — maximum wasted percentage (0–1), default is `0.1`

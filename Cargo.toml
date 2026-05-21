@@ -10,6 +10,9 @@ license = "Apache-2.0"
 [dependencies]
 axum = "0.8.9"
 axum-client-ip = "1.3.1"
+# blake3 hashes file contents for cross-layer duplicate detection (~3 GB/s
+# with AVX2, so hash compute is dwarfed by tar decompression).
+blake3 = "1.8.5"
 bytes = "1.11.1"
 bytesize = { version = "2.3.1", features = ["serde"] }
 chrono = "0.4.44"
@@ -17,20 +20,23 @@ clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 config = "0.15.22"
 crossterm = "0.29.0"
+# gzip layer decompression. flate2's default (miniz_oxide) is ~2x faster
+# than libflate in our measured workloads; pure-Rust, no extra C deps.
+flate2 = "1.1.9"
 futures = "0.3.32"
 glob = "0.3.3"
 hex = "0.4.3"
 home = "0.5.12"
 http = "1.4.0"
 humantime = "2.3.0"
-libflate = "2.3.0"
 lru = "0.18.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
 # Replaces the system allocator with mimalloc to reduce lock contention and
 # fragmentation on the multi-threaded reqwest + tar/zstd decompression hot path.
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1.50", default-features = false }
 nanoid = "0.5.0"
+num_cpus = "1.17.0"
 once_cell = "1.21.4"
 pad = "0.1.6"
 ratatui = "0.30.0"
@@ -52,7 +58,7 @@ tar = "0.4.45"
 tempfile = "3.27.0"
 textwrap = "0.16.2"
 time = "0.3.47"
-tokio = { version = "1.52.1", features = [
+tokio = { version = "1.52.3", features = [
     "macros",
     "rt",
     "rt-multi-thread",

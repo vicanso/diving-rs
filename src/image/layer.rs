@@ -1,7 +1,8 @@
 use crate::error::HTTPError;
-use libflate::gzip::Decoder as GzipDecoder;
+use flate2::read::MultiGzDecoder as GzipDecoder;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -15,8 +16,6 @@ pub enum Error {
     NotFound,
     #[snafu(display("Read fail: {}", source))]
     Read { source: std::io::Error },
-    #[snafu(display("Gzip decode fail: {}", source))]
-    GzipDecode { source: std::io::Error },
     #[snafu(display("Zstd decode fail: {}", source))]
     ZstdDecode { source: std::io::Error },
     #[snafu(display("Tar fail: {}", source))]
@@ -51,6 +50,28 @@ impl<R: Read> Read for CountingReader<R> {
     }
 }
 
+/// Reject tar entries whose paths could escape the conceptual layer root
+/// (absolute paths or any component equal to `..`). diving never extracts
+/// these to disk, but unsafe entries would still pollute the in-memory
+/// file tree and the report, so they are filtered at ingestion.
+fn is_safe_tar_path(path: &str) -> bool {
+    let p = path.trim_start_matches("./");
+    if p.starts_with('/') || p.starts_with('\\') {
+        return false;
+    }
+    // Windows-style drive letter, e.g. `C:\...`.
+    let bytes = p.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    for component in p.split(['/', '\\']) {
+        if component == ".." {
+            return false;
+        }
+    }
+    true
+}
+
 /// Parse every tar entry header from `archive`, collecting file metadata.
 /// File content is never read — the tar crate reads and discards it when
 /// advancing to the next entry.
@@ -71,6 +92,11 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
             .context(TarSnafu {})?
             .to_string_lossy()
             .to_string();
+        // Defense: silently skip malicious paths so they never enter the
+        // file tree, the recommendations, or the AI payload.
+        if !is_safe_tar_path(&path) {
+            continue;
+        }
         let mut is_whiteout = None;
         if let Some(filename) = Path::new(&path).file_name() {
             let name = filename.to_string_lossy();
@@ -167,7 +193,7 @@ pub fn get_os_release_from_layer<R: Read>(
     }
 
     if media_type.contains("gzip") {
-        scan!(GzipDecoder::new(reader).ok()?)
+        scan!(GzipDecoder::new(reader))
     } else if media_type.contains("zstd") {
         scan!(zstd::Decoder::new(reader).ok()?)
     } else {
@@ -202,11 +228,70 @@ pub fn get_file_content_from_layer<R: Read>(
     }
 
     if media_type.contains("gzip") {
-        find_file!(GzipDecoder::new(reader).context(GzipDecodeSnafu {})?)
+        find_file!(GzipDecoder::new(reader))
     } else if media_type.contains("zstd") {
         find_file!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
     } else {
         find_file!(reader)
+    }
+}
+
+/// Hash a known set of files from a layer in a single tar pass.
+///
+/// Walks the (decompressed) archive entries, and for each entry whose
+/// path is in `targets`, streams its bytes through blake3. Returns a
+/// map keyed by the caller's spelling of the path (so the result can be
+/// joined back to the candidate list without re-normalizing).
+///
+/// Tars store paths in two common ways — bare (`foo/bar.so`) or with a
+/// leading `./` (`./foo/bar.so`). Both forms are matched against
+/// `targets`, so the caller can pass either.
+pub fn hash_files_from_layer<R: Read>(
+    reader: R,
+    media_type: &str,
+    targets: &HashSet<String>,
+) -> Result<HashMap<String, String>> {
+    if targets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    macro_rules! walk {
+        ($reader:expr) => {{
+            let mut out: HashMap<String, String> = HashMap::new();
+            let mut archive = Archive::new($reader);
+            for entry in archive.entries().context(TarSnafu {})? {
+                let mut entry = entry.context(TarSnafu {})?;
+                let raw = entry
+                    .path()
+                    .context(TarSnafu {})?
+                    .to_string_lossy()
+                    .into_owned();
+                let normalized = raw.trim_start_matches("./");
+                let key = if targets.contains(&raw) {
+                    Some(raw.clone())
+                } else if targets.contains(normalized) {
+                    Some(normalized.to_string())
+                } else {
+                    None
+                };
+                if let Some(k) = key {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update_reader(&mut entry).context(ReadSnafu {})?;
+                    out.insert(k, hasher.finalize().to_hex().to_string());
+                    if out.len() >= targets.len() {
+                        // All wanted files located; stop early.
+                        break;
+                    }
+                }
+            }
+            Ok(out)
+        }};
+    }
+    if media_type.contains("gzip") {
+        walk!(GzipDecoder::new(reader))
+    } else if media_type.contains("zstd") {
+        walk!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
+    } else {
+        walk!(reader)
     }
 }
 
@@ -236,7 +321,7 @@ pub fn get_files_from_layer<R: Read>(
     }
 
     let (files, unpack_size) = if media_type.contains("gzip") {
-        parse_layer!(GzipDecoder::new(reader).context(GzipDecodeSnafu {})?)
+        parse_layer!(GzipDecoder::new(reader))
     } else if media_type.contains("zstd") {
         parse_layer!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
     } else {
@@ -248,4 +333,28 @@ pub fn get_files_from_layer<R: Read>(
         size: compressed_size,
         unpack_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_tar_paths_accept_normal_entries() {
+        assert!(is_safe_tar_path("usr/bin/app"));
+        assert!(is_safe_tar_path("./etc/os-release"));
+        assert!(is_safe_tar_path("var/lib/dpkg/status"));
+        assert!(is_safe_tar_path("a/b/c/d.txt"));
+    }
+
+    #[test]
+    fn safe_tar_paths_reject_traversal_and_absolute() {
+        assert!(!is_safe_tar_path("/etc/passwd"));
+        assert!(!is_safe_tar_path("\\windows\\system32\\cmd.exe"));
+        assert!(!is_safe_tar_path("../etc/shadow"));
+        assert!(!is_safe_tar_path("a/../../etc/shadow"));
+        assert!(!is_safe_tar_path("foo/../bar"));
+        assert!(!is_safe_tar_path("C:\\windows\\system32"));
+        assert!(!is_safe_tar_path("./../etc/shadow"));
+    }
 }

@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh |
 - `layer_ttl`: 分层数据缓存与分析结果缓存的有效期，默认为`90d`，若超过指定时间未再访问则该条目被清除
 - `analysis_path`: 分析结果缓存目录，默认为`~/.diving/analysis`
 - `cleanup_interval_hours`: 扫描并清除过期缓存的间隔时间（单位：小时），默认为`1`
-- `threads`: 并行下载 layer 的线程数，默认为逻辑 CPU 核心数
+- `threads`: 并发 layer 拉取 + 解压任务数，默认为 `min(layers.len(), 逻辑 CPU 数 × 2)`。在配置文件中显式设置优先级最高（网络快且层数多时可调大，机器还跑其它负载时可调小）
 - `lowest_efficiency`: CI 检查——最低可接受的镜像效率（0–1），默认为`0.95`
 - `highest_wasted_bytes`: CI 检查——最大允许的浪费字节数，默认为`20971520`（20 MB）
 - `highest_user_wasted_percent`: CI 检查——最大允许的浪费比例（0–1），默认为`0.1`

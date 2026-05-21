@@ -305,6 +305,214 @@ pub fn convert_files_to_file_tree(
     file_tree
 }
 
+// ---- Cross-layer duplicate file detection ---------------------------
+
+/// One occurrence of a file that is duplicated across layers.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatePath {
+    pub layer_index: usize,
+    pub path: String,
+}
+
+/// A set of two-or-more byte-identical files spread across two-or-more
+/// distinct layers. `total_wasted = (count - 1) * size` — every copy
+/// beyond the first is redundant on disk.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateGroup {
+    /// blake3 hex of the file contents — the source of truth confirming
+    /// these really are byte-identical, not just same name + same size.
+    pub hash: String,
+    /// Size in bytes of each individual copy.
+    pub size: u64,
+    /// Total number of duplicates observed (≥ 2).
+    pub count: usize,
+    /// `(count - 1) * size` — bytes that could be reclaimed if only one
+    /// copy were kept.
+    pub total_wasted: u64,
+    /// Per-copy locations. Bounded sample (`DUP_PATHS_SAMPLE`).
+    pub paths: Vec<DuplicatePath>,
+}
+
+/// Files below this size are skipped. The verify cost dominates and the
+/// false-positive rate (many small files happen to share name + size) is
+/// too high to act on.
+const MIN_DUP_FILE_SIZE: u64 = 64 * 1024;
+
+/// Hard cap on candidate files hashed per analysis to keep verification
+/// bounded on pathological images.
+const MAX_DUP_CANDIDATES: usize = 500;
+
+/// Sample size kept in each `DuplicateGroup` for the report.
+const DUP_PATHS_SAMPLE: usize = 8;
+
+#[derive(Debug, Clone)]
+struct DupLeaf {
+    layer_idx: usize,
+    path: String,
+    name: String,
+    size: u64,
+}
+
+fn walk_for_dup(items: &[FileTreeItem], prefix: &str, layer_idx: usize, out: &mut Vec<DupLeaf>) {
+    for item in items {
+        let path = if prefix.is_empty() {
+            item.name.clone()
+        } else {
+            format!("{}/{}", prefix, item.name)
+        };
+        if item.children.is_empty() {
+            // Whiteouts are not real content; skip.
+            if item.op == Op::Removed {
+                continue;
+            }
+            if item.size < MIN_DUP_FILE_SIZE {
+                continue;
+            }
+            out.push(DupLeaf {
+                layer_idx,
+                name: item.name.clone(),
+                size: item.size,
+                path,
+            });
+        } else {
+            walk_for_dup(&item.children, &path, layer_idx, out);
+        }
+    }
+}
+
+/// Detect files that appear with identical content in two or more layers
+/// (e.g. a multi-stage build that re-copies the entire `node_modules`,
+/// `.so` files, or model weights from the builder stage).
+///
+/// Pipeline:
+///   1. Collect leaves ≥ `MIN_DUP_FILE_SIZE`, skipping whiteouts.
+///   2. Group by `(name, size)`; keep only groups spanning ≥ 2 layers.
+///   3. Cap at `MAX_DUP_CANDIDATES` (largest first).
+///   4. Per-layer batched blake3 verification — each layer's tar is
+///      opened and walked exactly once.
+///   5. Cluster by hash; keep clusters spanning ≥ 2 layers.
+///
+/// Returns an empty vec on no significant duplication, missing layer
+/// blobs, or any I/O failure (best-effort — never bubbles an error).
+pub fn detect_cross_layer_duplicates(
+    layers: &[ImageLayer],
+    file_tree_list: &[Vec<FileTreeItem>],
+) -> Vec<DuplicateGroup> {
+    let mut leaves: Vec<DupLeaf> = Vec::new();
+    for (idx, tree) in file_tree_list.iter().enumerate() {
+        walk_for_dup(tree, "", idx, &mut leaves);
+    }
+    if leaves.len() < 2 {
+        return vec![];
+    }
+
+    // (name, size) initial filter — cheap and gets the false-positive
+    // rate manageable before we read any blob bytes.
+    let mut by_ns: HashMap<(String, u64), Vec<usize>> = HashMap::new();
+    for (i, leaf) in leaves.iter().enumerate() {
+        by_ns
+            .entry((leaf.name.clone(), leaf.size))
+            .or_default()
+            .push(i);
+    }
+    let mut candidate_idxs: Vec<usize> = Vec::new();
+    for idxs in by_ns.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let mut seen_layers = HashSet::new();
+        for &i in idxs {
+            seen_layers.insert(leaves[i].layer_idx);
+        }
+        if seen_layers.len() < 2 {
+            continue;
+        }
+        candidate_idxs.extend(idxs);
+    }
+    if candidate_idxs.is_empty() {
+        return vec![];
+    }
+    // Cap: hash the largest first so the worst offenders never get
+    // dropped by the limit.
+    candidate_idxs.sort_by_key(|&i| std::cmp::Reverse(leaves[i].size));
+    candidate_idxs.truncate(MAX_DUP_CANDIDATES);
+
+    // Batch hashing — one tar pass per layer.
+    let mut by_layer: HashMap<usize, HashSet<String>> = HashMap::new();
+    for &i in &candidate_idxs {
+        by_layer
+            .entry(leaves[i].layer_idx)
+            .or_default()
+            .insert(leaves[i].path.clone());
+    }
+    let mut hashes: HashMap<(usize, String), String> = HashMap::new();
+    for (layer_idx, paths) in by_layer {
+        let Some(layer) = layers.get(layer_idx) else {
+            continue;
+        };
+        let blob = crate::store::get_blob_path(&layer.digest);
+        let Ok(file) = std::fs::File::open(&blob) else {
+            continue;
+        };
+        let reader = std::io::BufReader::new(file);
+        if let Ok(map) = super::layer::hash_files_from_layer(reader, &layer.media_type, &paths) {
+            for (p, h) in map {
+                hashes.insert((layer_idx, p), h);
+            }
+        }
+    }
+
+    // Cluster by hash; demand ≥ 2 copies AND ≥ 2 layers.
+    let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();
+    for &i in &candidate_idxs {
+        if let Some(h) = hashes.get(&(leaves[i].layer_idx, leaves[i].path.clone())) {
+            by_hash.entry(h.clone()).or_default().push(i);
+        }
+    }
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    for (hash, idxs) in by_hash {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let mut layer_set = HashSet::new();
+        for &i in &idxs {
+            layer_set.insert(leaves[i].layer_idx);
+        }
+        if layer_set.len() < 2 {
+            continue;
+        }
+        let size = leaves[idxs[0]].size;
+        let count = idxs.len();
+        let total_wasted = ((count as u64).saturating_sub(1)) * size;
+        let mut paths: Vec<DuplicatePath> = idxs
+            .iter()
+            .map(|&i| DuplicatePath {
+                layer_index: leaves[i].layer_idx,
+                path: leaves[i].path.clone(),
+            })
+            .collect();
+        paths.sort_by(|a, b| {
+            a.layer_index
+                .cmp(&b.layer_index)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        paths.truncate(DUP_PATHS_SAMPLE);
+        groups.push(DuplicateGroup {
+            hash,
+            size,
+            count,
+            total_wasted,
+            paths,
+        });
+    }
+    // Largest waste first so the report's leading entry is the most
+    // actionable.
+    groups.sort_by_key(|g| std::cmp::Reverse(g.total_wasted));
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

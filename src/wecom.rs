@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::util::get_http_client;
+
 // WeCom markdown content hard limit is 4096 bytes; keep margin for the
 // truncation marker and any multibyte boundary backoff.
 const MAX_CONTENT_BYTES: usize = 4000;
@@ -90,18 +92,14 @@ struct WecomResponse {
 pub async fn send_markdown(cfg: &WecomConfig, content: &str) -> Result<(), String> {
     let content = clamp(content);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let body = WecomRequest {
         msgtype: "markdown",
         markdown: MarkdownBody { content: &content },
     };
 
-    let resp = client
+    let resp = get_http_client()
         .post(&cfg.webhook)
+        .timeout(Duration::from_secs(30))
         .json(&body)
         .send()
         .await
