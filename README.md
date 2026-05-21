@@ -198,7 +198,7 @@ docker run -d --restart=always \
 
 The container runs as a non-root UID (`1000:1000`). The `chown` command above grants ownership of the host directory to that UID — without it the container cannot write layer cache files and will fail to start.
 
-The image is based on `gcr.io/distroless/base-debian12` (no shell, no package manager, glibc runtime). Because the image ships no `wget`/`curl`, no Dockerfile-level `HEALTHCHECK` is set — probe `GET /ping` from your orchestrator instead (Kubernetes `livenessProbe`, an external `curl` sidecar in Docker Compose, etc.).
+The image is based on `debian:bookworm-slim` (glibc runtime with shell + apt for `docker exec` debugging; `ca-certificates` and `tzdata` installed at build time). Because the image ships no `wget`/`curl` by default, no Dockerfile-level `HEALTHCHECK` is set — probe `GET /ping` from your orchestrator instead (Kubernetes `livenessProbe`, an external `curl` sidecar in Docker Compose, etc.), or install `wget`/`curl` in a derived image to re-enable an in-image probe.
 
 To change the listen address, pass `--listen`:
 
