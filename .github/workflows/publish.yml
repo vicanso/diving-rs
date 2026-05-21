@@ -192,10 +192,15 @@ jobs:
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
       - name: Create and push multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
+        # Tag the same manifest with both the version (e.g. `0.8.5`) and
+        # `latest`. `imagetools create` accepts multiple `-t` and only
+        # writes manifest references — no blobs are re-uploaded.
         run: |
           docker buildx imagetools create \
             -t ${{ env.IMAGE_NAME }}:${{ env.VERSION }} \
+            -t ${{ env.IMAGE_NAME }}:latest \
             $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest
