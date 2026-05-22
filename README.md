@@ -151,8 +151,9 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 | `--ai-base-url` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API base URL. A full `.../chat/completions` URL is also accepted. |
 | `--ai-model` | `OPENAI_MODEL` | `gpt-4o` | Model name. |
 | `--lang` | `DIVING_LANG` | system locale | Output language: `en` or `zh`. |
+| `--no-ai-history` | — | off | Skip reading the previous snapshot, so the report does no regression comparison this run. The current analysis is still recorded as the new baseline. |
 
-Each run stores a snapshot of the analysis under `~/.diving/ai_history/`. On the next run of the same image, the previous snapshot is sent alongside the current one so the model can flag size regressions / bloat between versions.
+Each run stores a snapshot of the analysis under `~/.diving/ai_history/`. On the next run of the same image, the previous snapshot is sent alongside the current one so the model can flag size regressions / bloat between versions. Pass `--no-ai-history` to skip that comparison for one run (e.g. when the stored baseline is stale or unrelated); the snapshot is still refreshed so subsequent runs compare against this one.
 
 ## WeCom push
 

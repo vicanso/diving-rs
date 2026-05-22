@@ -64,6 +64,11 @@ struct Args {
     /// trading the dup card for a faster cold analysis. Useful in CI.
     #[arg(long)]
     no_verify_dup: bool,
+    /// Skip reading the previous AI-history snapshot — the AI report does no
+    /// regression comparison this run (the current analysis is still recorded
+    /// for future runs). Only affects AI mode (`--ai-api-key`).
+    #[arg(long)]
+    no_ai_history: bool,
     /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
     #[arg(long)]
     lang: Option<String>,
@@ -146,16 +151,30 @@ fn is_ci() -> bool {
     env::var_os("CI").unwrap_or_default() == "true"
 }
 
-// 分析镜像（错误直接以字符串返回）
-async fn analyze(
+// 镜像分析的入参集合（由 CLI args 解析而来）。
+struct AnalyzeOptions {
     image: String,
     output_file: String,
     skip_base: bool,
     verify_dup: bool,
+    no_ai_history: bool,
     lang: i18n::Lang,
     ai_cfg: Option<ai::AiConfig>,
     wecom_cfg: Option<wecom::WecomConfig>,
-) -> Result<(), String> {
+}
+
+// 分析镜像（错误直接以字符串返回）
+async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
+    let AnalyzeOptions {
+        image,
+        output_file,
+        skip_base,
+        verify_dup,
+        no_ai_history,
+        lang,
+        ai_cfg,
+        wecom_cfg,
+    } = opts;
     // 命令行模式下清除过期数据
     clear_blob_files().await.map_err(|item| item.to_string())?;
     // Analysis-cache sweep is best-effort — never fail the CLI on cleanup.
@@ -178,7 +197,7 @@ async fn analyze(
             md.push_str("\n\n");
             md.push_str(&scripts);
         }
-        let report = ai::analyze_with_ai(&image, &md, &ai_cfg, lang)
+        let report = ai::analyze_with_ai(&image, &md, &ai_cfg, lang, no_ai_history)
             .await
             .map_err(|e| i18n::fill(i18n::tr(lang, "ai.fail"), &[&e]))?;
         println!("{}", i18n::tr(lang, "ai.report").bold().green());
@@ -373,15 +392,16 @@ async fn run(args: Args) {
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    if let Err(err) = analyze(
-                        value,
-                        args.output_file.unwrap_or_default(),
+                    if let Err(err) = analyze(AnalyzeOptions {
+                        image: value,
+                        output_file: args.output_file.unwrap_or_default(),
                         skip_base,
                         verify_dup,
+                        no_ai_history: args.no_ai_history,
                         lang,
                         ai_cfg,
                         wecom_cfg,
-                    )
+                    })
                     .await
                     {
                         error!(err, "analyze image fail");

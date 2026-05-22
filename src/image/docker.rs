@@ -13,7 +13,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::io::{BufReader, Write};
-use std::process::{Command, Stdio};
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
 use substring::Substring;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -758,16 +757,15 @@ pub struct DockerImageParams {
     pub verify_dup: bool,
 }
 
-fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
+async fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
     tl_info!(image = image, "saving image");
-    let docker_save = Command::new("docker")
+    // tokio's Command runs `docker save` without blocking an async worker;
+    // `.output()` captures stdout (the image tar) for us.
+    let output = tokio::process::Command::new("docker")
         .arg("save")
         .arg(image)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|err| Error::IO { source: err })?;
-    let output = docker_save
-        .wait_with_output()
+        .output()
+        .await
         .map_err(|err| Error::IO { source: err })?;
     if !output.status.success() {
         return Err(Error::Whatever {
@@ -776,6 +774,31 @@ fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
     }
     tl_info!(image = image, "save image done");
     Ok(output.stdout)
+}
+
+// Async wrappers that run the synchronous local-tar readers on the blocking
+// pool, so the `file://` / `docker://` analysis path never blocks an async
+// worker while walking/extracting from an on-disk image tar.
+async fn tar_content(tar: &str, filename: &str) -> Result<Vec<u8>> {
+    let tar = tar.to_string();
+    let filename = filename.to_string();
+    tokio::task::spawn_blocking(move || get_file_content_from_tar(&tar, &filename))
+        .await
+        .map_err(|e| Error::Whatever {
+            message: format!("tar read task failed: {e}"),
+        })?
+        .context(LayerSnafu {})
+}
+
+async fn tar_size(tar: &str, filename: &str) -> Result<u64> {
+    let tar = tar.to_string();
+    let filename = filename.to_string();
+    tokio::task::spawn_blocking(move || get_file_size_from_tar(&tar, &filename))
+        .await
+        .map_err(|e| Error::Whatever {
+            message: format!("tar read task failed: {e}"),
+        })?
+        .context(LayerSnafu {})
 }
 
 impl DockerClient {
@@ -788,9 +811,7 @@ impl DockerClient {
         self.registry == REGISTRY_LOCAL_FILE
     }
     async fn get_local_manifest(&self, image: &str) -> Result<LocalManifest> {
-        let data = get_file_content_from_tar(image, "manifest.json")
-            .await
-            .context(LayerSnafu {})?;
+        let data = tar_content(image, "manifest.json").await?;
 
         let manifest_list =
             serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {
@@ -977,9 +998,7 @@ impl DockerClient {
             let local_manifest = self.get_local_manifest(img).await?;
             let mut image_manifest: ImageManifest = local_manifest.into();
             for layer in image_manifest.layers.iter_mut() {
-                let size = get_file_size_from_tar(img, &layer.digest)
-                    .await
-                    .context(LayerSnafu {})?;
+                let size = tar_size(img, &layer.digest).await?;
                 layer.size = size;
             }
             return Ok((image_manifest, vec![]));
@@ -1055,9 +1074,7 @@ impl DockerClient {
         let img = &params.img;
         let data = if self.is_local() {
             let local_manifest = self.get_local_manifest(img).await?;
-            get_file_content_from_tar(img, &local_manifest.config)
-                .await
-                .context(LayerSnafu {})?
+            tar_content(img, &local_manifest.config).await?
         } else {
             let (manifest, _) = self.get_manifest(params).await?;
             self.get_blob(params, &manifest.config.digest).await?
@@ -1099,9 +1116,7 @@ impl DockerClient {
     ) -> Result<ImageLayerInfo> {
         let img = &params.img;
         if self.is_local() {
-            let buf = get_file_content_from_tar(img, &layer.digest)
-                .await
-                .context(LayerSnafu {})?;
+            let buf = tar_content(img, &layer.digest).await?;
             let compressed_size = buf.len() as u64;
             let media_type = layer.media_type.clone();
             return tokio::task::block_in_place(|| {
@@ -1550,6 +1565,24 @@ impl DockerClient {
             tags.push(format!("[High Layer Count: {}]", layers.len()));
         }
 
+        // Cross-layer duplicate detection decompresses + blake3-hashes layer
+        // blobs (CPU + blocking I/O), so run it on the blocking pool via
+        // `spawn_blocking`. The owned `layers` + `file_tree_list` are moved
+        // in and handed back out — zero clone. Skipped under
+        // `--no-verify-dup` for performance-sensitive CI.
+        let (layers, file_tree_list, duplicate_groups) = if params.verify_dup {
+            tokio::task::spawn_blocking(move || {
+                let dup = detect_cross_layer_duplicates(&layers, &file_tree_list);
+                (layers, file_tree_list, dup)
+            })
+            .await
+            .map_err(|e| Error::Whatever {
+                message: format!("duplicate detection task failed: {e}"),
+            })?
+        } else {
+            (layers, file_tree_list, vec![])
+        };
+
         let mut result = DockerAnalyzeResult {
             name: image_name,
             arch: config.architecture,
@@ -1569,15 +1602,8 @@ impl DockerClient {
             sensitive_files,
             tags,
             recommendations: vec![],
-            duplicate_groups: vec![],
+            duplicate_groups,
         };
-        // Cross-layer duplicate detection runs before recommendations so the
-        // recommend layer can emit a card based on the populated groups.
-        // Skipped under `--no-verify-dup` for performance-sensitive CI.
-        if params.verify_dup {
-            result.duplicate_groups =
-                detect_cross_layer_duplicates(&result.layers, &result.file_tree_list);
-        }
         // Pure derived layer — computed from the result that is already built.
         // Localized at generation time from the resolved environment language.
         result.recommendations = build_recommendations(&result, params.lang);
@@ -1600,7 +1626,7 @@ pub async fn analyze_docker_image(
     verify_dup: bool,
 ) -> Result<DockerAnalyzeResult> {
     if image_info.registry == REGISTRY_LOCAL_DOCKER {
-        let buf = get_buf_from_local_docker(&image_info.name)?;
+        let buf = get_buf_from_local_docker(&image_info.name).await?;
         let mut tmpfile = tempfile::Builder::new().tempfile().unwrap();
         let filename = tmpfile.path().to_string_lossy().to_string();
         tl_info!("saving tmp file");

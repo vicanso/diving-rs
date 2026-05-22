@@ -234,15 +234,24 @@ fn write_history(image: &str, md: &str) {
 /// Send the current analysis (and the previous snapshot, if any) to the
 /// OpenAI-compatible endpoint and return the model's report. The snapshot is
 /// refreshed with the current analysis so the next run can diff against it.
+///
+/// When `skip_history` is set (`--no-ai-history`), the prior snapshot is NOT
+/// read, so the model does no regression comparison this run. The current
+/// analysis is still written so later runs have a fresh baseline.
 pub async fn analyze_with_ai(
     image: &str,
     current_md: &str,
     cfg: &AiConfig,
     lang: Lang,
+    skip_history: bool,
 ) -> Result<String, String> {
     // Best-effort history: read the prior snapshot, then overwrite it so the
     // next run compares against this analysis. History I/O never aborts.
-    let prev = read_history(image);
+    let prev = if skip_history {
+        None
+    } else {
+        read_history(image)
+    };
     write_history(image, current_md);
 
     let user_content = build_user_message(lang, prev.as_deref(), current_md);

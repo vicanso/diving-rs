@@ -120,8 +120,8 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
     Ok(files)
 }
 
-// 从tar中读取文件信息
-pub async fn get_file_size_from_tar(tar: &str, filename: &str) -> Result<u64> {
+// 从tar中读取文件信息（同步阻塞 I/O；调用方负责在 spawn_blocking 中运行）
+pub fn get_file_size_from_tar(tar: &str, filename: &str) -> Result<u64> {
     let file = File::open(tar).context(TarSnafu {})?;
     let mut a = Archive::new(file);
     for file in a.entries().context(TarSnafu {})? {
@@ -138,8 +138,8 @@ pub async fn get_file_size_from_tar(tar: &str, filename: &str) -> Result<u64> {
     Ok(0)
 }
 
-// 从tar中读取文件内容
-pub async fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
+// 从tar中读取文件内容（同步阻塞 I/O；调用方负责在 spawn_blocking 中运行）
+pub fn get_file_content_from_tar(tar: &str, filename: &str) -> Result<Vec<u8>> {
     let file = File::open(tar).context(TarSnafu {})?;
     let mut a = Archive::new(file);
     for file in a.entries().context(TarSnafu {})? {

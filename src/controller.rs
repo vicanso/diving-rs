@@ -119,22 +119,25 @@ impl IntoResponse for DownloadFile {
 
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
     let path = get_blob_path(&params.digest);
-    let (name, content) = tokio::task::block_in_place(|| -> HTTPResult<(String, Vec<u8>)> {
+    let media_type = params.media_type;
+    let file_path = params.file;
+    // Decompression runs on the blocking pool so request-serving async
+    // workers stay free even while extracting from a large layer.
+    let (name, content) = tokio::task::spawn_blocking(move || -> HTTPResult<(String, Vec<u8>)> {
         let file = std::fs::File::open(&path)
             .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))?;
-        let content = get_file_content_from_layer(
-            std::io::BufReader::new(file),
-            &params.media_type,
-            &params.file,
-        )?;
-        let raw_name = params.file.split('/').next_back().unwrap_or_default();
+        let content =
+            get_file_content_from_layer(std::io::BufReader::new(file), &media_type, &file_path)?;
+        let raw_name = file_path.split('/').next_back().unwrap_or_default();
         // Strip characters that would break the Content-Disposition header value
         let name = raw_name
             .chars()
             .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
             .collect::<String>();
         Ok((name, content))
-    })?;
+    })
+    .await
+    .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))??;
     Ok(DownloadFile { name, content })
 }
 

@@ -148,8 +148,9 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 | `--ai-base-url` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | 接口地址，也可直接传入完整的 `.../chat/completions` 地址。 |
 | `--ai-model` | `OPENAI_MODEL` | `gpt-4o` | 模型名称。 |
 | `--lang` | `DIVING_LANG` | 系统语言 | 输出语言：`en` 或 `zh`。 |
+| `--no-ai-history` | — | 关闭 | 跳过读取上一次快照，本次报告不做劣化对比；本次分析仍会作为新基线被记录。 |
 
-每次运行会将本次分析快照保存到 `~/.diving/ai_history/`。下次分析同一镜像时，会把上一次的快照与本次一并发送给模型，便于其识别新老版本之间的体积劣化/膨胀。
+每次运行会将本次分析快照保存到 `~/.diving/ai_history/`。下次分析同一镜像时，会把上一次的快照与本次一并发送给模型，便于其识别新老版本之间的体积劣化/膨胀。加上 `--no-ai-history` 可在单次运行中跳过该对比（例如基线已过期或与当前镜像无关）；快照仍会刷新，后续运行将以本次为基线对比。
 
 ## 企微推送
 
