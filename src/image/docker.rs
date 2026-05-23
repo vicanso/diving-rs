@@ -18,10 +18,6 @@ use substring::Substring;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::{
-    get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer,
-    get_os_release_from_layer,
-};
-use super::{
     elf::{analyze_runtime_compat, RuntimeCompat},
     layer::ImageLayerInfo,
     oci_image::{
@@ -30,6 +26,10 @@ use super::{
     },
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
+};
+use super::{
+    get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer,
+    get_os_release_from_layer,
 };
 use crate::{
     error::HTTPError,

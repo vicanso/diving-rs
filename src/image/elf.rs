@@ -76,8 +76,7 @@ const MAX_BINARY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default `PATH` used when the image config doesn't set one explicitly.
 /// Matches the value Docker exports when no PATH is configured.
-const DEFAULT_PATH: &str =
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Top-level orchestrator. Returns `None` only when there is nothing
 /// reportable at all (no entrypoint, no readable binary). The caller
@@ -142,9 +141,7 @@ pub fn analyze_runtime_compat(
     // it's distinct from the entrypoint (the most common "wrapper script
     // I can't parse" recovery).
     let (final_path, final_bytes, wrapper) = match orig_bytes {
-        Some(bytes) if goblin::elf::Elf::parse(&bytes).is_ok() => {
-            (orig_path, Some(bytes), None)
-        }
+        Some(bytes) if goblin::elf::Elf::parse(&bytes).is_ok() => (orig_path, Some(bytes), None),
         Some(bytes) => {
             let candidate = parse_exec_target(&bytes, cmd_first.as_deref()).or_else(|| {
                 cmd_first
@@ -275,10 +272,7 @@ fn probe_binary(
 /// resolving one symlink hop the same way `locate_file_in_layers` does.
 /// Used as a fallback when PATH lookup misses (binary installed at a
 /// non-standard location, image with no PATH env, etc.).
-fn find_by_basename(
-    basename: &str,
-    file_tree_list: &[Vec<FileTreeItem>],
-) -> Option<EntryHit> {
+fn find_by_basename(basename: &str, file_tree_list: &[Vec<FileTreeItem>]) -> Option<EntryHit> {
     for (idx, tree) in file_tree_list.iter().enumerate().rev() {
         if let Some(path) = scan_tree_for_basename(tree, basename, "") {
             // Re-route through locate_file_in_layers so symlink resolution
@@ -331,9 +325,8 @@ fn scan_tree_for_basename(items: &[FileTreeItem], basename: &str, prefix: &str) 
 /// the right answer for libc classification).
 fn parse_exec_target(script: &[u8], cmd_first: Option<&str>) -> Option<String> {
     let text = std::str::from_utf8(script).ok()?;
-    static EXEC_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?m)^\s*exec\s+(\S+)"#).expect("exec regex compiles")
-    });
+    static EXEC_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?m)^\s*exec\s+(\S+)"#).expect("exec regex compiles"));
     for cap in EXEC_RE.captures_iter(text) {
         let raw = cap.get(1)?.as_str();
         let token = raw
@@ -355,10 +348,7 @@ fn parse_exec_target(script: &[u8], cmd_first: Option<&str>) -> Option<String> {
 /// removed). Follows one level of symlink — that's enough for the common
 /// `/usr/local/bin/foo → ../share/foo/foo.real` case without risking an
 /// unbounded chase.
-fn locate_file_in_layers(
-    path: &str,
-    file_tree_list: &[Vec<FileTreeItem>],
-) -> Option<EntryHit> {
+fn locate_file_in_layers(path: &str, file_tree_list: &[Vec<FileTreeItem>]) -> Option<EntryHit> {
     let (idx, link) = find_leaf(path, file_tree_list)?;
     if link.is_empty() {
         return Some(EntryHit {
@@ -432,11 +422,7 @@ fn resolve_link(from: &str, link: &str) -> String {
 /// `starting_layer`. Tries the exact path first, then the `./`-prefixed
 /// variant (some tar producers emit one form, some the other). Returns
 /// `None` if nothing matches.
-fn read_binary_bytes(
-    path: &str,
-    starting_layer: usize,
-    layers: &[ImageLayer],
-) -> Option<Vec<u8>> {
+fn read_binary_bytes(path: &str, starting_layer: usize, layers: &[ImageLayer]) -> Option<Vec<u8>> {
     for layer_idx in (0..=starting_layer).rev() {
         if let Some(bytes) = read_from_layer(path, layer_idx, layers) {
             return Some(bytes);
@@ -792,13 +778,12 @@ mod tests {
         // Image layout: /diving (root-level binary, NOT in any standard
         // PATH dir). PATH lookup would miss it; basename search should
         // find it on the `static-serve` → "diving" example pattern.
-        let tree = vec![FileTreeItem {
+        let tree = [FileTreeItem {
             name: "diving".to_string(),
             op: Op::None,
             ..Default::default()
         }];
-        let file_tree_list = vec![tree];
-        let hit = scan_tree_for_basename(&file_tree_list[0], "diving", "");
+        let hit = scan_tree_for_basename(&tree, "diving", "");
         assert_eq!(hit.as_deref(), Some("diving"));
     }
 
