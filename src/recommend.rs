@@ -714,6 +714,60 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         });
     }
 
+    // Runtime libc compatibility — surfaces a fatal mismatch between the
+    // entrypoint binary's libc requirements and the base OS. Driven by
+    // `RuntimeCompat::issue` populated in docker.rs::analyze. Empty
+    // `issue` means either no mismatch was detected or the probe could
+    // not determine enough to judge — no card in that case.
+    {
+        let rc = &result.runtime_compat;
+        if !rc.issue.is_empty() {
+            let title_key = match rc.issue.as_str() {
+                "glibc-on-musl" => "rec.runtimecompat.musltitle",
+                "musl-on-glibc" => "rec.runtimecompat.glibcmusltitle",
+                _ => "rec.runtimecompat.glibctitle",
+            };
+            // glibc-on-musl is a hard failure (binary literally cannot
+            // execute); glibc-too-old also fails at startup. musl-on-glibc
+            // usually works through the dynamic loader, so it's a warning.
+            let severity = if rc.issue == "musl-on-glibc" {
+                SEVERITY_MEDIUM
+            } else {
+                SEVERITY_HIGH
+            };
+            let detail = match rc.issue.as_str() {
+                "glibc-on-musl" => f(
+                    "rec.runtimecompat.musldetail",
+                    &[&rc.entrypoint, &rc.required_glibc],
+                ),
+                "musl-on-glibc" => f("rec.runtimecompat.glibcmusldetail", &[&rc.entrypoint]),
+                _ => f(
+                    "rec.runtimecompat.glibcdetail",
+                    &[&rc.entrypoint, &rc.required_glibc, &rc.os_glibc],
+                ),
+            };
+            let hint = match rc.issue.as_str() {
+                "glibc-on-musl" => t("rec.runtimecompat.muslhint"),
+                "musl-on-glibc" => t("rec.runtimecompat.glibcmuslhint"),
+                _ => t("rec.runtimecompat.glibchint"),
+            };
+            let mut paths: Vec<String> = vec![rc.entrypoint.clone()];
+            for lib in rc.needed_libs.iter().take(PATH_SAMPLE_LIMIT - 1) {
+                paths.push(format!("needs {lib}"));
+            }
+            out.push(Recommendation {
+                category: CATEGORY_SECURITY.into(),
+                severity: severity.into(),
+                title: t(title_key),
+                detail,
+                dockerfile_hint: hint,
+                est_saved_bytes: 0,
+                heuristic: false,
+                paths,
+            });
+        }
+    }
+
     // High layer count.
     if result.layers.len() > 30 {
         out.push(Recommendation {

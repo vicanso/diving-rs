@@ -22,6 +22,7 @@ use super::{
     get_os_release_from_layer,
 };
 use super::{
+    elf::{analyze_runtime_compat, RuntimeCompat},
     layer::ImageLayerInfo,
     oci_image::{
         detect_cross_layer_duplicates, DuplicateGroup, ImageFileSummary, ImageHistory,
@@ -537,6 +538,11 @@ pub struct DockerAnalyzeResult {
     // 关闭；旧版本/旧 cache 反序列化时为空 vec。
     #[serde(default)]
     pub duplicate_groups: Vec<DuplicateGroup>,
+    // 启动二进制 (Entrypoint/Cmd[0]) 的 ELF 兼容性报告：glibc/musl 归类、
+    // 最小 glibc 版本、与基础镜像 glibc 版本的对比。旧 cache 无此字段时
+    // 退化为默认值（空 `issue`，不产生卡片）。
+    #[serde(default)]
+    pub runtime_compat: RuntimeCompat,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -1550,7 +1556,9 @@ impl DockerClient {
             }
         }
 
-        // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown"
+        // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown".
+        // Computed up-front so the ELF runtime-compat probe below can compare the
+        // entrypoint binary's libc requirements against the host's glibc version.
         let base_os = if !self.is_local() {
             let base_os = tokio::task::block_in_place(|| probe_base_os(&manifest));
             if base_os.is_empty() {
@@ -1580,23 +1588,36 @@ impl DockerClient {
             tags.push(format!("[High Layer Count: {}]", layers.len()));
         }
 
-        // Cross-layer duplicate detection decompresses + blake3-hashes layer
-        // blobs (CPU + blocking I/O), so run it on the blocking pool via
-        // `spawn_blocking`. The owned `layers` + `file_tree_list` are moved
-        // in and handed back out — zero clone. Skipped under
-        // `--no-verify-dup` for performance-sensitive CI.
-        let (layers, file_tree_list, duplicate_groups) = if params.verify_dup {
+        // Cross-layer duplicate detection AND ELF runtime-compat probing
+        // both decompress + read layer blobs from disk (CPU + blocking I/O),
+        // so they share one `spawn_blocking` hop. The owned `layers` +
+        // `file_tree_list` are moved in and handed back out — zero clone.
+        // Dup detection alone is skipped under `--no-verify-dup` for
+        // performance-sensitive CI; the ELF probe always runs because its
+        // cost is bounded (single entrypoint binary, ≤64 MB).
+        let verify_dup = params.verify_dup;
+        let config_for_probe = config.clone();
+        let base_os_for_probe = base_os.clone();
+        let (layers, file_tree_list, duplicate_groups, runtime_compat) =
             tokio::task::spawn_blocking(move || {
-                let dup = detect_cross_layer_duplicates(&layers, &file_tree_list);
-                (layers, file_tree_list, dup)
+                let dup = if verify_dup {
+                    detect_cross_layer_duplicates(&layers, &file_tree_list)
+                } else {
+                    vec![]
+                };
+                let rc = analyze_runtime_compat(
+                    &config_for_probe,
+                    &layers,
+                    &file_tree_list,
+                    &base_os_for_probe,
+                )
+                .unwrap_or_default();
+                (layers, file_tree_list, dup, rc)
             })
             .await
             .map_err(|e| Error::Whatever {
-                message: format!("duplicate detection task failed: {e}"),
-            })?
-        } else {
-            (layers, file_tree_list, vec![])
-        };
+                message: format!("post-analysis probe task failed: {e}"),
+            })?;
 
         let mut result = DockerAnalyzeResult {
             name: image_name,
@@ -1618,6 +1639,7 @@ impl DockerClient {
             tags,
             recommendations: vec![],
             duplicate_groups,
+            runtime_compat,
         };
         // Pure derived layer — computed from the result that is already built.
         // Localized at generation time from the resolved environment language.

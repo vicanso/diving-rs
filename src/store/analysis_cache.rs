@@ -32,7 +32,15 @@ use crate::image::DockerAnalyzeResult;
 /// v2: added `DockerAnalyzeResult::duplicate_groups` (cross-layer dup
 /// detection). v1 caches lack the field and would silently surface zero
 /// duplicates; bump forces a one-time re-analysis.
-const SCHEMA_VERSION: u32 = 2;
+/// v3: added `DockerAnalyzeResult::runtime_compat` (ELF / glibc compat
+/// probe of the entrypoint). v2 caches lack the field and would silently
+/// suppress the new mismatch card; bump forces a one-time re-analysis.
+/// v4: extended the runtime probe to unwrap shell-script wrappers
+/// (`ENTRYPOINT ["/entrypoint.sh"]` + `CMD ["app"]` patterns) and to
+/// fall back to a basename search across layers. v3 caches captured an
+/// empty `runtime_compat` for those images; bump forces a re-analysis
+/// so the new code actually gets to run.
+const SCHEMA_VERSION: u32 = 4;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

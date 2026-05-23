@@ -163,6 +163,14 @@ pub struct ImageExtraInfo {
     pub env: Option<Vec<String>>,
     #[serde(rename = "Labels")]
     pub labels: Option<HashMap<String, String>>,
+    // Container entrypoint as defined in the image config. The effective
+    // command at runtime is `Entrypoint` concatenated with `Cmd`; we use
+    // these to locate the binary whose ELF dependencies determine runtime
+    // libc compatibility with the base OS.
+    #[serde(rename = "Entrypoint")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(rename = "Cmd")]
+    pub cmd: Option<Vec<String>>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

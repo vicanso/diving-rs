@@ -46,6 +46,10 @@ struct WidgetState {
     summary: DockerAnalyzeSummary,
     // 优化建议
     recommendations: Vec<Recommendation>,
+    // 基础镜像 OS 指纹（与 markdown 中 Base OS 字段同源）
+    base_os: String,
+    // 启动二进制 ELF 兼容性（glibc/musl + 版本对比）
+    runtime_compat: crate::image::RuntimeCompat,
     // 界面语言
     lang: crate::i18n::Lang,
 }
@@ -140,6 +144,8 @@ pub fn run_app(result: DockerAnalyzeResult, lang: i18n::Lang) -> Result<(), Box<
         size: result.size,
         total_size: result.total_size,
         recommendations: result.recommendations,
+        base_os: result.base_os,
+        runtime_compat: result.runtime_compat,
         lang,
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
@@ -274,6 +280,8 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         size: state.size,
         summary: state.summary.clone(),
         recommendations: state.recommendations.clone(),
+        base_os: state.base_os.clone(),
+        runtime_compat: state.runtime_compat.clone(),
         lang: state.lang,
     });
     f.render_widget(layers_widget.widget, left_chunks[0]);

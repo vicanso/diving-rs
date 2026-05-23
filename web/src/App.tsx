@@ -38,6 +38,7 @@ interface ImageAnalyzeResult {
   name: string;
   arch: string;
   os: string;
+  baseOs?: string;
   layers: Layer[];
   size: number;
   totalSize: number;
@@ -45,6 +46,16 @@ interface ImageAnalyzeResult {
   fileSummaryList: FileSummaryList[];
   bigModifiedFileList: ModifiedFile[];
   recommendations?: Recommendation[];
+  runtimeCompat?: RuntimeCompat;
+}
+
+interface RuntimeCompat {
+  entrypoint: string;
+  libc: string;
+  requiredGlibc: string;
+  neededLibs: string[];
+  osGlibc: string;
+  issue: string;
 }
 
 interface Recommendation {
@@ -252,6 +263,38 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
 
   const score = (100 - (wastedSize * 100) / result.totalSize).toFixed(2);
 
+  // Runtime libc string: "glibc (needs 2.34) → host 2.36 — ok". Empty when
+  // the ELF probe couldn't classify the entrypoint (scratch image, dynamic
+  // shell wrapper, unsupported binary). Populated server-side from goblin.
+  let runtimeLibc = "";
+  let runtimeLibcIssue = "";
+  const rc = result.runtimeCompat;
+  if (rc && rc.libc) {
+    // Lead with the resolved binary path (incl. "(via wrapper)" when we
+    // unwrapped a shell entrypoint) so the user sees which file was
+    // actually inspected.
+    let cell = rc.entrypoint ? `${rc.entrypoint}: ${rc.libc}` : rc.libc;
+    if (rc.requiredGlibc) {
+      cell += ` (needs ${rc.requiredGlibc})`;
+    }
+    if (rc.osGlibc) {
+      cell += ` → host ${rc.osGlibc}`;
+    }
+    const statusKey = (
+      {
+        "": "runtimeLibcOk",
+        "glibc-too-old": "runtimeLibcTooOld",
+        "glibc-on-musl": "runtimeLibcGlibcOnMusl",
+        "musl-on-glibc": "runtimeLibcMuslOnGlibc",
+      } as Record<string, string>
+    )[rc.issue];
+    if (statusKey) {
+      cell += ` — ${i18nGet(statusKey)}`;
+    }
+    runtimeLibc = cell;
+    runtimeLibcIssue = rc.issue;
+  }
+
   const imageDescriptions = {
     score: `${score}%`,
     size: `${prettyBytes(result.totalSize)} / ${prettyBytes(result.size)}`,
@@ -259,6 +302,9 @@ const getImageSummary = (result: ImageAnalyzeResult) => {
     wastedSize: prettyBytes(wastedSize),
     osArch: `${result.os}/${result.arch}`,
     created: result.layers[result.layers.length - 1].created,
+    baseOs: result.baseOs || "",
+    runtimeLibc,
+    runtimeLibcIssue,
   };
   return {
     wastedList,
@@ -452,6 +498,9 @@ interface ImageDescriptions {
   wastedSize: string;
   osArch: string;
   created: string;
+  baseOs: string;
+  runtimeLibc: string;
+  runtimeLibcIssue: string;
 }
 interface AppState {
   version: string;
@@ -634,6 +683,24 @@ class App extends Component<object, AppState> {
           <Descriptions.Item label={i18nGet("osArchLabel")}>
             {imageDescriptions["osArch"]}
           </Descriptions.Item>
+          {imageDescriptions["baseOs"] && (
+            <Descriptions.Item label={i18nGet("baseOsLabel")}>
+              {imageDescriptions["baseOs"]}
+            </Descriptions.Item>
+          )}
+          {imageDescriptions["runtimeLibc"] && (
+            <Descriptions.Item label={i18nGet("runtimeLibcLabel")}>
+              <span
+                style={{
+                  color: imageDescriptions["runtimeLibcIssue"]
+                    ? "#cf1322"
+                    : undefined,
+                }}
+              >
+                {imageDescriptions["runtimeLibc"]}
+              </span>
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label={i18nGet("createdLabel")}>
             {new Date(imageDescriptions["created"]).toLocaleString()}
           </Descriptions.Item>

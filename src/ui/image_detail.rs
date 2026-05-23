@@ -3,7 +3,7 @@ use ratatui::{prelude::*, widgets::*};
 
 use super::util;
 use crate::i18n;
-use crate::image::DockerAnalyzeSummary;
+use crate::image::{DockerAnalyzeSummary, RuntimeCompat};
 use crate::recommend::Recommendation;
 
 pub struct ImageDetailWidget<'a> {
@@ -18,6 +18,8 @@ pub struct ImageDetailWidgetOption {
     pub size: u64,
     pub summary: DockerAnalyzeSummary,
     pub recommendations: Vec<Recommendation>,
+    pub base_os: String,
+    pub runtime_compat: RuntimeCompat,
     pub lang: i18n::Lang,
 }
 
@@ -97,6 +99,66 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             ),
             Span::from(format!("{score} %")),
         ]),
+    ];
+    // Base OS — same source as the markdown "Base OS" row. Skip when empty
+    // so scratch/distroless images don't show a blank line.
+    if !opt.base_os.is_empty() {
+        spans_list.push(Line::from(vec![
+            Span::styled(
+                i18n::tr(opt.lang, "tui.baseos"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::from(opt.base_os.clone()),
+        ]));
+    }
+    // Runtime libc (glibc/musl + version requirement vs host) — visible
+    // whenever the ELF probe classified the entrypoint successfully. Colored
+    // red when the issue tag is non-empty.
+    if !opt.runtime_compat.libc.is_empty() {
+        let rc = &opt.runtime_compat;
+        // Lead with the resolved binary path (incl. "(via wrapper)" when
+        // we unwrapped a shell entrypoint) so the user can see which
+        // file was actually inspected.
+        let mut cell = String::new();
+        if !rc.entrypoint.is_empty() {
+            cell.push_str(&format!("{}: ", rc.entrypoint));
+        }
+        cell.push_str(&rc.libc);
+        if !rc.required_glibc.is_empty() {
+            cell.push_str(&format!(" (needs {})", rc.required_glibc));
+        }
+        if !rc.os_glibc.is_empty() {
+            cell.push_str(&format!(" → host {}", rc.os_glibc));
+        }
+        let status_key = match rc.issue.as_str() {
+            "" => "md.runtimelibc.ok",
+            "glibc-too-old" => "md.runtimelibc.tooold",
+            "glibc-on-musl" => "md.runtimelibc.glibconmusl",
+            "musl-on-glibc" => "md.runtimelibc.muslonglibc",
+            _ => "",
+        };
+        let status = if status_key.is_empty() {
+            String::new()
+        } else {
+            i18n::tr(opt.lang, status_key).to_string()
+        };
+        if !status.is_empty() {
+            cell.push_str(&format!(" — {status}"));
+        }
+        let status_style = if rc.issue.is_empty() {
+            Style::default()
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        spans_list.push(Line::from(vec![
+            Span::styled(
+                i18n::tr(opt.lang, "tui.runtimelibc"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(cell, status_style),
+        ]));
+    }
+    spans_list.extend(vec![
         Line::from(vec![]),
         Line::from(vec![
             Span::styled(headers[0], Style::default().add_modifier(Modifier::BOLD)),
@@ -105,7 +167,7 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             space_span.clone(),
             Span::styled(headers[2], Style::default().add_modifier(Modifier::BOLD)),
         ]),
-    ];
+    ]);
 
     // Pad data cells to the header's terminal display width (CJK = 2 cols),
     // so the unpadded header row and the padded data rows line up in any

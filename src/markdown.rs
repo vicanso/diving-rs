@@ -138,6 +138,37 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
     if !result.base_os.is_empty() {
         md.push_str(&format!("| {} | {} |\n", t("md.f.baseos"), result.base_os));
     }
+    // Runtime libc fingerprint (glibc / musl / static) + version requirement
+    // and how it compares against the base OS's libc. Always shown when the
+    // ELF probe successfully classified the entrypoint.
+    if !result.runtime_compat.libc.is_empty() {
+        let rc = &result.runtime_compat;
+        // Lead with the resolved binary path (incl. "(via wrapper)" when
+        // we unwrapped a shell entrypoint) so the user sees which file
+        // was actually inspected.
+        let mut cell = String::new();
+        if !rc.entrypoint.is_empty() {
+            cell.push_str(&format!("`{}`: ", rc.entrypoint));
+        }
+        cell.push_str(&rc.libc);
+        if !rc.required_glibc.is_empty() {
+            cell.push_str(&format!(" (needs {})", rc.required_glibc));
+        }
+        if !rc.os_glibc.is_empty() {
+            cell.push_str(&format!(" → host glibc {}", rc.os_glibc));
+        }
+        let status = match rc.issue.as_str() {
+            "" => t("md.runtimelibc.ok"),
+            "glibc-too-old" => t("md.runtimelibc.tooold"),
+            "glibc-on-musl" => t("md.runtimelibc.glibconmusl"),
+            "musl-on-glibc" => t("md.runtimelibc.muslonglibc"),
+            _ => String::new(),
+        };
+        if !status.is_empty() {
+            cell.push_str(&format!(" — {status}"));
+        }
+        md.push_str(&format!("| {} | {} |\n", t("md.f.runtimelibc"), cell));
+    }
     if !result.user.is_empty() {
         md.push_str(&format!("| {} | {} |\n", t("md.f.user"), result.user));
     }
