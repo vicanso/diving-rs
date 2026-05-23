@@ -801,6 +801,19 @@ async fn tar_size(tar: &str, filename: &str) -> Result<u64> {
         .context(LayerSnafu {})
 }
 
+// Short human-readable compression label for a layer's media type, used in
+// the CLI progress lines. Mirrors the substring detection that `layer.rs`
+// uses to pick the decompressor.
+fn compression_label(media_type: &str) -> &'static str {
+    if media_type.contains("zstd") {
+        "zstd"
+    } else if media_type.contains("gzip") {
+        "gzip"
+    } else {
+        "tar"
+    }
+}
+
 impl DockerClient {
     pub fn new(register: &str) -> Self {
         DockerClient {
@@ -1144,6 +1157,7 @@ impl DockerClient {
                         &[
                             &layer.digest[..layer.digest.len().min(19)],
                             &bytesize::ByteSize(layer.size).to_string(),
+                            compression_label(&layer.media_type),
                         ]
                     )
                 );
@@ -1165,6 +1179,7 @@ impl DockerClient {
                         &[
                             &layer.digest[..layer.digest.len().min(19)],
                             &bytesize::ByteSize(layer.size).to_string(),
+                            compression_label(&layer.media_type),
                         ]
                     )
                 );
