@@ -7,32 +7,23 @@ RUN apk update \
   && cd /diving-rs \
   && make build-web
 
-# Stage 2: build the Rust binary against glibc (Debian), so the resulting
-# ELF runs on the debian-slim glibc runtime in stage 3.
-FROM rust:slim-bookworm AS builder
+# Stage 2: build the Rust binary against glibc (Debian). Pinned Rust
+# version for reproducible builds; the non-slim base already ships
+# build-essential + pkg-config, so no extra apt install is needed for
+# our C dependencies (zstd-sys, blake3, mimalloc).
+FROM rust:1.95.0 AS builder
 
 COPY --from=webbuilder /diving-rs /diving-rs
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-       build-essential \
-       pkg-config \
-  && rm -rf /var/lib/apt/lists/*
 
 RUN cd /diving-rs \
   && make release
 
-# Pre-create a writable HOME for the non-root runtime user in the
-# builder stage; stage 3 just COPYs it across with `--chown`.
-RUN mkdir -p /home/rust/.diving \
-  && chown -R 1000:1000 /home/rust
-
-# Stage 3: debian-bookworm-slim glibc runtime.
+# Stage 3: debian-trixie-slim glibc runtime (Debian 13).
 #
 # Familiar Debian environment — shell + apt available for `docker exec`
 # debugging — with `libgcc_s.so.1` and `libstdc++` provided out of the
 # box for our C dependencies (zstd-sys, blake3, mimalloc).
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 EXPOSE 7001
 
@@ -46,17 +37,27 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /diving-rs/target/release/diving /usr/local/bin/diving
-COPY --from=builder --chown=1000:1000 /home/rust /home/rust
+# Service-style user pinned to UID 1000 for backward compat with the
+# README's `chown -R 1000:1000 ./diving` step. `-m` creates /home/rust so
+# `home::home_dir()`'s passwd-based fallback resolves correctly;
+# `/bin/false` blocks interactive login at the shell level (an explicit
+# `docker exec -it … bash` still works for debugging). `~/.diving` is
+# pre-created and owned by the user so the first run never has to mkdir.
+RUN useradd -u 1000 -m -s /bin/false rust \
+  && mkdir -p /home/rust/.diving \
+  && chown -R rust:rust /home/rust
 
-# `USER 1000:1000` does not create an `/etc/passwd` entry, and Docker
-# does not auto-set `$HOME` for a numeric UID. Without this, $HOME
-# would inherit `/root` from the parent image — UID 1000 can't write
-# there and `~/.diving` creation panics with EACCES.
+COPY --from=builder --chown=rust:rust --chmod=755 \
+     /diving-rs/target/release/diving /usr/local/bin/diving
+
+# Docker does not auto-set $HOME on USER switch — it inherits `/root`
+# from the parent image. Set it explicitly so UID 1000 can write
+# `~/.diving` (else `home::home_dir()` returns /root and panics with
+# EACCES on directory creation).
 ENV RUST_ENV=production \
     HOME=/home/rust
 
-USER 1000:1000
+USER rust
 WORKDIR /home/rust
 
 # HEALTHCHECK omitted: image ships no `wget`/`curl` by default. Use an
