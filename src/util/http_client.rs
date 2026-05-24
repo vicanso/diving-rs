@@ -39,6 +39,11 @@ mod tests {
 
     #[test]
     fn singleton_returns_same_instance() {
+        // Production wires this up in `main()`. Tests construct the
+        // Client directly, so the ring provider must be installed here.
+        // `install_default()` errors if a provider is already installed
+        // (e.g. another test ran first) — ignore that case.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let a = get_http_client();
         let b = get_http_client();
         // `Client` doesn't implement PartialEq, but it's `Arc<Inner>`

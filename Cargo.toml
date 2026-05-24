@@ -18,7 +18,9 @@ bytesize = { version = "2.3.1", features = ["serde"] }
 chrono = "0.4.44"
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
-config = "0.15.22"
+# Only YAML is used (~/.diving/config.yml). Disabling default features
+# drops the ron/json5/ini/toml parsers and their transitive deps.
+config = { version = "0.15.22", default-features = false, features = ["yaml"] }
 crossterm = "0.29.0"
 # gzip layer decompression. flate2's default (miniz_oxide) is ~2x faster
 # than libflate in our measured workloads; pure-Rust, no extra C deps.
@@ -50,10 +52,17 @@ pad = "0.1.6"
 ratatui = "0.30.0"
 regex = "1.12.3"
 reqwest = { version = "0.13.3", default-features = false, features = [
-    "rustls",
+    # `rustls-no-provider` keeps the platform verifier (system trust store)
+    # but skips installing a crypto provider — we install `ring` ourselves
+    # in main.rs. The default `rustls` feature pulls in aws-lc-rs which
+    # adds ~675 KiB to the release binary.
+    "rustls-no-provider",
     "json",
     "stream",
 ] }
+# Direct rustls dep so we can install the `ring` provider as default.
+# Pairs with reqwest's `rustls-no-provider` feature above.
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rust-embed = { version = "8.11.0", features = ["compression", "mime-guess"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -62,7 +71,9 @@ signal-hook = { version = "0.4.4", default-features = false }
 signal-hook-registry = "1.4.8"
 snafu = "0.9.0"
 substring = "1.4.5"
-tar = "0.4.45"
+# default-features = false drops the xattr feature; we only read tar
+# headers (path/mode/size/mtime), never restore xattrs to disk.
+tar = { version = "0.4.45", default-features = false }
 tempfile = "3.27.0"
 textwrap = "0.16.2"
 time = "0.3.47"

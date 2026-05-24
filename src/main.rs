@@ -488,6 +488,13 @@ fn main() {
     // bonus, this lets us size the worker pool from `config.threads`,
     // unifying the "how parallel?" knob across tokio and the per-image
     // layer semaphore.
+    //
+    // Install `ring` as the default rustls CryptoProvider. Pairs with
+    // reqwest's `rustls-no-provider` feature — must run before any TLS
+    // handshake (i.e. before the first reqwest::Client::builder().build()).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring CryptoProvider");
     std::panic::set_hook(Box::new(|e| {
         error!(category = "panic", message = e.to_string(),);
         std::process::exit(1);
