@@ -29,6 +29,10 @@ pub struct AiConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    /// User-supplied override for the system prompt. When `Some`, it fully
+    /// replaces the built-in zh/en DevSecOps template; when `None`, the
+    /// built-in `system_prompt(lang)` is used.
+    pub system_prompt: Option<String>,
 }
 
 impl AiConfig {
@@ -39,15 +43,18 @@ impl AiConfig {
         api_key: Option<&str>,
         base_url: Option<&str>,
         model: Option<&str>,
+        system_prompt: Option<&str>,
     ) -> Option<AiConfig> {
         let api_key = first_non_empty(api_key, "OPENAI_API_KEY")?;
         let base_url =
             first_non_empty(base_url, "OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.into());
         let model = first_non_empty(model, "OPENAI_MODEL").unwrap_or_else(|| DEFAULT_MODEL.into());
+        let system_prompt = first_non_empty(system_prompt, "OPENAI_SYSTEM_PROMPT");
         Some(AiConfig {
             api_key,
             base_url,
             model,
+            system_prompt,
         })
     }
 
@@ -261,12 +268,18 @@ pub async fn analyze_with_ai(
         eprintln!("{}", i18n::tr(lang, "ai.compare"));
     }
 
+    // User override takes precedence; otherwise pick the language-matched
+    // built-in DevSecOps template.
+    let sys_prompt = cfg
+        .system_prompt
+        .as_deref()
+        .unwrap_or_else(|| system_prompt(lang));
     let body = ChatRequest {
         model: &cfg.model,
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: system_prompt(lang),
+                content: sys_prompt,
             },
             ChatMessage {
                 role: "user",
@@ -460,6 +473,7 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://api.openai.com/v1/".into(),
             model: "m".into(),
+            system_prompt: None,
         };
         assert_eq!(cfg.endpoint(), "https://api.openai.com/v1/chat/completions");
     }
@@ -470,13 +484,14 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://host/v1/chat/completions".into(),
             model: "m".into(),
+            system_prompt: None,
         };
         assert_eq!(cfg.endpoint(), "https://host/v1/chat/completions");
     }
 
     #[test]
     fn resolve_uses_explicit_values_without_touching_env() {
-        let cfg = AiConfig::resolve(Some("sk-x"), Some("https://h/v1"), Some("gpt-test"))
+        let cfg = AiConfig::resolve(Some("sk-x"), Some("https://h/v1"), Some("gpt-test"), None)
             .expect("explicit key resolves");
         assert_eq!(cfg.api_key, "sk-x");
         assert_eq!(cfg.base_url, "https://h/v1");
@@ -544,6 +559,22 @@ mod tests {
         assert!(system_prompt(Lang::Zh).contains("DevSecOps 资深专家"));
         assert!(system_prompt(Lang::En).contains("senior DevSecOps expert"));
         assert!(system_prompt(Lang::En).contains("🟢 Image has no regression"));
+    }
+
+    #[test]
+    fn resolve_picks_up_explicit_system_prompt() {
+        let cfg = AiConfig::resolve(Some("KEY"), None, None, Some("CUSTOM PROMPT"))
+            .expect("api_key was provided");
+        assert_eq!(cfg.system_prompt.as_deref(), Some("CUSTOM PROMPT"));
+    }
+
+    #[test]
+    fn resolve_trims_and_rejects_blank_system_prompt() {
+        // Empty / whitespace-only override is treated as "not provided",
+        // so the built-in language template wins later in analyze_with_ai.
+        let cfg =
+            AiConfig::resolve(Some("KEY"), None, None, Some("   ")).expect("api_key was provided");
+        assert!(cfg.system_prompt.is_none());
     }
 
     #[test]

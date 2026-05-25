@@ -81,6 +81,9 @@ struct Args {
     /// AI model name (or $OPENAI_MODEL, default gpt-4o)
     #[arg(long)]
     ai_model: Option<String>,
+    /// AI system prompt override; replaces the built-in DevSecOps template (or $OPENAI_SYSTEM_PROMPT)
+    #[arg(long)]
+    ai_system_prompt: Option<String>,
     /// WeCom (企业微信) group-bot webhook URL or key; pushes the result there (or $WECOM_WEBHOOK)
     #[arg(long)]
     wecom_webhook: Option<String>,
@@ -381,6 +384,7 @@ async fn run(args: Args) {
             args.ai_api_key.as_deref(),
             args.ai_base_url.as_deref(),
             args.ai_model.as_deref(),
+            args.ai_system_prompt.as_deref(),
         );
         let wecom_cfg = wecom::WecomConfig::resolve(args.wecom_webhook.as_deref());
         // Base layers are auto-detected and hidden by default; --no-skip-base
