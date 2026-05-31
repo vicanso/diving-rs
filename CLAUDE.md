@@ -37,6 +37,31 @@ make hooks              # Install git hooks (runs fmt + lint before commits)
 
 The repo includes a pre-commit hook (`hooks/pre-commit`) that runs `make fmt && make lint`. Install it with `make hooks`.
 
+## Code Conventions
+
+### Imports: `use` first, no inline fully-qualified paths
+
+When referencing an item from another module, bring it into scope with a `use`
+declaration at the top of the file and then call it by its short name. Do **not**
+spell out the fully-qualified path inline at the call site.
+
+```rust
+// ✅ preferred — import once, use the short name
+use crate::i18n::Lang;
+use std::collections::HashSet;
+
+fn build(lang: Lang, seen: &HashSet<String>) { /* ... */ }
+```
+
+```rust
+// ❌ avoid — fully-qualified path inline
+fn build(lang: crate::i18n::Lang, seen: &std::collections::HashSet<String>) { /* ... */ }
+```
+
+This applies to `crate::` / `super::` paths and to `std`/external crates alike.
+Rare exceptions: disambiguating a genuine name collision, or a one-off reference
+where a `use` would be misleading — keep those local and obvious.
+
 ## Architecture
 
 ### Core Design Pattern

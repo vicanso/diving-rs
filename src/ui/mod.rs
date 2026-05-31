@@ -1,6 +1,8 @@
 use self::image_detail::ImageDetailWidgetOption;
 use crate::i18n;
-use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageLayer};
+use crate::image::{
+    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageLayer, RuntimeCompat,
+};
 use crate::recommend::Recommendation;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -49,7 +51,7 @@ struct WidgetState {
     // 基础镜像 OS 指纹（与 markdown 中 Base OS 字段同源）
     base_os: String,
     // 启动二进制 ELF 兼容性（glibc/musl + 版本对比）
-    runtime_compat: crate::image::RuntimeCompat,
+    runtime_compat: RuntimeCompat,
     // 界面语言
     lang: crate::i18n::Lang,
 }

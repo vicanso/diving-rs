@@ -26,6 +26,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io::BufReader;
 
 use crate::store::get_blob_path;
@@ -441,7 +442,7 @@ fn read_from_layer(path: &str, layer_idx: usize, layers: &[ImageLayer]) -> Optio
         return None;
     }
     let blob = get_blob_path(&layer.digest);
-    let file = std::fs::File::open(&blob).ok()?;
+    let file = File::open(&blob).ok()?;
     let reader = BufReader::new(file);
     let bytes = get_file_content_from_layer(reader, &layer.media_type, path).ok()?;
     if bytes.is_empty() || bytes.len() > MAX_BINARY_BYTES {

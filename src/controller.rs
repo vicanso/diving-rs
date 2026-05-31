@@ -11,6 +11,8 @@ use http::Uri;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::BufReader;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
@@ -124,10 +126,9 @@ async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFil
     // Decompression runs on the blocking pool so request-serving async
     // workers stay free even while extracting from a large layer.
     let (name, content) = tokio::task::spawn_blocking(move || -> HTTPResult<(String, Vec<u8>)> {
-        let file = std::fs::File::open(&path)
-            .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))?;
-        let content =
-            get_file_content_from_layer(std::io::BufReader::new(file), &media_type, &file_path)?;
+        let file =
+            File::open(&path).map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))?;
+        let content = get_file_content_from_layer(BufReader::new(file), &media_type, &file_path)?;
         let raw_name = file_path.split('/').next_back().unwrap_or_default();
         // Strip characters that would break the Content-Disposition header value
         let name = raw_name

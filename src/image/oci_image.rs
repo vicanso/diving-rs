@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
+
+use super::layer::hash_files_from_layer;
+use crate::store::get_blob_path;
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
@@ -272,12 +278,8 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeIte
 
 pub fn convert_files_to_file_tree(
     files: &[ImageFileInfo],
-    file_summary_list: &[ImageFileSummary],
+    modified_paths: &HashSet<String>,
 ) -> Vec<FileTreeItem> {
-    let modified_paths: HashSet<&str> = file_summary_list
-        .iter()
-        .map(|item| item.info.path.as_str())
-        .collect();
     let mut file_tree: Vec<FileTreeItem> = vec![];
     let mut arr: Vec<&str> = Vec::with_capacity(8);
     for file in files.iter() {
@@ -444,7 +446,7 @@ pub fn detect_cross_layer_duplicates(
     }
     // Cap: hash the largest first so the worst offenders never get
     // dropped by the limit.
-    candidate_idxs.sort_by_key(|&i| std::cmp::Reverse(leaves[i].size));
+    candidate_idxs.sort_by_key(|&i| Reverse(leaves[i].size));
     candidate_idxs.truncate(MAX_DUP_CANDIDATES);
 
     // Batch hashing — one tar pass per layer.
@@ -460,12 +462,12 @@ pub fn detect_cross_layer_duplicates(
         let Some(layer) = layers.get(layer_idx) else {
             continue;
         };
-        let blob = crate::store::get_blob_path(&layer.digest);
-        let Ok(file) = std::fs::File::open(&blob) else {
+        let blob = get_blob_path(&layer.digest);
+        let Ok(file) = File::open(&blob) else {
             continue;
         };
-        let reader = std::io::BufReader::new(file);
-        if let Ok(map) = super::layer::hash_files_from_layer(reader, &layer.media_type, &paths) {
+        let reader = BufReader::new(file);
+        if let Ok(map) = hash_files_from_layer(reader, &layer.media_type, &paths) {
             for (p, h) in map {
                 hashes.insert((layer_idx, p), h);
             }
@@ -517,7 +519,7 @@ pub fn detect_cross_layer_duplicates(
     }
     // Largest waste first so the report's leading entry is the most
     // actionable.
-    groups.sort_by_key(|g| std::cmp::Reverse(g.total_wasted));
+    groups.sort_by_key(|g| Reverse(g.total_wasted));
     groups
 }
 
@@ -527,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_convert_files_to_file_tree_empty() {
-        assert!(convert_files_to_file_tree(&[], &[]).is_empty());
+        assert!(convert_files_to_file_tree(&[], &HashSet::new()).is_empty());
     }
 
     #[test]
@@ -537,7 +539,7 @@ mod tests {
             size: 1024,
             ..Default::default()
         }];
-        let tree = convert_files_to_file_tree(&files, &[]);
+        let tree = convert_files_to_file_tree(&files, &HashSet::new());
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].name, "usr");
         assert_eq!(tree[0].size, 1024);
@@ -562,7 +564,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let tree = convert_files_to_file_tree(&files, &[]);
+        let tree = convert_files_to_file_tree(&files, &HashSet::new());
         assert_eq!(tree[0].size, 300);
     }
 }

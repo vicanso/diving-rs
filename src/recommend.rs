@@ -16,6 +16,8 @@ use crate::i18n::{self, Lang};
 use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
+use std::collections::HashMap;
 
 pub const CATEGORY_SIZE: &str = "size";
 pub const CATEGORY_NECESSITY: &str = "necessity";
@@ -307,7 +309,7 @@ fn shannon_entropy(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
     }
-    let mut counts = std::collections::HashMap::new();
+    let mut counts = HashMap::new();
     for b in s.bytes() {
         *counts.entry(b).or_insert(0u32) += 1;
     }
@@ -786,7 +788,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
     if !result.big_modified_file_list.is_empty() {
         let total_big: u64 = result.big_modified_file_list.iter().map(|f| f.size).sum();
         let mut sorted = result.big_modified_file_list.clone();
-        sorted.sort_by_key(|b| std::cmp::Reverse(b.size));
+        sorted.sort_by_key(|b| Reverse(b.size));
         let paths: Vec<String> = sorted
             .iter()
             .take(PATH_SAMPLE_LIMIT)
@@ -889,7 +891,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             }
         }
         if !big.is_empty() {
-            big.sort_by_key(|(_, s, _)| std::cmp::Reverse(*s));
+            big.sort_by_key(|(_, s, _)| Reverse(*s));
             let worst = big[0].1;
             let sev = if worst * 2 >= total {
                 SEVERITY_MEDIUM
@@ -1243,8 +1245,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             })
             .count();
         if contributing >= 2 {
-            let mut reclaim: std::collections::HashMap<&str, u64> =
-                std::collections::HashMap::new();
+            let mut reclaim: HashMap<&str, u64> = HashMap::new();
             for l in &leaves {
                 if is_pkg_cache(&l.path)
                     || is_dev_artifact(&l.path)

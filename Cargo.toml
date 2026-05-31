@@ -1,6 +1,6 @@
 [package]
 name = "diving"
-version = "0.8.8"
+version = "0.8.9"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
 keywords = ["diving", "image", "dive"]
@@ -20,7 +20,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 # Only YAML is used (~/.diving/config.yml). Disabling default features
 # drops the ron/json5/ini/toml parsers and their transitive deps.
-config = { version = "0.15.22", default-features = false, features = ["yaml"] }
+config = { version = "0.15.23", default-features = false, features = ["yaml"] }
 crossterm = "0.29.0"
 # gzip layer decompression. flate2's default (miniz_oxide) is ~2x faster
 # than libflate in our measured workloads; pure-Rust, no extra C deps.
@@ -29,7 +29,7 @@ futures = "0.3.32"
 glob = "0.3.3"
 # ELF parsing for runtime-compatibility checks (DT_NEEDED + glibc version
 # requirements of the image's entrypoint binary). Pure Rust, no_std-friendly.
-goblin = { version = "0.10.5", default-features = false, features = [
+goblin = { version = "0.10.7", default-features = false, features = [
     "elf32",
     "elf64",
     "endian_fd",
@@ -37,14 +37,14 @@ goblin = { version = "0.10.5", default-features = false, features = [
 ] }
 hex = "0.4.3"
 home = "0.5.12"
-http = "1.4.0"
+http = "1.4.1"
 humantime = "2.3.0"
 lru = "0.18.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
 # Replaces the system allocator with mimalloc to reduce lock contention and
 # fragmentation on the multi-threaded reqwest + tar/zstd decompression hot path.
-mimalloc = { version = "0.1.50", default-features = false }
+mimalloc = { version = "0.1.52", default-features = false }
 nanoid = "0.5.0"
 num_cpus = "1.17.0"
 once_cell = "1.21.4"
@@ -65,7 +65,7 @@ reqwest = { version = "0.13.3", default-features = false, features = [
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rust-embed = { version = "8.11.0", features = ["compression", "mime-guess"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_repr = "0.1.20"
 signal-hook = { version = "0.4.4", default-features = false }
 signal-hook-registry = "1.4.8"
@@ -73,7 +73,7 @@ snafu = "0.9.0"
 substring = "1.4.5"
 # default-features = false drops the xattr feature; we only read tar
 # headers (path/mode/size/mtime), never restore xattrs to disk.
-tar = { version = "0.4.45", default-features = false }
+tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
 textwrap = "0.16.2"
 time = "0.3.47"

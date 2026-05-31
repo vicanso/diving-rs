@@ -12,8 +12,17 @@ use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::io::{BufReader, Write};
-use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, sync::Mutex, time::Duration};
+use std::io::{BufReader, Cursor, SeekFrom, Write};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    fs::File,
+    num::NonZeroUsize,
+    path::Path,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use substring::Substring;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -34,7 +43,7 @@ use super::{
 use crate::{
     error::HTTPError,
     image::convert_files_to_file_tree,
-    store::{get_blob_from_file, get_blob_path, save_blob_to_file},
+    store::{get_blob_from_file, get_blob_path, read_analysis, save_blob_to_file, write_analysis},
 };
 
 #[derive(Debug, Snafu)]
@@ -291,7 +300,7 @@ fn probe_base_os(manifest: &ImageManifest) -> String {
         if !path.exists() {
             continue;
         }
-        if let Ok(file) = std::fs::File::open(&path) {
+        if let Ok(file) = File::open(&path) {
             if let Some((filename, content)) =
                 get_os_release_from_layer(BufReader::new(file), &layer.media_type)
             {
@@ -580,7 +589,7 @@ impl DockerAnalyzeResult {
                 });
             }
         }
-        wasted_list.sort_by_key(|b| std::cmp::Reverse(b.total_size));
+        wasted_list.sort_by_key(|b| Reverse(b.total_size));
 
         let mut score = 100 - wasted_size * 100 / self.total_size;
         // 有浪费空间，则分数-1
@@ -922,7 +931,7 @@ impl DockerClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
-        path: &std::path::Path,
+        path: &Path,
     ) -> Result<()> {
         const MAX_ATTEMPTS: usize = 4;
         let mut downloaded: u64 = 0;
@@ -962,7 +971,7 @@ impl DockerClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
-        path: &std::path::Path,
+        path: &Path,
         downloaded: &mut u64,
     ) -> Result<()> {
         let resuming = *downloaded > 0;
@@ -975,7 +984,7 @@ impl DockerClient {
                 .open(path)
                 .await
                 .context(IOSnafu {})?;
-            f.seek(std::io::SeekFrom::Start(*downloaded))
+            f.seek(SeekFrom::Start(*downloaded))
                 .await
                 .context(IOSnafu {})?;
             f
@@ -1138,10 +1147,18 @@ impl DockerClient {
             let buf = tar_content(img, &layer.digest).await?;
             let compressed_size = buf.len() as u64;
             let media_type = layer.media_type.clone();
-            return tokio::task::block_in_place(|| {
-                get_files_from_layer(std::io::Cursor::new(buf), &media_type, compressed_size)
+            // Offload CPU-bound decompression to the dedicated blocking pool
+            // instead of `block_in_place`, which parks a runtime worker. With
+            // up to `2×CPU` layers decompressing at once, parking workers can
+            // starve the async I/O driving the other downloads.
+            return tokio::task::spawn_blocking(move || {
+                get_files_from_layer(Cursor::new(buf), &media_type, compressed_size)
                     .context(LayerSnafu {})
-            });
+            })
+            .await
+            .map_err(|_| Error::Whatever {
+                message: "decompression task join error".to_string(),
+            })?;
         }
 
         let path = get_blob_path(&layer.digest);
@@ -1196,11 +1213,17 @@ impl DockerClient {
             .map(|m| m.len())
             .unwrap_or(layer.size);
         let media_type = layer.media_type.clone();
-        tokio::task::block_in_place(|| {
-            let file = std::fs::File::open(&path).context(IOSnafu {})?;
+        // See the local-file branch above: decompression runs on the blocking
+        // pool, not via `block_in_place`, to avoid parking runtime workers.
+        tokio::task::spawn_blocking(move || {
+            let file = File::open(&path).context(IOSnafu {})?;
             get_files_from_layer(BufReader::new(file), &media_type, compressed_size)
                 .context(LayerSnafu {})
         })
+        .await
+        .map_err(|_| Error::Whatever {
+            message: "decompression task join error".to_string(),
+        })?
     }
     async fn get_all_layer_info(
         &self,
@@ -1217,7 +1240,7 @@ impl DockerClient {
             .threads
             .unwrap_or_else(|| layers.len().min(num_cpus::get() * 2))
             .max(1);
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(threads));
+        let sem = Arc::new(tokio::sync::Semaphore::new(threads));
 
         let mut handles = Vec::with_capacity(layers.len());
         for layer in layers {
@@ -1343,7 +1366,7 @@ impl DockerClient {
             None
         };
         if let Some(digest) = cache_digest.as_deref() {
-            if let Some(mut cached) = crate::store::read_analysis(digest, &params.arch).await {
+            if let Some(mut cached) = read_analysis(digest, &params.arch).await {
                 tl_info!(digest = digest, "analysis cache hit");
                 if !params.quiet {
                     let short = &digest[..digest.len().min(19)];
@@ -1402,11 +1425,15 @@ impl DockerClient {
         }
         // path → size for every file seen in previous layers; used for O(1) modification detection
         let mut seen_files: HashMap<String, u64> = HashMap::new();
+        // Paths recorded in `file_summary_list` (modified/removed), maintained
+        // incrementally. `convert_files_to_file_tree` consumes this set so it
+        // no longer rebuilds one from the whole cumulative summary on every
+        // layer (which was O(layers²) over the modified-file count).
+        let mut modified_paths: HashSet<String> = HashSet::new();
         let mut big_modified_file_list = vec![];
         let mut sensitive_files: Vec<SensitiveFileInfo> = vec![];
         // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
-        let mut sensitive_seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut sensitive_seen: HashSet<String> = HashSet::new();
         let mut has_pkg_cache = false;
         let mut has_dev_artifacts = false;
         for (layer_index, history) in config.history.iter().enumerate() {
@@ -1449,6 +1476,7 @@ impl DockerClient {
                                     op,
                                     info: file_info,
                                 });
+                                modified_paths.insert(file.path.clone());
                             }
                         }
                         if file.is_whiteout.is_some() {
@@ -1517,8 +1545,8 @@ impl DockerClient {
                     }
                     image_size += info.size;
                     image_total_size += info.unpack_size;
-                    // convert_files_to_file_tree needs the fully-updated file_summary_list
-                    file_tree = convert_files_to_file_tree(&info.files, &file_summary_list);
+                    // Uses the incrementally-maintained `modified_paths` set.
+                    file_tree = convert_files_to_file_tree(&info.files, &modified_paths);
                 }
                 index += 1;
             }
@@ -1649,7 +1677,7 @@ impl DockerClient {
         // inside `write_analysis`) and only runs when HEAD earlier gave
         // us a digest to key on.
         if let Some(digest) = cache_digest.as_deref() {
-            crate::store::write_analysis(digest, &params.arch, &result).await;
+            write_analysis(digest, &params.arch, &result).await;
         }
 
         Ok(result)
