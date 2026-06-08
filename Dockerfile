@@ -27,15 +27,20 @@ FROM debian:trixie-slim
 
 EXPOSE 7001
 
-# ca-certificates: outbound TLS to Docker registries (`https://...`).
-# tzdata: accurate timestamps in reports. `--no-install-recommends` +
-# cache cleanup keeps the runtime layer compact.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-       ca-certificates \
-       tzdata \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
+# reqwest + rustls verifies registry TLS against the system trust store
+# (rustls-platform-verifier → openssl-probe's default
+# /etc/ssl/certs/ca-certificates.crt), and trixie-slim ships no CA bundle.
+# Instead of `apt-get install ca-certificates` here — which permanently bakes
+# ~1.6 MiB of dpkg/debconf cruft into the layer (the rewritten
+# /var/lib/dpkg/status DB survives `rm -rf /var/lib/apt/lists/*`) — copy the
+# bundle the rust:1.95.0 builder already carries. No package manager runs in
+# this stage, so there is no apt/dpkg waste to clean up.
+#
+# tzdata is intentionally not installed: reports and access logs render in UTC
+# (the tracing timer is pinned to UTC in main.rs; analysis timestamps are
+# chrono::Utc). The terminal UI's local-time formatting degrades to UTC when
+# /etc/localtime is absent, and is unused in `--mode web` anyway.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Service-style user pinned to UID 1000 for backward compat with the
 # README's `chown -R 1000:1000 ./diving` step. `-m` creates /home/rust so
