@@ -27,14 +27,15 @@
 ## 快速开始
 
 ```bash
-# 1. 安装
-curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
+# 1. 安装 —— 任选其一：
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # 预编译二进制
+cargo install diving                                                                  # 从 crates.io 安装
 
 # 2. 开始分析
 diving redis:alpine
 ```
 
-就这么简单 —— 无需 Docker daemon。Linux / macOS / Windows 的预编译二进制也可在 [release page](https://github.com/vicanso/diving-rs/releases) 下载。
+就这么简单 —— 无需 Docker daemon。Linux / macOS / Windows 的预编译二进制也可在 [release page](https://github.com/vicanso/diving-rs/releases) 下载；也可用 `cargo install --git https://github.com/vicanso/diving-rs` 从源码安装最新版。
 
 TUI 内快捷键：
 

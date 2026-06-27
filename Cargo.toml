@@ -3,8 +3,30 @@ name = "diving"
 version = "0.9.0"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
-keywords = ["diving", "image", "dive"]
+description = "Analyze Docker image layers to find wasted space, leaked secrets, and bloat — terminal UI + web, no daemon or root required."
+keywords = ["diving", "docker", "image", "dive", "layer"]
+categories = ["command-line-utilities", "development-tools"]
 license = "Apache-2.0"
+repository = "https://github.com/vicanso/diving-rs"
+homepage = "https://github.com/vicanso/diving-rs"
+readme = "README.md"
+rust-version = "1.95"
+# The React frontend (`web/`) is built into `dist/` by `make build-web` and
+# embedded via rust-embed. `dist/` is .gitignore'd, so spell out exactly what
+# the published crate ships: the prebuilt assets plus the Rust sources. Run
+# `make build-web` before `cargo publish` (see `make publish`) so the real UI
+# is bundled; otherwise `build.rs` falls back to a placeholder page.
+#
+# Patterns are root-anchored with a leading `/`: cargo matches `include` with
+# gitignore glob semantics, so an unanchored `LICENSE`/`README.md` would also
+# pull in every such file under `web/node_modules/**`.
+include = [
+    "/src/**/*",
+    "/build.rs",
+    "/dist/**/*",
+    "/README.md",
+    "/LICENSE",
+]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

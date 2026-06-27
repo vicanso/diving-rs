@@ -27,14 +27,15 @@ A single, fast Rust binary that pulls images straight from any registry and show
 ## Quick start
 
 ```bash
-# 1. install
-curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
+# 1. install — pick one:
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # prebuilt binary
+cargo install diving                                                                  # from crates.io
 
 # 2. dive in
 diving redis:alpine
 ```
 
-That's it — no Docker daemon required. Prebuilt binaries for Linux / macOS / Windows are also on the [release page](https://github.com/vicanso/diving-rs/releases).
+That's it — no Docker daemon required. Prebuilt binaries for Linux / macOS / Windows are also on the [release page](https://github.com/vicanso/diving-rs/releases), or build the latest from source with `cargo install --git https://github.com/vicanso/diving-rs`.
 
 Inside the TUI:
 
