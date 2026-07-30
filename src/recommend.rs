@@ -13,7 +13,7 @@
 //! collection.
 
 use crate::i18n::{self, Lang};
-use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
+use crate::image::{has_path_frag, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -116,10 +116,7 @@ fn is_pkg_cache(path: &str) -> bool {
         ".composer/cache/",
         ".gem/cache/",
     ];
-    if LANG_CACHE_FRAGS
-        .iter()
-        .any(|f| path.starts_with(f) || path.contains(&format!("/{}", f)))
-    {
+    if LANG_CACHE_FRAGS.iter().any(|f| has_path_frag(path, f)) {
         return true;
     }
     // Fixed container locations used by language toolchains.
@@ -151,9 +148,7 @@ fn is_dev_artifact(path: &str) -> bool {
         ".ipynb_checkpoints/",
         ".eslintcache",
     ];
-    FRAGS
-        .iter()
-        .any(|f| path.starts_with(f) || path.contains(&format!("/{}", f)))
+    FRAGS.iter().any(|f| has_path_frag(path, f))
 }
 
 /// Build-time-only artifacts that almost never need to ship in a runtime image.

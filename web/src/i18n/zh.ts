@@ -34,4 +34,12 @@ export default {
   recommendationsTitle: "优化建议",
   recSavedLabel: "预计可节省",
   recFixLabel: "建议",
+  tagsTitle: "风险标签",
+  sensitiveFilesTitle: "敏感文件",
+  sensitiveReasonLabel: "原因",
+  duplicateGroupsTitle: "跨层重复文件",
+  duplicateCountLabel: "副本数",
+  duplicateWastedLabel: "浪费",
+  dockerfileTitle: "反推 Dockerfile",
+  runAsUserLabel: "运行用户",
 };

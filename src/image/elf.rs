@@ -420,16 +420,12 @@ fn resolve_link(from: &str, link: &str) -> String {
 // ---- binary fetch + ELF parse --------------------------------------------
 
 /// Read the entrypoint binary's bytes from any layer at or below
-/// `starting_layer`. Tries the exact path first, then the `./`-prefixed
-/// variant (some tar producers emit one form, some the other). Returns
-/// `None` if nothing matches.
+/// `starting_layer`. `get_file_content_from_layer` matches both the bare
+/// and `./`-prefixed spellings in a single pass, so each layer is
+/// decompressed at most once. Returns `None` if nothing matches.
 fn read_binary_bytes(path: &str, starting_layer: usize, layers: &[ImageLayer]) -> Option<Vec<u8>> {
     for layer_idx in (0..=starting_layer).rev() {
         if let Some(bytes) = read_from_layer(path, layer_idx, layers) {
-            return Some(bytes);
-        }
-        let alt = format!("./{path}");
-        if let Some(bytes) = read_from_layer(&alt, layer_idx, layers) {
             return Some(bytes);
         }
     }
@@ -444,8 +440,12 @@ fn read_from_layer(path: &str, layer_idx: usize, layers: &[ImageLayer]) -> Optio
     let blob = get_blob_path(&layer.digest);
     let file = File::open(&blob).ok()?;
     let reader = BufReader::new(file);
-    let bytes = get_file_content_from_layer(reader, &layer.media_type, path).ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_BINARY_BYTES {
+    // 大小上限在读之前生效（TooLarge → None），超大二进制不会先被
+    // 整个缓冲进内存再丢弃。
+    let bytes =
+        get_file_content_from_layer(reader, &layer.media_type, path, MAX_BINARY_BYTES as u64)
+            .ok()?;
+    if bytes.is_empty() {
         return None;
     }
     Some(bytes)

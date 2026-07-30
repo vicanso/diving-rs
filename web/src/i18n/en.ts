@@ -36,4 +36,12 @@ export default {
   recommendationsTitle: "Optimization Recommendations",
   recSavedLabel: "potential savings",
   recFixLabel: "Fix",
+  tagsTitle: "Tags",
+  sensitiveFilesTitle: "Sensitive Files",
+  sensitiveReasonLabel: "Reason",
+  duplicateGroupsTitle: "Cross-Layer Duplicates",
+  duplicateCountLabel: "Copies",
+  duplicateWastedLabel: "Wasted",
+  dockerfileTitle: "Reconstructed Dockerfile",
+  runAsUserLabel: "User",
 };

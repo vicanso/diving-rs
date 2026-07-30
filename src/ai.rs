@@ -239,12 +239,14 @@ fn write_history(image: &str, md: &str) {
 }
 
 /// Send the current analysis (and the previous snapshot, if any) to the
-/// OpenAI-compatible endpoint and return the model's report. The snapshot is
-/// refreshed with the current analysis so the next run can diff against it.
+/// OpenAI-compatible endpoint and return the model's report. On success the
+/// snapshot is refreshed with the current analysis so the next run can diff
+/// against it; on failure the previous baseline is left untouched so the
+/// regression comparison is not lost.
 ///
 /// When `skip_history` is set (`--no-ai-history`), the prior snapshot is NOT
 /// read, so the model does no regression comparison this run. The current
-/// analysis is still written so later runs have a fresh baseline.
+/// analysis is still written (on success) so later runs have a fresh baseline.
 pub async fn analyze_with_ai(
     image: &str,
     current_md: &str,
@@ -252,14 +254,13 @@ pub async fn analyze_with_ai(
     lang: Lang,
     skip_history: bool,
 ) -> Result<String, String> {
-    // Best-effort history: read the prior snapshot, then overwrite it so the
-    // next run compares against this analysis. History I/O never aborts.
+    // Best-effort history read; the snapshot itself is only refreshed after
+    // a successful AI response (see the end of this function).
     let prev = if skip_history {
         None
     } else {
         read_history(image)
     };
-    write_history(image, current_md);
 
     let user_content = build_user_message(lang, prev.as_deref(), current_md);
 
@@ -318,6 +319,8 @@ pub async fn analyze_with_ai(
     if content.is_empty() {
         return Err("empty AI response".to_string());
     }
+    // 请求成功才刷新快照；失败保留上一次的基线，下次运行仍可做防劣化对比。
+    write_history(image, current_md);
     Ok(content)
 }
 
@@ -325,6 +328,9 @@ pub async fn analyze_with_ai(
 // context window.
 const SCRIPT_MAX_BYTES: usize = 16 * 1024;
 const MAX_SCRIPTS: usize = 4;
+// 从层里读取候选脚本时的硬上限：真实的启动脚本不会超过 1MB，超过的
+// 几乎必然是误判的二进制，直接跳过，不浪费内存去读。
+const SCRIPT_READ_CAP: u64 = 1024 * 1024;
 
 // Interpreters/launchers that are not themselves the script of interest — when
 // ENTRYPOINT is `["bash", "/app/start.sh"]` we want `start.sh`, not `bash`.
@@ -401,23 +407,23 @@ fn read_from_layers(result: &DockerAnalyzeResult, token: &str) -> Option<Vec<u8>
     if trimmed.is_empty() {
         return None;
     }
-    // Docker layer tars usually store paths without a leading slash, some with
-    // a "./" prefix — try both spellings.
-    let names = [trimmed.to_string(), format!("./{trimmed}")];
+    // `get_file_content_from_layer` 单趟内已同时匹配带/不带 `./` 前缀的
+    // 拼写，每层最多解压一次。
     for layer in result.layers.iter().rev() {
         let blob = get_blob_path(&layer.digest);
         if !blob.is_file() {
             continue;
         }
-        for name in &names {
-            let Ok(file) = fs::File::open(&blob) else {
-                continue;
-            };
-            if let Ok(bytes) =
-                get_file_content_from_layer(BufReader::new(file), &layer.media_type, name)
-            {
-                return Some(bytes);
-            }
+        let Ok(file) = fs::File::open(&blob) else {
+            continue;
+        };
+        if let Ok(bytes) = get_file_content_from_layer(
+            BufReader::new(file),
+            &layer.media_type,
+            trimmed,
+            SCRIPT_READ_CAP,
+        ) {
+            return Some(bytes);
         }
     }
     None

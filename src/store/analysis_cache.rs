@@ -22,6 +22,7 @@ use std::time::Duration;
 use tokio::fs;
 use tracing::warn;
 
+use super::blob::tmp_sibling_path;
 use crate::config::{get_analysis_path, must_load_config};
 use crate::image::DockerAnalyzeResult;
 
@@ -68,6 +69,19 @@ struct AnalysisCacheEntry {
     result: DockerAnalyzeResult,
 }
 
+/// Serialize-only view for writes — borrows the result instead of cloning
+/// the (potentially tens of MB) file trees. Field names must stay in sync
+/// with [`AnalysisCacheEntry`] so reads keep round-tripping.
+#[derive(Serialize)]
+struct AnalysisCacheEntryRef<'a> {
+    schema_version: u32,
+    diving_version: &'a str,
+    digest: &'a str,
+    arch: &'a str,
+    cached_at: i64,
+    result: &'a DockerAnalyzeResult,
+}
+
 fn safe_segment(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -109,19 +123,19 @@ pub async fn read_analysis(digest: &str, arch: &str) -> Option<DockerAnalyzeResu
 }
 
 /// Best-effort write — any error is logged and swallowed so analysis is
-/// never blocked by a cache write failure. Recommendations are stripped
-/// because they are language-specific and get rebuilt on read.
+/// never blocked by a cache write failure. Recommendations are written
+/// as-is: they are language-specific and always rebuilt on read (see the
+/// analysis-cache hit path in docker.rs), and stripping them used to cost
+/// a full clone of the result just to blank one small field.
 pub async fn write_analysis(digest: &str, arch: &str, result: &DockerAnalyzeResult) {
     let path = cache_file_path(digest, arch);
-    let mut stripped = result.clone();
-    stripped.recommendations = vec![];
-    let entry = AnalysisCacheEntry {
+    let entry = AnalysisCacheEntryRef {
         schema_version: SCHEMA_VERSION,
-        diving_version: env!("CARGO_PKG_VERSION").to_string(),
-        digest: digest.to_string(),
-        arch: arch.to_string(),
+        diving_version: env!("CARGO_PKG_VERSION"),
+        digest,
+        arch,
         cached_at: Utc::now().timestamp(),
-        result: stripped,
+        result,
     };
     let data = match serde_json::to_vec(&entry) {
         Ok(d) => d,
@@ -133,8 +147,18 @@ pub async fn write_analysis(digest: &str, arch: &str, result: &DockerAnalyzeResu
             return;
         }
     };
-    if let Err(e) = fs::write(&path, &data).await {
+    // 与 blob 写入一致：同目录临时文件 + 原子 rename，读方不会读到半截 JSON。
+    let tmp = tmp_sibling_path(&path);
+    if let Err(e) = fs::write(&tmp, &data).await {
         warn!(err = e.to_string(), "failed to write analysis cache");
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, &path).await {
+        let _ = fs::remove_file(&tmp).await;
+        warn!(
+            err = e.to_string(),
+            "failed to move analysis cache into place"
+        );
     }
 }
 
@@ -173,7 +197,8 @@ pub async fn clear_analysis_files() -> Result<()> {
         .unwrap_or_else(|_| Duration::from_secs(90 * 24 * 3600).into());
     let expired = Utc::now().timestamp() - ttl.as_secs() as i64;
 
-    let value = format!("{path}/*.json");
+    // `*`（而非 `*.json`）：崩溃残留的 `.json.tmp-*` 临时文件也一并按 TTL 回收
+    let value = format!("{path}/*");
     for entry in (glob(value.as_str()).context(PatternSnafu {
         path: value.to_string(),
     })?)

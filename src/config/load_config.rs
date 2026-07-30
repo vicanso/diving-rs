@@ -13,12 +13,33 @@ pub struct DivingConfig {
     // Analysis-result cache directory (default: ~/.diving/analysis). Shares
     // `layer_ttl` for cleanup.
     pub analysis_path: Option<String>,
+    /// Legacy single knob: when set (and the specific keys below are not),
+    /// used for both the Tokio worker pool and per-image layer concurrency.
     pub threads: Option<usize>,
+    /// Tokio multi-thread runtime worker count. Defaults to `threads` or
+    /// `num_cpus`. Prefer this over `threads` for web servers that want more
+    /// async capacity without oversubscribing CPU-bound layer work.
+    pub worker_threads: Option<usize>,
+    /// Max concurrent layer download/decompress tasks per image analysis.
+    /// Defaults to `threads` or `min(layer_count, 2 × CPUs)`.
+    pub layer_concurrency: Option<usize>,
     pub lowest_efficiency: Option<f64>,
     pub highest_wasted_bytes: Option<ByteSize>,
     pub highest_user_wasted_percent: Option<f64>,
     // Interval between layer cache cleanup runs, in hours (default: 1)
     pub cleanup_interval_hours: Option<u64>,
+    /// Web 模式 `/api/analyze` 的 registry 白名单（host 形式，如
+    /// `index.docker.io`、`ghcr.io`、`registry.example.com:5000`）。
+    /// 非空时仅放行列表内的 registry，`file://` / `docker://` 需显式加入
+    /// `local-file` / `local-docker`；为空（默认）不限制。只约束 web
+    /// API，命令行不受影响。
+    pub registry_allowlist: Option<Vec<String>>,
+    /// `/api/file` 单文件下载大小上限（默认 100MB）。层里的超大文件全量
+    /// 读进内存再响应，会把 web 服务内存打爆。
+    pub max_download_file_size: Option<ByteSize>,
+    /// layer blob 缓存目录的总大小上限；超出时按访问时间从旧到新淘汰。
+    /// 未配置（默认）则只按 TTL 清理。
+    pub max_layer_cache_size: Option<ByteSize>,
 }
 
 pub fn must_load_config() -> &'static DivingConfig {
@@ -197,5 +218,60 @@ pub fn get_highest_user_wasted_percent() -> f64 {
     if let Some(highest_user_wasted_percent) = config.highest_user_wasted_percent {
         return highest_user_wasted_percent;
     }
-    0.2
+    // Matches README default (10%).
+    0.1
+}
+
+/// Web 模式的 registry 白名单，条目已归一化为小写、去掉空白。
+/// 空切片表示不限制。
+pub fn get_registry_allowlist() -> &'static [String] {
+    static LIST: OnceCell<Vec<String>> = OnceCell::new();
+    LIST.get_or_init(|| {
+        must_load_config()
+            .registry_allowlist
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// `/api/file` 单文件下载大小上限（字节）。
+pub fn get_max_download_file_size() -> u64 {
+    must_load_config()
+        .max_download_file_size
+        .map(|v| v.0)
+        .unwrap_or(100 * 1024 * 1024)
+}
+
+/// layer 缓存目录总大小上限（字节）；`None` 表示不设上限。
+pub fn get_max_layer_cache_size() -> Option<u64> {
+    must_load_config().max_layer_cache_size.map(|v| v.0)
+}
+
+/// Tokio runtime worker threads.
+///
+/// Resolution: `worker_threads` → legacy `threads` → `num_cpus`.
+pub fn get_worker_threads() -> usize {
+    let config = must_load_config();
+    config
+        .worker_threads
+        .or(config.threads)
+        .unwrap_or_else(num_cpus::get)
+        .max(1)
+}
+
+/// Per-image layer download/decompress concurrency cap.
+///
+/// Resolution: `layer_concurrency` → legacy `threads` →
+/// `min(layer_count, 2 × CPUs)`, always at least 1.
+pub fn get_layer_concurrency(layer_count: usize) -> usize {
+    let config = must_load_config();
+    config
+        .layer_concurrency
+        .or(config.threads)
+        .unwrap_or_else(|| layer_count.min(num_cpus::get() * 2))
+        .max(1)
 }

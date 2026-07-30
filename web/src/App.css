@@ -74,6 +74,29 @@ ul.fileTree li {
   margin: 0;
   padding: 0;
 }
+.fileTreeHeaderOnly {
+  margin-bottom: 0 !important;
+}
+.fileTreeHeaderOnly li {
+  font-weight: 600;
+}
+.virtualFileTreeScroller {
+  overflow: auto;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 0 0 6px 6px;
+  position: relative;
+}
+.virtualFileTreeRow {
+  list-style: none;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.virtualFileTree.dark .virtualFileTreeRow:nth-child(odd),
+ul.virtualFileTree .virtualFileTreeRow:nth-child(odd) {
+  /* absolute rows — zebra via index would need data attrs; skip */
+}
 .fileTree .icon {
   padding: 0 5px;
   vertical-align: middle;
@@ -180,6 +203,84 @@ ul.bigModifiedFileList li {
   position: fixed;
   bottom: 0;
   right: 0;
+}
+
+.riskTag {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  background: #fff1f0;
+  color: #cf1322;
+  border: 1px solid #ffa39e;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sensitiveList,
+.duplicateList {
+  margin: 0;
+  padding: 0;
+}
+ul.sensitiveList li:nth-child(odd),
+ul.duplicateList li:nth-child(odd) {
+  background-color: rgb(241, 245, 249);
+}
+ul.sensitiveList.dark li:nth-child(odd),
+ul.duplicateList.dark li:nth-child(odd) {
+  background-color: rgba(0, 0, 0, 0.6);
+}
+ul.sensitiveList li,
+ul.duplicateList li {
+  list-style: none;
+  padding: 8px 10px;
+}
+.sensitiveList li span,
+.duplicateList li span {
+  display: inline-block;
+  vertical-align: top;
+  word-break: break-all;
+}
+.sensitiveList li span:nth-child(1) {
+  width: 60px;
+  text-align: right;
+}
+.sensitiveList li span:nth-child(2) {
+  width: 80px;
+  text-align: right;
+  margin-right: 16px;
+}
+.sensitiveList li span:nth-child(3) {
+  width: 180px;
+  margin-right: 16px;
+}
+.duplicateList li span:nth-child(1) {
+  width: 90px;
+  text-align: right;
+}
+.duplicateList li span:nth-child(2) {
+  width: 60px;
+  text-align: right;
+}
+.duplicateList li span:nth-child(3) {
+  width: 80px;
+  text-align: right;
+  margin-right: 16px;
+}
+
+.dockerfileBlock {
+  margin: 0;
+  padding: 12px 14px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dockerfileBlock.dark {
+  background: rgba(0, 0, 0, 0.45);
+  color: #e6edf3;
 }
 
 .recommendationList {

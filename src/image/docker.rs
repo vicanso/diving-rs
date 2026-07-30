@@ -1,4 +1,4 @@
-use crate::config::{load_user_sensitive_patterns, must_load_config};
+use crate::config::{get_layer_concurrency, load_user_sensitive_patterns};
 use crate::i18n;
 use crate::recommend::{build_recommendations, Recommendation};
 use crate::util::get_http_client;
@@ -12,20 +12,24 @@ use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::io::{BufReader, Cursor, SeekFrom, Write};
+use std::io::{BufReader, SeekFrom};
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     fs::File,
     num::NonZeroUsize,
     path::Path,
+    process::Stdio,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use substring::Substring;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::OnceCell as TokioOnceCell;
 
+use super::image_ref::{repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE};
+use super::layer::{path_under_dir, TarIndex};
+use super::sensitive::{is_dev_artifact, is_pkg_cache, is_sensitive_file};
 use super::{
     elf::{analyze_runtime_compat, RuntimeCompat},
     layer::ImageLayerInfo,
@@ -36,14 +40,14 @@ use super::{
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
 };
-use super::{
-    get_file_content_from_tar, get_file_size_from_tar, get_files_from_layer,
-    get_os_release_from_layer,
-};
+use super::{get_files_from_layer, get_os_release_from_layer};
 use crate::{
     error::HTTPError,
     image::convert_files_to_file_tree,
-    store::{get_blob_from_file, get_blob_path, read_analysis, save_blob_to_file, write_analysis},
+    store::{
+        get_blob_from_file, get_blob_path, read_analysis, save_blob_to_file, sha256_hex,
+        sha256_hex_of_file, tmp_sibling_path, write_analysis,
+    },
 };
 
 #[derive(Debug, Snafu)]
@@ -66,6 +70,9 @@ pub enum Error {
         message: String,
         code: String,
         url: String,
+        // 原始 HTTP 状态码；`code` 是 registry 错误体里的业务码（如
+        // "UNAUTHORIZED"），判断 token 过期需要真正的 401。
+        status: u16,
     },
     #[snafu(display("{message}"))]
     Whatever { message: String },
@@ -80,88 +87,43 @@ impl From<Error> for HTTPError {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-static REGISTRY: &str = "https://index.docker.io/v2";
-
-static REGISTRY_LOCAL_FILE: &str = "local-file";
-static REGISTRY_LOCAL_DOCKER: &str = "local-docker";
-
-#[derive(Debug, Clone, Default)]
-pub struct ImageInfo {
-    // 镜像对应的registry
-    pub registry: String,
-    // 镜像用户
-    pub user: String,
-    // 镜像名称
-    pub name: String,
-    // 镜像版本
-    pub tag: String,
-    // 镜像架构
-    pub arch: String,
+// token 中途失效（HTTP 401）需要刷新重试；registry 错误体里的业务码
+// 不可靠，判断依据是真实状态码。
+fn is_unauthorized(err: &Error) -> bool {
+    matches!(err, Error::Docker { status, .. } if *status == 401)
 }
 
-static FILE_PROTOCOL: &str = "file://";
-static LOCAL_DOCKER_PROTOCOL: &str = "docker://";
+/// Whether `data` hashes to `digest`. Non-sha256 digests (local tar
+/// layouts) are not verifiable and pass through.
+fn bytes_match_digest(data: &[u8], digest: &str) -> bool {
+    match digest.strip_prefix("sha256:") {
+        Some(expected) => sha256_hex(data).eq_ignore_ascii_case(expected),
+        None => true,
+    }
+}
 
-pub fn parse_image_info(image: &str) -> ImageInfo {
-    let mut value = image.to_string();
-    if value.starts_with(FILE_PROTOCOL) {
-        return ImageInfo {
-            registry: REGISTRY_LOCAL_FILE.to_string(),
-            name: value.replace(FILE_PROTOCOL, ""),
-            ..Default::default()
-        };
+/// Verify an on-disk blob against its OCI digest. Only `sha256:` digests are
+/// checked (the only algorithm in practice); others pass through. Hashing a
+/// multi-hundred-MB layer is CPU + I/O bound, so it runs on the blocking pool.
+async fn verify_blob_digest(path: &Path, expected_digest: &str) -> Result<()> {
+    let Some(expected) = expected_digest.strip_prefix("sha256:") else {
+        return Ok(());
+    };
+    let path = path.to_path_buf();
+    let actual = tokio::task::spawn_blocking(move || sha256_hex_of_file(&path))
+        .await
+        .map_err(|e| Error::Whatever {
+            message: format!("blob hash task failed: {e}"),
+        })?
+        .map_err(|err| Error::IO { source: err })?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(Error::Whatever {
+            message: format!(
+                "blob digest mismatch: expected sha256:{expected}, got sha256:{actual}"
+            ),
+        });
     }
-    if value.starts_with(LOCAL_DOCKER_PROTOCOL) {
-        return ImageInfo {
-            registry: REGISTRY_LOCAL_DOCKER.to_string(),
-            name: value.replace(LOCAL_DOCKER_PROTOCOL, ""),
-            ..Default::default()
-        };
-    }
-    let mut arch = "".to_string();
-    if let Some(index) = value.find('?') {
-        let query = value.substring(index + 1, value.len());
-        for item in query.split('&') {
-            let arr: Vec<&str> = item.split('=').collect();
-            if arr.len() == 2 && arr[0] == "arch" {
-                arch = arr[1].to_string();
-            }
-        }
-        value = value.substring(0, index).to_string();
-    }
-    if !value.contains(':') {
-        value += ":latest";
-    }
-
-    let mut values: Vec<&str> = value.split(&['/', ':']).collect();
-    let tag = values.pop().unwrap_or_default().to_string();
-    let mut registry = REGISTRY.to_string();
-    let mut user = "library".to_string();
-    let mut name = "".to_string();
-    match values.len() {
-        1 => {
-            name = values[0].to_string();
-        }
-        2 => {
-            user = values[0].to_string();
-            name = values[1].to_string();
-        }
-        3 => {
-            // 默认仅支持https v2
-            registry = format!("https://{}/v2", values[0]);
-            user = values[1].to_string();
-            name = values[2].to_string();
-        }
-        _ => {}
-    }
-
-    ImageInfo {
-        registry,
-        user,
-        name,
-        tag,
-        arch,
-    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -191,11 +153,20 @@ fn parse_auth_info(auth: &str) -> Result<AuthInfo> {
 #[derive(Debug, Clone, Default)]
 pub struct DockerClient {
     registry: String,
+    // file:// / docker:// 模式下懒构建的镜像 tar 一趟索引。client 的克隆
+    // （get_all_layer_info 按层 spawn 任务时）共享同一份，整个 tar 只扫一次。
+    local_index: Arc<TokioOnceCell<Arc<TarIndex>>>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockerTokenInfo {
-    token: String,
+    /// Docker Hub returns both `token` and `access_token` (often identical).
+    /// They must be separate fields — `#[serde(alias)]` treats them as one
+    /// field and fails with "duplicate field `token`" when both are present.
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    access_token: Option<String>,
     expires_in: Option<i32>,
     issued_at: Option<String>,
 }
@@ -311,155 +282,6 @@ fn probe_base_os(manifest: &ImageManifest) -> String {
         }
     }
     String::new()
-}
-
-fn is_pkg_cache(path: &str) -> bool {
-    path.starts_with("var/cache/apt/")
-        || path.starts_with("var/lib/apt/lists/")
-        || path.starts_with("var/cache/apk/")
-        || path.starts_with("var/cache/yum/")
-        || path.starts_with("var/cache/dnf/")
-        || path.starts_with("var/cache/pacman/")
-}
-
-fn is_dev_artifact(path: &str) -> bool {
-    let p = path;
-    // node_modules itself is fine in production; only the build cache is wasteful
-    p.starts_with("node_modules/.cache/")
-        || p.contains("/node_modules/.cache/")
-        || p.starts_with(".git/")
-        || p.contains("/.git/")
-        || p.starts_with("target/debug/")
-        || p.contains("/target/debug/")
-        || p.starts_with("__pycache__/")
-        || p.contains("/__pycache__/")
-        || p.starts_with(".gradle/")
-        || p.contains("/.gradle/")
-        || p.starts_with(".m2/")
-        || p.contains("/.m2/")
-}
-
-/// Public CA trust stores hold *public* certificates, not secrets, so they
-/// must not trip the cert/key extension heuristics.
-///
-/// Deliberately scoped: private keys conventionally live in
-/// `.../ssl/private/`, which is NOT excluded here and stays flagged.
-fn is_public_ca_store(pl: &str, fl: &str) -> bool {
-    // Directories whose entire content is public trust certificates.
-    const CA_DIRS: &[&str] = &[
-        "etc/ssl/certs/",
-        "etc/ssl1.1/certs/",
-        "etc/pki/tls/certs/",
-        "etc/pki/ca-trust/",
-        "etc/ca-certificates/",
-        "usr/share/ca-certificates/",
-        "usr/local/share/ca-certificates/",
-        "usr/lib/ssl/certs/",
-    ];
-    if CA_DIRS
-        .iter()
-        .any(|d| pl.starts_with(d) || pl.contains(&format!("/{d}")))
-    {
-        return true;
-    }
-    // Combined system CA bundle files (the distro/OpenSSL default bundle).
-    const CA_BUNDLES: &[&str] = &[
-        "ca-certificates.crt",
-        "ca-bundle.crt",
-        "ca-bundle.pem",
-        "tls-ca-bundle.pem",
-        "cacert.pem",
-    ];
-    if CA_BUNDLES.contains(&fl) {
-        return true;
-    }
-    // The default OpenSSL bundle is `.../ssl/cert.pem` (Alpine ships it under
-    // etc/ssl and etc/ssl1.1). Scope to an ssl/tls dir so a stray user
-    // `cert.pem` elsewhere is still flagged.
-    if fl == "cert.pem"
-        && (pl.starts_with("etc/ssl")
-            || pl.starts_with("etc/pki/tls")
-            || pl.contains("/ssl/")
-            || pl.contains("/ssl1.1/")
-            || pl.contains("/tls/"))
-    {
-        return true;
-    }
-    false
-}
-
-/// Check whether a file path looks like a sensitive/secret file.
-/// Returns a short description of the risk, or None if not sensitive.
-fn is_sensitive_file(path: &str) -> Option<&'static str> {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let fl = filename.to_lowercase();
-    let pl = path.to_lowercase();
-
-    // .env files
-    if fl == ".env" || fl.starts_with(".env.") || fl.ends_with(".env") {
-        return Some(".env file");
-    }
-    // SSH private keys
-    if matches!(
-        fl.as_str(),
-        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | "id_ecdsa_sk" | "id_ed25519_sk"
-    ) {
-        return Some("SSH private key");
-    }
-    // AWS credentials
-    if pl.contains("/.aws/credentials") {
-        return Some("AWS credentials");
-    }
-    // Public CA trust stores are public certs, not secrets — skip the
-    // cert/key extension heuristics for them (private-key dirs stay flagged).
-    if is_public_ca_store(&pl, &fl) {
-        return None;
-    }
-    // Private key / certificate file extensions
-    if fl.ends_with(".pem")
-        || fl.ends_with(".p12")
-        || fl.ends_with(".pfx")
-        || fl.ends_with(".jks")
-        || fl.ends_with(".keystore")
-    {
-        return Some("Private key / certificate");
-    }
-    // .key files — flag only if not inside a known-safe subtree (node_modules, etc.)
-    if fl.ends_with(".key") && !pl.contains("/node_modules/") {
-        return Some("Private key / certificate");
-    }
-    // Docker registry auth
-    if pl.ends_with(".docker/config.json") {
-        return Some("Docker registry credentials");
-    }
-    // Git / network credential stores
-    if fl == ".netrc" || fl == ".git-credentials" {
-        return Some("Git / network credentials");
-    }
-    // Kubernetes config
-    if fl == "kubeconfig" || fl.ends_with(".kubeconfig") {
-        return Some("Kubernetes config");
-    }
-    // Terraform
-    if fl.ends_with(".tfvars") || fl == "terraform.tfstate" {
-        return Some("Terraform secrets");
-    }
-    // GCP / service account JSON keys
-    if fl.ends_with("-key.json")
-        || ((fl.starts_with("service_account") || fl.starts_with("service-account"))
-            && fl.ends_with(".json"))
-    {
-        return Some("Service account key");
-    }
-    // Password files
-    if fl == ".htpasswd" {
-        return Some("Password file");
-    }
-    // .git directory accidentally copied
-    if pl.starts_with(".git/") || pl.contains("/.git/") {
-        return Some(".git directory (SCM history)");
-    }
-    None
 }
 
 /// Reconstruct an approximate Dockerfile from image history.
@@ -591,21 +413,42 @@ impl DockerAnalyzeResult {
         }
         wasted_list.sort_by_key(|b| Reverse(b.total_size));
 
-        let mut score = 100 - wasted_size * 100 / self.total_size;
-        // 有浪费空间，则分数-1
-        if wasted_size != 0 {
-            score -= 1;
-        }
+        // Scratch / empty images have total_size == 0; avoid div-by-zero
+        // (release builds use panic=abort so this would kill the process).
+        let (score, wasted_percent) = match wasted_size
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(self.total_size))
+        {
+            None => (100u64, 0.0f64),
+            Some(wasted_pct) => {
+                let mut score = 100 - wasted_pct;
+                // 有浪费空间，则分数-1
+                if wasted_size != 0 {
+                    score = score.saturating_sub(1);
+                }
+                (score, (wasted_size as f64) / (self.total_size as f64))
+            }
+        };
         DockerAnalyzeSummary {
             wasted_list,
             wasted_size,
-            wasted_percent: (wasted_size as f64) / (self.total_size as f64),
+            wasted_percent,
             score,
         }
     }
 }
 
 impl DockerTokenInfo {
+    /// Prefer `token`, fall back to `access_token` (OCI-style responses).
+    fn bearer(&self) -> String {
+        self.token
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.access_token.as_deref().filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_string()
+    }
+
     // 判断docker token是否已过期
     fn expired(&self) -> bool {
         let issued_at = self.issued_at.as_deref().unwrap_or("");
@@ -633,6 +476,9 @@ fn get_docker_token_cache() -> &'static Mutex<LruCache<String, DockerTokenInfo>>
 fn get_docker_token_from_cache(key: &str) -> Option<DockerTokenInfo> {
     if let Ok(mut cache) = get_docker_token_cache().lock() {
         if let Some(info) = cache.get(key) {
+            if info.expired() {
+                return None;
+            }
             return Some(info.clone());
         }
     }
@@ -770,50 +616,39 @@ pub struct DockerImageParams {
     // 不完整结果。
     #[serde(skip)]
     pub verify_dup: bool,
+    /// Explicit registry credentials (CLI/env). When `None`,
+    /// `get_auth_token` still tries `~/.docker/config.json`.
+    #[serde(skip)]
+    pub credentials: Option<super::registry_auth::RegistryCredentials>,
 }
 
-async fn get_buf_from_local_docker(image: &str) -> Result<Vec<u8>> {
+impl DockerImageParams {
+    /// Full repository path for registry URLs (`user/name` or `name`).
+    fn repo(&self) -> String {
+        repository_path(&self.user, &self.img)
+    }
+}
+
+// 将 `docker save` 的 stdout 直接重定向到临时文件（由内核完成写入），
+// 不再把整个镜像 tar 缓冲进进程内存。stderr 与旧行为一致丢弃。
+async fn save_local_docker_to_file(image: &str, path: &Path) -> Result<()> {
     tl_info!(image = image, "saving image");
-    // tokio's Command runs `docker save` without blocking an async worker;
-    // `.output()` captures stdout (the image tar) for us.
-    let output = tokio::process::Command::new("docker")
+    let file = File::create(path).map_err(|err| Error::IO { source: err })?;
+    let status = tokio::process::Command::new("docker")
         .arg("save")
         .arg(image)
-        .output()
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::null())
+        .status()
         .await
         .map_err(|err| Error::IO { source: err })?;
-    if !output.status.success() {
+    if !status.success() {
         return Err(Error::Whatever {
             message: "docker save fail".to_string(),
         });
     }
     tl_info!(image = image, "save image done");
-    Ok(output.stdout)
-}
-
-// Async wrappers that run the synchronous local-tar readers on the blocking
-// pool, so the `file://` / `docker://` analysis path never blocks an async
-// worker while walking/extracting from an on-disk image tar.
-async fn tar_content(tar: &str, filename: &str) -> Result<Vec<u8>> {
-    let tar = tar.to_string();
-    let filename = filename.to_string();
-    tokio::task::spawn_blocking(move || get_file_content_from_tar(&tar, &filename))
-        .await
-        .map_err(|e| Error::Whatever {
-            message: format!("tar read task failed: {e}"),
-        })?
-        .context(LayerSnafu {})
-}
-
-async fn tar_size(tar: &str, filename: &str) -> Result<u64> {
-    let tar = tar.to_string();
-    let filename = filename.to_string();
-    tokio::task::spawn_blocking(move || get_file_size_from_tar(&tar, &filename))
-        .await
-        .map_err(|e| Error::Whatever {
-            message: format!("tar read task failed: {e}"),
-        })?
-        .context(LayerSnafu {})
+    Ok(())
 }
 
 // Short human-readable compression label for a layer's media type, used in
@@ -829,17 +664,296 @@ fn compression_label(media_type: &str) -> &'static str {
     }
 }
 
+/// 逐层扫描（analyze 的 "diff" 阶段）的聚合产物。
+struct LayerScan {
+    layers: Vec<ImageLayer>,
+    file_tree_list: Vec<Vec<FileTreeItem>>,
+    file_summary_list: Vec<ImageFileSummary>,
+    big_modified_file_list: Vec<BigModifiedFileInfo>,
+    sensitive_files: Vec<SensitiveFileInfo>,
+    image_size: u64,
+    image_total_size: u64,
+    has_pkg_cache: bool,
+    has_dev_artifacts: bool,
+}
+
+/// 把镜像 history 与每层文件列表合并成分层视图：文件树、修改/删除汇总、
+/// 大文件、敏感文件与启发式标记。纯计算、无 I/O，从 `analyze` 拆出以便
+/// 独立阅读与测试。
+fn scan_layers(
+    config: &ImageConfig,
+    manifest_layers: &[ImageManifestLayer],
+    info_list: &[ImageLayerInfo],
+) -> LayerScan {
+    let mut image_created = 0;
+    if let Some(value) = config.history.last() {
+        if let Ok(value) = DateTime::parse_from_rfc3339(&value.created) {
+            image_created = value.timestamp();
+        }
+    }
+    let mut layers = vec![];
+    let mut file_tree_list: Vec<Vec<FileTreeItem>> = vec![];
+    let mut index = 0;
+    let mut file_summary_list = vec![];
+    let mut image_size = 0;
+    let mut image_total_size = 0;
+    // path → size for every file seen in previous layers; used for O(1) modification detection
+    let mut seen_files: HashMap<String, u64> = HashMap::new();
+    // Paths recorded in `file_summary_list` (modified/removed), maintained
+    // incrementally. `convert_files_to_file_tree` consumes this set so it
+    // no longer rebuilds one from the whole cumulative summary on every
+    // layer (which was O(layers²) over the modified-file count).
+    let mut modified_paths: HashSet<String> = HashSet::new();
+    let mut big_modified_file_list = vec![];
+    let mut sensitive_files: Vec<SensitiveFileInfo> = vec![];
+    // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
+    let mut sensitive_seen: HashSet<String> = HashSet::new();
+    let mut has_pkg_cache = false;
+    let mut has_dev_artifacts = false;
+    for (layer_index, history) in config.history.iter().enumerate() {
+        let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
+            // 如果5分钟内
+            image_created - value.timestamp() < 300
+        } else {
+            false
+        };
+        let empty = history.empty_layer.unwrap_or_default();
+        let mut digest = "".to_string();
+        let mut info = &ImageLayerInfo {
+            ..Default::default()
+        };
+        let mut media_type = "".to_string();
+        let mut size = 0;
+        let mut file_tree = vec![];
+        // 只有非空的layer需要获取files
+        if !empty {
+            // manifest中的layer只对应非空的操作
+            if let Some(value) = manifest_layers.get(index) {
+                info = info_list.get(index).unwrap();
+                size = value.size;
+                digest = value.digest.clone();
+                media_type = value.media_type.clone();
+                // single pass: detect modifications, update seen-files, collect big files
+                for file in &info.files {
+                    // OCI opaque whiteout: wipe every previously-seen path
+                    // under this directory (and the dir itself).
+                    if file.is_opaque == Some(true) {
+                        let dir = file.path.as_str();
+                        let doomed: Vec<(String, u64)> = seen_files
+                            .iter()
+                            .filter(|(p, _)| path_under_dir(p, dir))
+                            .map(|(p, &sz)| (p.clone(), sz))
+                            .collect();
+                        for (path, prev_size) in doomed {
+                            seen_files.remove(&path);
+                            let mut file_info = file.clone();
+                            file_info.path = path.clone();
+                            file_info.size = prev_size;
+                            file_info.is_opaque = None;
+                            file_summary_list.push(ImageFileSummary {
+                                layer_index,
+                                op: Op::Removed,
+                                info: file_info,
+                            });
+                            modified_paths.insert(path);
+                        }
+                        // Opaque marker is not real content — skip identity tracking.
+                        continue;
+                    }
+                    if layer_index != 0 {
+                        if let Some(&prev_size) = seen_files.get(&file.path) {
+                            let op;
+                            let mut file_info = file.clone();
+                            if file.is_whiteout.is_some() {
+                                op = Op::Removed;
+                                file_info.size = prev_size;
+                            } else {
+                                // Re-adding a path always counts as Modified
+                                // for efficiency (the new layer still stores
+                                // the bytes), even when size/mode match.
+                                op = Op::Modified;
+                            }
+                            file_summary_list.push(ImageFileSummary {
+                                layer_index,
+                                op,
+                                info: file_info,
+                            });
+                            modified_paths.insert(file.path.clone());
+                        }
+                    }
+                    if file.is_whiteout.is_some() {
+                        seen_files.remove(&file.path);
+                    } else {
+                        seen_files.insert(file.path.clone(), file.size);
+                    }
+                    if is_new && file.size >= 1_000_000 && file.link.is_empty() {
+                        big_modified_file_list.push(BigModifiedFileInfo {
+                            path: file.path.clone(),
+                            size: file.size,
+                            digest: digest.clone(),
+                            mode: file.mode.clone(),
+                            uid: file.uid,
+                            gid: file.gid,
+                        });
+                    }
+                    // Heuristic tag detection
+                    if !has_pkg_cache && is_pkg_cache(&file.path) {
+                        has_pkg_cache = true;
+                    }
+                    if !has_dev_artifacts && is_dev_artifact(&file.path) {
+                        has_dev_artifacts = true;
+                    }
+                    // Sensitive file scan (skip whiteout/deleted entries)
+                    if file.is_whiteout.is_none() {
+                        let user_cfg = load_user_sensitive_patterns();
+                        let hit = if let Some(r) = is_sensitive_file(&file.path) {
+                            // Built-in match — suppress if user explicitly ignores it
+                            if user_cfg.is_ignored(&file.path) {
+                                None
+                            } else {
+                                Some(r.to_string())
+                            }
+                        } else {
+                            user_cfg.check(&file.path).map(|r| r.to_string())
+                        };
+                        if let Some(reason) = hit {
+                            // For .git/ entries collapse to the git-root to avoid thousands of rows
+                            let dedup_key = if let Some(pos) = file
+                                .path
+                                .find("/.git/")
+                                .map(|p| p + 1)
+                                .or_else(|| file.path.starts_with(".git/").then_some(0))
+                            {
+                                format!("{}/.git/", &file.path[..pos])
+                            } else {
+                                file.path.clone()
+                            };
+                            if sensitive_seen.insert(dedup_key.clone()) {
+                                // For .git/ show the collapsed directory path
+                                let display_path = if dedup_key.ends_with("/.git/") {
+                                    dedup_key
+                                } else {
+                                    file.path.clone()
+                                };
+                                sensitive_files.push(SensitiveFileInfo {
+                                    path: display_path,
+                                    size: file.size,
+                                    layer_index,
+                                    reason,
+                                });
+                            }
+                        }
+                    }
+                }
+                image_size += info.size;
+                image_total_size += info.unpack_size;
+                // Uses the incrementally-maintained `modified_paths` set.
+                file_tree = convert_files_to_file_tree(&info.files, &modified_paths);
+            }
+            index += 1;
+        }
+
+        let created_by = history.created_by.clone().unwrap_or_default();
+
+        layers.push(ImageLayer {
+            created: history.created.clone(),
+            cmd: created_by,
+            empty,
+            digest,
+            media_type,
+            unpack_size: info.unpack_size,
+            size,
+        });
+        file_tree_list.push(file_tree);
+    }
+    LayerScan {
+        layers,
+        file_tree_list,
+        file_summary_list,
+        big_modified_file_list,
+        sensitive_files,
+        image_size,
+        image_total_size,
+        has_pkg_cache,
+        has_dev_artifacts,
+    }
+}
+
+/// 从 image config 提取运行用户 / 环境变量 / label 列表。
+fn extract_image_meta(config: &ImageConfig) -> (String, Vec<String>, Vec<String>) {
+    let mut run_user = "".to_string();
+    let mut envs = vec![];
+    let mut labels = vec![];
+    if let Some(ref extra_info) = config.config {
+        if let Some(ref value) = extra_info.user {
+            run_user = value.to_string();
+        }
+        if let Some(ref value) = extra_info.env {
+            envs = value.clone();
+        }
+        if let Some(ref value) = extra_info.labels {
+            for (k, v) in value.iter() {
+                labels.push(format!("{k}={v}"));
+            }
+        }
+    }
+    (run_user, envs, labels)
+}
+
+/// 启发式风险标签（enrich 阶段的一部分）。
+fn build_risk_tags(scan: &LayerScan, run_user: &str) -> Vec<String> {
+    let mut tags: Vec<String> = vec![];
+    if scan.has_pkg_cache {
+        tags.push("[Contains Package Manager Cache]".to_string());
+    }
+    if scan.has_dev_artifacts {
+        tags.push("[Development Artifacts]".to_string());
+    }
+    if !scan.sensitive_files.is_empty() {
+        tags.push("[Potential Secrets]".to_string());
+    }
+    if run_user.is_empty() || run_user == "root" {
+        tags.push("[Runs as Root]".to_string());
+    }
+    if scan.layers.len() > 30 {
+        tags.push(format!("[High Layer Count: {}]", scan.layers.len()));
+    }
+    tags
+}
+
 impl DockerClient {
     pub fn new(register: &str) -> Self {
         DockerClient {
             registry: register.to_string(),
+            ..Default::default()
         }
     }
     fn is_local(&self) -> bool {
         self.registry == REGISTRY_LOCAL_FILE
     }
+    /// Build (once, on the blocking pool) and share the one-pass index of
+    /// the local image tar. 此前 manifest / 每层 size / 每层内容各自全量
+    /// 扫一遍 tar，整体是 O(层数 × tar 大小)；索引化后只扫一次。
+    async fn local_tar_index(&self, tar: &str) -> Result<Arc<TarIndex>> {
+        let index = self
+            .local_index
+            .get_or_try_init(|| async {
+                let tar = tar.to_string();
+                tokio::task::spawn_blocking(move || TarIndex::build(&tar))
+                    .await
+                    .map_err(|e| Error::Whatever {
+                        message: format!("tar index task failed: {e}"),
+                    })?
+                    .context(LayerSnafu {})
+                    .map(Arc::new)
+            })
+            .await?;
+        Ok(index.clone())
+    }
     async fn get_local_manifest(&self, image: &str) -> Result<LocalManifest> {
-        let data = tar_content(image, "manifest.json").await?;
+        let index = self.local_tar_index(image).await?;
+        // manifest.json 只有几 KB：seek + 一次小读，无需再进 blocking pool
+        let data = index.read("manifest.json").context(LayerSnafu {})?;
 
         let manifest_list =
             serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {
@@ -897,14 +1011,31 @@ impl DockerClient {
                 continue;
             }
             if status.as_u16() >= StatusCode::UNAUTHORIZED.as_u16() {
-                let err = resp
-                    .json::<DockerRequestErrorResp>()
-                    .await
-                    .context(JsonSnafu { url: url.clone() })?;
+                let status_code = status.as_u16();
+                // Prefer the registry error body when present; never index
+                // an empty `errors` array (non-standard registries).
+                let (message, code) = match resp.json::<DockerRequestErrorResp>().await {
+                    Ok(body) => body
+                        .errors
+                        .into_iter()
+                        .next()
+                        .map(|e| (e.message, e.code))
+                        .unwrap_or_else(|| {
+                            (
+                                format!("registry returned HTTP {status_code}"),
+                                status_code.to_string(),
+                            )
+                        }),
+                    Err(_) => (
+                        format!("registry returned HTTP {status_code}"),
+                        status_code.to_string(),
+                    ),
+                };
                 return Err(Error::Docker {
-                    message: err.errors[0].message.clone(),
-                    code: err.errors[0].code.clone(),
+                    message,
+                    code,
                     url,
+                    status: status_code,
                 });
             }
             return Ok(resp);
@@ -921,13 +1052,40 @@ impl DockerClient {
         resp.bytes().await.context(JsonSnafu { url })
     }
 
+    /// Stream a blob to disk, verify it, and move it into place.
+    ///
+    /// The download lands in a same-directory temp file; only after the
+    /// content sha256 matches `expected_digest` is it atomically renamed to
+    /// `path`. A crash mid-download, a truncated body, or a concurrent
+    /// analysis sharing this base layer can therefore never leave a
+    /// partial/corrupt blob at the final cache path.
+    async fn download_blob_to_path(
+        &self,
+        url: String,
+        headers: HashMap<String, String>,
+        path: &Path,
+        expected_digest: &str,
+    ) -> Result<()> {
+        let tmp = tmp_sibling_path(path);
+        let result = async {
+            self.stream_blob_with_retry(url, headers, &tmp).await?;
+            verify_blob_digest(&tmp, expected_digest).await?;
+            tokio::fs::rename(&tmp, path).await.context(IOSnafu {})
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        result
+    }
+
     /// Stream a blob response directly to disk without buffering the whole
     /// body. Large layers from registry CDNs occasionally have the connection
     /// reset mid-transfer (surfaces as reqwest "error decoding response
     /// body"); retry a bounded number of times, resuming from the bytes
     /// already on disk via an HTTP `Range` request so a multi-hundred-MiB
     /// layer is not re-fetched from scratch.
-    async fn download_blob_to_path(
+    async fn stream_blob_with_retry(
         &self,
         url: String,
         headers: HashMap<String, String>,
@@ -1019,20 +1177,21 @@ impl DockerClient {
         params: &DockerImageParams,
     ) -> Result<(ImageManifest, Vec<String>)> {
         let img = &params.img;
-        let user = &params.user;
         let tag = &params.tag;
         let token = &params.token;
         if self.is_local() {
             let local_manifest = self.get_local_manifest(img).await?;
             let mut image_manifest: ImageManifest = local_manifest.into();
+            let index = self.local_tar_index(img).await?;
             for layer in image_manifest.layers.iter_mut() {
-                let size = tar_size(img, &layer.digest).await?;
-                layer.size = size;
+                // 与旧 tar_size 语义一致：条目缺失按 0 处理
+                layer.size = index.size_of(&layer.digest).unwrap_or(0);
             }
             return Ok((image_manifest, vec![]));
         }
 
-        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        let repo = params.repo();
+        let url = format!("{}/{repo}/manifests/{tag}", self.registry);
         let key = format!("{url}:{}", params.arch);
         if let Some(cached) = get_manifest_from_cache(&key) {
             return Ok(cached);
@@ -1071,14 +1230,18 @@ impl DockerClient {
                     None => m.platform.architecture.clone(),
                 })
                 .collect();
-            let chosen = index.guess_manifest(&params.arch);
+            let chosen = index
+                .guess_manifest(&params.arch)
+                .ok_or_else(|| Error::Whatever {
+                    message: format!("image index of {url} contains no manifests"),
+                })?;
             tl_info!(arch = chosen.platform.architecture, "guess manifest");
             let mut headers = HashMap::new();
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
             }
             headers.insert("Accept".to_string(), chosen.media_type);
-            let url = format!("{}/{user}/{img}/manifests/{}", self.registry, chosen.digest);
+            let url = format!("{}/{repo}/manifests/{}", self.registry, chosen.digest);
             let data = self.get_bytes(url.clone(), headers).await?;
             let manifest = serde_json::from_slice(&data).context(SerdeJsonSnafu {
                 category: "get_manifest",
@@ -1102,7 +1265,8 @@ impl DockerClient {
         let img = &params.img;
         let data = if self.is_local() {
             let local_manifest = self.get_local_manifest(img).await?;
-            tar_content(img, &local_manifest.config).await?
+            let index = self.local_tar_index(img).await?;
+            index.read(&local_manifest.config).context(LayerSnafu {})?
         } else {
             let (manifest, _) = self.get_manifest(params).await?;
             self.get_blob(params, &manifest.config.digest).await?
@@ -1115,21 +1279,28 @@ impl DockerClient {
     }
     // 获取镜像分层的blob
     pub async fn get_blob(&self, params: &DockerImageParams, digest: &str) -> Result<Vec<u8>> {
-        // 忽略出错，如果出错直接从网络加载
+        // 忽略出错，如果出错直接从网络加载；缓存内容与 digest 不符（如旧
+        // 版本非原子写入残留的半截文件）同样按 miss 处理重新下载。
         if let Ok(data) = get_blob_from_file(digest).await {
-            tl_info!(digest, "blob cache hit");
-            return Ok(data);
+            if bytes_match_digest(&data, digest) {
+                tl_info!(digest, "blob cache hit");
+                return Ok(data);
+            }
+            tl_info!(digest, "cached blob digest mismatch, refetching");
         }
-        let user = &params.user;
-        let img = &params.img;
         let token = &params.token;
-        let url = format!("{}/{user}/{img}/blobs/{digest}", self.registry);
+        let url = format!("{}/{}/blobs/{digest}", self.registry, params.repo());
         tl_info!(url = url, "getting blob");
         let mut headers = HashMap::new();
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
         let resp = self.get_bytes(url.clone(), headers).await?;
+        if !bytes_match_digest(&resp, digest) {
+            return Err(Error::Whatever {
+                message: format!("blob digest mismatch for {digest}"),
+            });
+        }
 
         // 出错忽略
         // 写入数据失败不影响后续
@@ -1144,15 +1315,15 @@ impl DockerClient {
     ) -> Result<ImageLayerInfo> {
         let img = &params.img;
         if self.is_local() {
-            let buf = tar_content(img, &layer.digest).await?;
-            let compressed_size = buf.len() as u64;
+            let index = self.local_tar_index(img).await?;
             let media_type = layer.media_type.clone();
-            // Offload CPU-bound decompression to the dedicated blocking pool
-            // instead of `block_in_place`, which parks a runtime worker. With
-            // up to `2×CPU` layers decompressing at once, parking workers can
-            // starve the async I/O driving the other downloads.
+            let digest = layer.digest.clone();
+            // 通过索引 seek 到层数据后流式解析，不再把整层缓冲进内存。
+            // CPU 密集的解压照旧放 blocking pool（而非 block_in_place，
+            // 避免占住 runtime worker 饿死其它任务的异步 I/O）。
             return tokio::task::spawn_blocking(move || {
-                get_files_from_layer(Cursor::new(buf), &media_type, compressed_size)
+                let (reader, size) = index.open_reader(&digest).context(LayerSnafu {})?;
+                get_files_from_layer(BufReader::new(reader), &media_type, size)
                     .context(LayerSnafu {})
             })
             .await
@@ -1168,9 +1339,8 @@ impl DockerClient {
                 .unwrap_or(false);
 
         if !is_cached {
-            let user = &params.user;
             let token = &params.token;
-            let url = format!("{}/{user}/{img}/blobs/{}", self.registry, layer.digest);
+            let url = format!("{}/{}/blobs/{}", self.registry, params.repo(), layer.digest);
             tl_info!(url = url, "getting blob");
             if !params.quiet {
                 eprintln!(
@@ -1189,8 +1359,25 @@ impl DockerClient {
             if !token.is_empty() {
                 headers.insert("Authorization".to_string(), format!("Bearer {token}"));
             }
-            self.download_blob_to_path(url.clone(), headers, &path)
-                .await?;
+            if let Err(err) = self
+                .download_blob_to_path(url.clone(), headers, &path, &layer.digest)
+                .await
+            {
+                // 大镜像的分析可能超过 bearer token 的有效期（Docker Hub
+                // 约 5 分钟）；401 说明 token 在分析中途失效，强制刷新后
+                // 重试一次，其余错误直接上抛。
+                if !is_unauthorized(&err) {
+                    return Err(err);
+                }
+                tl_info!(digest = layer.digest, "blob unauthorized, refreshing token");
+                let token = self.refresh_auth_token(params).await?;
+                let mut headers = HashMap::new();
+                if !token.is_empty() {
+                    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+                }
+                self.download_blob_to_path(url.clone(), headers, &path, &layer.digest)
+                    .await?;
+            }
             tl_info!(url = url, "got blob");
         } else {
             tl_info!(digest = layer.digest, "blob cache hit");
@@ -1230,16 +1417,16 @@ impl DockerClient {
         params: DockerImageParams,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
-        let trace_id = TRACE_ID.with(clone_value_from_task_local);
-        // Default cap: `min(layers.len(), 2 × logical CPUs)`. Decompression
-        // is CPU-bound — oversubscribing beyond ~2× yields no extra
-        // throughput, only scheduler contention. Without this cap a 50-layer
-        // image would spawn 50 concurrent decompression tasks regardless of
-        // host CPU count. An explicit `threads:` in `config.yml` overrides.
-        let threads = must_load_config()
-            .threads
-            .unwrap_or_else(|| layers.len().min(num_cpus::get() * 2))
-            .max(1);
+        // 无 scope 时降级为空 traceId（库调用方 / 测试可能不设置），
+        // 与 tl_* 宏的 try_with 行为保持一致。
+        let trace_id = TRACE_ID
+            .try_with(clone_value_from_task_local)
+            .unwrap_or_default();
+        // Cap concurrent download/decompress work. Defaults to
+        // `min(layers, 2×CPUs)`; override with `layer_concurrency` (or legacy
+        // `threads`) in config.yml. Oversubscribing past ~2×CPUs just adds
+        // scheduler contention on the CPU-bound decompress path.
+        let threads = get_layer_concurrency(layers.len());
         let sem = Arc::new(tokio::sync::Semaphore::new(threads));
 
         let mut handles = Vec::with_capacity(layers.len());
@@ -1264,14 +1451,24 @@ impl DockerClient {
         Ok(info_list)
     }
     async fn get_auth_token(&self, params: &DockerImageParams) -> Result<String> {
+        self.fetch_auth_token(params, false).await
+    }
+    /// 强制重新获取 token（跳过缓存读取，仍会回写缓存）。用于分析中途
+    /// token 提前失效（registry 返回 401 而缓存仍认为未过期）的场景。
+    async fn refresh_auth_token(&self, params: &DockerImageParams) -> Result<String> {
+        self.fetch_auth_token(params, true).await
+    }
+    async fn fetch_auth_token(
+        &self,
+        params: &DockerImageParams,
+        skip_cache: bool,
+    ) -> Result<String> {
         // 本地文件无需token
         if self.is_local() {
             return Ok("".to_string());
         }
-        let user = &params.user;
-        let img = &params.img;
         let tag = &params.tag;
-        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
         let builder = get_http_client()
             .head(url.clone())
             .timeout(Duration::from_secs(5 * 60));
@@ -1286,21 +1483,45 @@ impl DockerClient {
                     "{}?service={}&scope={}",
                     auth_info.auth, auth_info.service, auth_info.scope
                 );
-                if let Some(info) = get_docker_token_from_cache(&url) {
-                    if !info.expired() {
-                        return Ok(info.token);
+                // Cache key includes whether we have credentials so an
+                // anonymous token is not reused after the user supplies
+                // a login (and vice versa).
+                let creds = super::registry_auth::resolve_for_registry(
+                    &self.registry,
+                    params.credentials.as_ref(),
+                );
+                let cache_key = match &creds {
+                    Some(c) => format!("{url}#user={}", c.username),
+                    None => url.clone(),
+                };
+                if !skip_cache {
+                    if let Some(info) = get_docker_token_from_cache(&cache_key) {
+                        if !info.expired() {
+                            return Ok(info.bearer());
+                        }
                     }
                 }
-                tl_info!(url = url, "getting token");
-                let mut resp = self
-                    .get::<DockerTokenInfo>(url.clone(), HashMap::new())
-                    .await?;
+                tl_info!(url = url, authenticated = creds.is_some(), "getting token");
+                let mut headers = HashMap::new();
+                if let Some(c) = creds.as_ref() {
+                    headers.insert(
+                        "Authorization".to_string(),
+                        format!("Basic {}", c.basic_token()),
+                    );
+                }
+                let mut resp = self.get::<DockerTokenInfo>(url.clone(), headers).await?;
+                let bearer = resp.bearer();
+                if bearer.is_empty() {
+                    return Err(Error::Whatever {
+                        message: "registry auth returned empty token".to_string(),
+                    });
+                }
                 if resp.issued_at.is_none() {
                     resp.issued_at = Some(Utc::now().to_rfc3339());
                 }
-                set_docker_token_to_cache(&url, resp.clone());
+                set_docker_token_to_cache(&cache_key, resp.clone());
                 tl_info!(url = url, "got token");
-                return Ok(resp.token);
+                return Ok(bearer);
             }
         }
         Ok("".to_string())
@@ -1314,11 +1535,9 @@ impl DockerClient {
         if self.is_local() {
             return None;
         }
-        let user = &params.user;
-        let img = &params.img;
         let tag = &params.tag;
         let token = &params.token;
-        let url = format!("{}/{user}/{img}/manifests/{tag}", self.registry);
+        let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
         let client = get_http_client();
         let accepts = [
             MEDIA_TYPE_IMAGE_INDEX,
@@ -1387,19 +1606,11 @@ impl DockerClient {
         }
         let (manifest, supported_archs) = self.get_manifest(params).await?;
         let config = self.get_image_config(params).await?;
-        let user = &params.user;
-        let img = &params.img;
+        let repo = params.repo();
         let tag = &params.tag;
 
-        let mut layers = vec![];
-        // let mut layer_infos = vec![];
-        let mut file_tree_list: Vec<Vec<FileTreeItem>> = vec![];
-        let mut index = 0;
-        let mut file_summary_list = vec![];
-        tl_info!(user = user, img = img, tag = tag, "analyzing image",);
+        tl_info!(repo = repo.as_str(), tag = tag, "analyzing image",);
 
-        let mut image_size = 0;
-        let mut image_total_size = 0;
         if !self.is_local() && !params.quiet {
             let layer_count = manifest.layers.len();
             let total_bytes: u64 = manifest.layers.iter().map(|l| l.size).sum();
@@ -1417,204 +1628,46 @@ impl DockerClient {
         let info_list = self
             .get_all_layer_info(params.clone(), manifest.layers.clone())
             .await?;
-        let mut image_created = 0;
-        if let Some(value) = config.history.last() {
-            if let Ok(value) = DateTime::parse_from_rfc3339(&value.created) {
-                image_created = value.timestamp();
-            }
-        }
-        // path → size for every file seen in previous layers; used for O(1) modification detection
-        let mut seen_files: HashMap<String, u64> = HashMap::new();
-        // Paths recorded in `file_summary_list` (modified/removed), maintained
-        // incrementally. `convert_files_to_file_tree` consumes this set so it
-        // no longer rebuilds one from the whole cumulative summary on every
-        // layer (which was O(layers²) over the modified-file count).
-        let mut modified_paths: HashSet<String> = HashSet::new();
-        let mut big_modified_file_list = vec![];
-        let mut sensitive_files: Vec<SensitiveFileInfo> = vec![];
-        // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
-        let mut sensitive_seen: HashSet<String> = HashSet::new();
-        let mut has_pkg_cache = false;
-        let mut has_dev_artifacts = false;
-        for (layer_index, history) in config.history.iter().enumerate() {
-            let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
-                // 如果5分钟内
-                image_created - value.timestamp() < 300
-            } else {
-                false
-            };
-            let empty = history.empty_layer.unwrap_or_default();
-            let mut digest = "".to_string();
-            let mut info = &ImageLayerInfo {
-                ..Default::default()
-            };
-            let mut media_type = "".to_string();
-            let mut size = 0;
-            let mut file_tree = vec![];
-            // 只有非空的layer需要获取files
-            if !empty {
-                // manifest中的layer只对应非空的操作
-                if let Some(value) = manifest.layers.get(index) {
-                    info = info_list.get(index).unwrap();
-                    size = value.size;
-                    digest = value.digest.clone();
-                    media_type = value.media_type.clone();
-                    // single pass: detect modifications, update seen-files, collect big files
-                    for file in &info.files {
-                        if layer_index != 0 {
-                            if let Some(&prev_size) = seen_files.get(&file.path) {
-                                let op;
-                                let mut file_info = file.clone();
-                                if file.is_whiteout.is_some() {
-                                    op = Op::Removed;
-                                    file_info.size = prev_size;
-                                } else {
-                                    op = Op::Modified;
-                                }
-                                file_summary_list.push(ImageFileSummary {
-                                    layer_index,
-                                    op,
-                                    info: file_info,
-                                });
-                                modified_paths.insert(file.path.clone());
-                            }
-                        }
-                        if file.is_whiteout.is_some() {
-                            seen_files.remove(&file.path);
-                        } else {
-                            seen_files.insert(file.path.clone(), file.size);
-                        }
-                        if is_new && file.size >= 1_000_000 && file.link.is_empty() {
-                            big_modified_file_list.push(BigModifiedFileInfo {
-                                path: file.path.clone(),
-                                size: file.size,
-                                digest: digest.clone(),
-                                mode: file.mode.clone(),
-                                uid: file.uid,
-                                gid: file.gid,
-                            });
-                        }
-                        // Heuristic tag detection
-                        if !has_pkg_cache && is_pkg_cache(&file.path) {
-                            has_pkg_cache = true;
-                        }
-                        if !has_dev_artifacts && is_dev_artifact(&file.path) {
-                            has_dev_artifacts = true;
-                        }
-                        // Sensitive file scan (skip whiteout/deleted entries)
-                        if file.is_whiteout.is_none() {
-                            let user_cfg = load_user_sensitive_patterns();
-                            let hit = if let Some(r) = is_sensitive_file(&file.path) {
-                                // Built-in match — suppress if user explicitly ignores it
-                                if user_cfg.is_ignored(&file.path) {
-                                    None
-                                } else {
-                                    Some(r.to_string())
-                                }
-                            } else {
-                                user_cfg.check(&file.path).map(|r| r.to_string())
-                            };
-                            if let Some(reason) = hit {
-                                // For .git/ entries collapse to the git-root to avoid thousands of rows
-                                let dedup_key = if let Some(pos) = file
-                                    .path
-                                    .find("/.git/")
-                                    .map(|p| p + 1)
-                                    .or_else(|| file.path.starts_with(".git/").then_some(0))
-                                {
-                                    format!("{}/.git/", &file.path[..pos])
-                                } else {
-                                    file.path.clone()
-                                };
-                                if sensitive_seen.insert(dedup_key.clone()) {
-                                    // For .git/ show the collapsed directory path
-                                    let display_path = if dedup_key.ends_with("/.git/") {
-                                        dedup_key
-                                    } else {
-                                        file.path.clone()
-                                    };
-                                    sensitive_files.push(SensitiveFileInfo {
-                                        path: display_path,
-                                        size: file.size,
-                                        layer_index,
-                                        reason,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    image_size += info.size;
-                    image_total_size += info.unpack_size;
-                    // Uses the incrementally-maintained `modified_paths` set.
-                    file_tree = convert_files_to_file_tree(&info.files, &modified_paths);
-                }
-                index += 1;
-            }
+        // 纯计算的逐层合并（diff 阶段）：文件树、修改/删除汇总、大文件、
+        // 敏感文件与启发式标记。见 `scan_layers`。
+        let scan = scan_layers(&config, &manifest.layers, &info_list);
 
-            let created_by = history.created_by.clone().unwrap_or_default();
-
-            layers.push(ImageLayer {
-                created: history.created.clone(),
-                cmd: created_by,
-                empty,
-                digest,
-                media_type,
-                unpack_size: info.unpack_size,
-                size,
-            });
-            file_tree_list.push(file_tree);
-        }
-
-        tl_info!(user = user, img = img, tag = tag, "analyze image done",);
-        let image_name = format!("{user}/{img}:{tag}");
-        let mut run_user = "".to_string();
-        let mut envs = vec![];
-        let mut labels = vec![];
-        if let Some(ref extra_info) = config.config {
-            if let Some(ref value) = extra_info.user {
-                run_user = value.to_string();
-            }
-            if let Some(ref value) = extra_info.env {
-                envs = value.clone();
-            }
-            if let Some(ref value) = extra_info.labels {
-                for (k, v) in value.iter() {
-                    labels.push(format!("{k}={v}"));
-                }
-            }
-        }
+        tl_info!(repo = repo.as_str(), tag = tag, "analyze image done",);
+        let image_name = format!("{repo}:{tag}");
+        let (run_user, envs, labels) = extract_image_meta(&config);
 
         // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown".
         // Computed up-front so the ELF runtime-compat probe below can compare the
         // entrypoint binary's libc requirements against the host's glibc version.
         let base_os = if !self.is_local() {
-            let base_os = tokio::task::block_in_place(|| probe_base_os(&manifest));
+            // 与其它重 I/O 一致走 blocking pool（block_in_place 会占住一个
+            // runtime worker）。manifest 此后不再使用，直接 move 进闭包。
+            let base_os = tokio::task::spawn_blocking(move || probe_base_os(&manifest))
+                .await
+                .map_err(|e| Error::Whatever {
+                    message: format!("base os probe task failed: {e}"),
+                })?;
             if base_os.is_empty() {
-                detect_os_from_history(&layers)
+                detect_os_from_history(&scan.layers)
                     .unwrap_or_else(|| "Scratch / Distroless (no OS identifier found)".to_string())
             } else {
                 base_os
             }
         } else {
-            detect_os_from_history(&layers).unwrap_or_default()
+            detect_os_from_history(&scan.layers).unwrap_or_default()
         };
 
-        let mut tags: Vec<String> = vec![];
-        if has_pkg_cache {
-            tags.push("[Contains Package Manager Cache]".to_string());
-        }
-        if has_dev_artifacts {
-            tags.push("[Development Artifacts]".to_string());
-        }
-        if !sensitive_files.is_empty() {
-            tags.push("[Potential Secrets]".to_string());
-        }
-        if run_user.is_empty() || run_user == "root" {
-            tags.push("[Runs as Root]".to_string());
-        }
-        if layers.len() > 30 {
-            tags.push(format!("[High Layer Count: {}]", layers.len()));
-        }
+        let tags = build_risk_tags(&scan, &run_user);
+        let LayerScan {
+            layers,
+            file_tree_list,
+            file_summary_list,
+            big_modified_file_list,
+            sensitive_files,
+            image_size,
+            image_total_size,
+            ..
+        } = scan;
 
         // Cross-layer duplicate detection AND ELF runtime-compat probing
         // both decompress + read layer blobs from disk (CPU + blocking I/O),
@@ -1689,15 +1742,15 @@ pub async fn analyze_docker_image(
     lang: crate::i18n::Lang,
     quiet: bool,
     verify_dup: bool,
+    credentials: Option<super::registry_auth::RegistryCredentials>,
 ) -> Result<DockerAnalyzeResult> {
     if image_info.registry == REGISTRY_LOCAL_DOCKER {
-        let buf = get_buf_from_local_docker(&image_info.name).await?;
-        let mut tmpfile = tempfile::Builder::new().tempfile().unwrap();
+        // 临时文件在 analyze 完成前保持存活（NamedTempFile drop 时自动删除）
+        let tmpfile = tempfile::Builder::new()
+            .tempfile()
+            .map_err(|err| Error::IO { source: err })?;
         let filename = tmpfile.path().to_string_lossy().to_string();
-        tl_info!("saving tmp file");
-        tmpfile.write_all(&buf).context(IOSnafu {})?;
-        tmpfile.flush().context(IOSnafu {})?;
-        tl_info!("save tmp file done");
+        save_local_docker_to_file(&image_info.name, tmpfile.path()).await?;
 
         let c = DockerClient::new(REGISTRY_LOCAL_FILE);
         c.analyze(&mut DockerImageParams {
@@ -1705,6 +1758,7 @@ pub async fn analyze_docker_image(
             lang,
             quiet,
             verify_dup,
+            credentials,
             ..Default::default()
         })
         .await
@@ -1718,6 +1772,7 @@ pub async fn analyze_docker_image(
             lang,
             quiet,
             verify_dup,
+            credentials,
             ..Default::default()
         })
         .await
@@ -1729,79 +1784,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_image_info_simple() {
-        let info = parse_image_info("redis:alpine");
-        assert_eq!(info.name, "redis");
-        assert_eq!(info.tag, "alpine");
-        assert_eq!(info.user, "library");
-        assert_eq!(info.registry, REGISTRY);
+    fn summary_handles_zero_total_size() {
+        let result = DockerAnalyzeResult {
+            total_size: 0,
+            ..Default::default()
+        };
+        let summary = result.summary();
+        assert_eq!(summary.score, 100);
+        assert_eq!(summary.wasted_percent, 0.0);
+        assert_eq!(summary.wasted_size, 0);
     }
 
     #[test]
-    fn test_parse_image_info_no_tag_defaults_to_latest() {
-        let info = parse_image_info("redis");
-        assert_eq!(info.name, "redis");
-        assert_eq!(info.tag, "latest");
+    fn docker_token_accepts_both_token_and_access_token() {
+        // Docker Hub returns both fields; serde(alias) would error with
+        // "duplicate field `token`".
+        let json = r#"{
+            "token": "tok-primary",
+            "access_token": "tok-primary",
+            "expires_in": 300,
+            "issued_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let info: DockerTokenInfo = serde_json::from_str(json).expect("both fields");
+        assert_eq!(info.bearer(), "tok-primary");
     }
 
     #[test]
-    fn test_parse_image_info_with_user() {
-        let info = parse_image_info("vicanso/diving:v1.0");
-        assert_eq!(info.user, "vicanso");
-        assert_eq!(info.name, "diving");
-        assert_eq!(info.tag, "v1.0");
+    fn docker_token_falls_back_to_access_token() {
+        let json = r#"{"access_token": "oci-only", "expires_in": 60}"#;
+        let info: DockerTokenInfo = serde_json::from_str(json).expect("access_token only");
+        assert_eq!(info.bearer(), "oci-only");
     }
 
     #[test]
-    fn test_parse_image_info_with_registry() {
-        let info = parse_image_info("registry.example.com/user/image:v2.3");
-        assert_eq!(info.registry, "https://registry.example.com/v2");
-        assert_eq!(info.user, "user");
-        assert_eq!(info.name, "image");
-        assert_eq!(info.tag, "v2.3");
+    fn bytes_match_digest_verifies_sha256_only() {
+        // sha256("abc")
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(bytes_match_digest(b"abc", digest));
+        assert!(!bytes_match_digest(b"abd", digest));
+        // Non-sha256 digests (local tar layouts) are not verifiable.
+        assert!(bytes_match_digest(b"anything", "layer.tar"));
     }
 
     #[test]
-    fn test_parse_image_info_file_protocol() {
-        let info = parse_image_info("file:///tmp/image.tar");
-        assert_eq!(info.registry, REGISTRY_LOCAL_FILE);
-        assert_eq!(info.name, "/tmp/image.tar");
+    fn unauthorized_detection_uses_http_status() {
+        assert!(is_unauthorized(&Error::Docker {
+            message: "expired".to_string(),
+            code: "UNAUTHORIZED".to_string(),
+            url: "u".to_string(),
+            status: 401,
+        }));
+        assert!(!is_unauthorized(&Error::Docker {
+            message: "denied".to_string(),
+            code: "DENIED".to_string(),
+            url: "u".to_string(),
+            status: 403,
+        }));
+        assert!(!is_unauthorized(&Error::Whatever {
+            message: "x".to_string(),
+        }));
     }
 
     #[test]
-    fn test_parse_image_info_docker_protocol() {
-        let info = parse_image_info("docker://redis:alpine");
-        assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
-        assert_eq!(info.name, "redis:alpine");
-    }
-
-    #[test]
-    fn test_parse_image_info_arch_query_param() {
-        let info = parse_image_info("redis:alpine?arch=arm64");
-        assert_eq!(info.arch, "arm64");
-        assert_eq!(info.tag, "alpine");
-        assert_eq!(info.name, "redis");
-    }
-
-    #[test]
-    fn ca_bundles_are_not_flagged_as_secrets() {
-        // Public trust stores must not be flagged.
-        assert_eq!(is_sensitive_file("etc/ssl/cert.pem"), None);
-        assert_eq!(is_sensitive_file("etc/ssl1.1/cert.pem"), None);
-        assert_eq!(is_sensitive_file("etc/ssl/certs/ca-certificates.crt"), None);
-        assert_eq!(is_sensitive_file("etc/pki/tls/certs/ca-bundle.crt"), None);
-        assert_eq!(
-            is_sensitive_file("usr/share/ca-certificates/mozilla/GlobalSign.crt"),
-            None
-        );
-    }
-
-    #[test]
-    fn real_private_keys_still_flagged() {
-        // Private-key locations must stay flagged after the CA exclusion.
-        assert!(is_sensitive_file("etc/ssl/private/server.key").is_some());
-        assert!(is_sensitive_file("app/config/id_rsa").is_some());
-        assert!(is_sensitive_file("home/user/secret.pem").is_some());
-        assert!(is_sensitive_file("opt/app/keystore.jks").is_some());
+    fn repository_path_joins_namespace() {
+        assert_eq!(repository_path("org", "proj/img"), "org/proj/img");
+        assert_eq!(repository_path("", "solo"), "solo");
     }
 }

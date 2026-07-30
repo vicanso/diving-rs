@@ -28,8 +28,13 @@ pub struct ImageFileInfo {
     pub mode: String,
     pub uid: u64,
     pub gid: u64,
-    // 该文件是否对应删除
+    // 该文件是否对应删除（OCI whiteout `.wh.<name>`）
     pub is_whiteout: Option<bool>,
+    /// Directory opaque whiteout (`.wh..wh..opq`). When set, `path` is the
+    /// directory that becomes opaque — every prior entry under it is hidden.
+    /// Older analysis-cache entries lack this field and default to `None`.
+    #[serde(default)]
+    pub is_opaque: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,8 +78,9 @@ pub struct ImageIndex {
 }
 
 impl ImageIndex {
-    // 返回匹配manifest，如果无则返回第一个
-    pub fn guess_manifest(&self, arch: &str) -> ImageIndexManifest {
+    // 返回匹配manifest，如果无则返回第一个；index 无任何 manifest 时返回
+    // None（release 构建 panic=abort，索引越界会直接杀掉 web 服务进程）
+    pub fn guess_manifest(&self, arch: &str) -> Option<ImageIndexManifest> {
         let os = "linux";
         let mut os_match_manifests = vec![];
         let mut architecture = arch.to_string();
@@ -90,15 +96,15 @@ impl ImageIndex {
                 continue;
             }
             if item.platform.architecture == architecture {
-                return item.clone();
+                return Some(item.clone());
             }
             os_match_manifests.push(item)
         }
         // 如果有匹配os的，则返回对应os的
-        if !os_match_manifests.is_empty() {
-            return os_match_manifests[0].clone();
+        if let Some(&first) = os_match_manifests.first() {
+            return Some(first.clone());
         }
-        self.manifests[0].clone()
+        self.manifests.first().cloned()
     }
 }
 
@@ -249,31 +255,34 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeIte
         return;
     }
     let name = name_list[0];
-    let mut found_index = -1i64;
-    for (index, dir) in items.iter_mut().enumerate() {
-        if dir.name == name {
-            dir.size += item.size;
-            found_index = index as i64;
-            break;
+    // tar 条目几乎总是按目录聚簇排列，目标目录大概率就是最后一个子节点；
+    // 先查最后一个再退回线性扫描，避免在有数千个兄弟目录的层
+    // （usr/share/doc、node_modules 等）上退化成 O(n²)。
+    let found_index = match items.last() {
+        Some(last) if last.name == name => Some(items.len() - 1),
+        _ => items.iter().position(|dir| dir.name == name),
+    };
+    let index = match found_index {
+        Some(i) => {
+            items[i].size += item.size;
+            i
         }
-    }
-    if found_index < 0 {
-        found_index = items.len() as i64;
-        let op = if item.op == Op::Modified {
-            Op::Modified
-        } else {
-            Op::None
-        };
-        items.push(FileTreeItem {
-            name: name.to_string(),
-            size: item.size,
-            op,
-            ..Default::default()
-        });
-    }
-    if let Some(file_tree_item) = items.get_mut(found_index as usize) {
-        add_file(&mut file_tree_item.children, &name_list[1..], item);
-    }
+        None => {
+            let op = if item.op == Op::Modified {
+                Op::Modified
+            } else {
+                Op::None
+            };
+            items.push(FileTreeItem {
+                name: name.to_string(),
+                size: item.size,
+                op,
+                ..Default::default()
+            });
+            items.len() - 1
+        }
+    };
+    add_file(&mut items[index].children, &name_list[1..], item);
 }
 
 pub fn convert_files_to_file_tree(
@@ -530,6 +539,52 @@ mod tests {
     #[test]
     fn test_convert_files_to_file_tree_empty() {
         assert!(convert_files_to_file_tree(&[], &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn guess_manifest_handles_empty_index() {
+        // 恶意/异常 registry 可能返回空 manifests；不能 panic（panic=abort
+        // 会带走整个 web 进程），必须优雅返回 None。
+        let index = ImageIndex::default();
+        assert!(index.guess_manifest("amd64").is_none());
+        assert!(index.guess_manifest("").is_none());
+    }
+
+    #[test]
+    fn guess_manifest_prefers_arch_then_os_then_first() {
+        let mk = |os: &str, arch: &str| ImageIndexManifest {
+            platform: ImageIndexPlatform {
+                os: os.to_string(),
+                architecture: arch.to_string(),
+                variant: None,
+            },
+            ..Default::default()
+        };
+        let index = ImageIndex {
+            manifests: vec![
+                mk("windows", "amd64"),
+                mk("linux", "arm64"),
+                mk("linux", "amd64"),
+            ],
+            ..Default::default()
+        };
+        // Exact arch match wins.
+        let hit = index.guess_manifest("amd64").unwrap();
+        assert_eq!(hit.platform.architecture, "amd64");
+        assert_eq!(hit.platform.os, "linux");
+        // Unknown arch falls back to the first linux manifest.
+        let hit = index.guess_manifest("riscv64").unwrap();
+        assert_eq!(hit.platform.os, "linux");
+        assert_eq!(hit.platform.architecture, "arm64");
+        // No linux at all falls back to the first manifest.
+        let windows_only = ImageIndex {
+            manifests: vec![mk("windows", "amd64")],
+            ..Default::default()
+        };
+        assert_eq!(
+            windows_only.guess_manifest("amd64").unwrap().platform.os,
+            "windows"
+        );
     }
 
     #[test]
