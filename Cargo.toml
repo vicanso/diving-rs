@@ -1,6 +1,6 @@
 [package]
 name = "diving"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2021"
 description = "Analyze Docker image layers to find wasted space, leaked secrets, and bloat — terminal UI + web, no daemon or root required."
