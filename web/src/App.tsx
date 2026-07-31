@@ -17,9 +17,7 @@ import {
   message,
   Row,
   Select,
-  Space,
   theme,
-  Typography,
 } from "antd";
 import axios, { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
@@ -35,12 +33,12 @@ import {
   BigModifiedFilesCard,
   DockerfileCard,
   DuplicateGroupsCard,
+  EXAMPLE_IMAGES,
   ImageSummaryCard,
   LatestImagesList,
   RecommendationsCard,
   SearchBar,
   SensitiveFilesCard,
-  TagsCard,
   VirtualFileTree,
   WastedSummaryCard,
 } from "./components";
@@ -62,7 +60,6 @@ import "./App.css";
 
 const { defaultAlgorithm, darkAlgorithm } = theme;
 const { Header, Content } = Layout;
-const { Paragraph } = Typography;
 
 const amd64Arch = "amd64";
 const arm64Arch = "arm64";
@@ -71,7 +68,6 @@ const request = axios.create({
   baseURL: "./api",
 });
 
-// 跟随系统深浅色并监听变化（此前只在首次渲染读取一次）
 const useDarkMode = () => {
   const [dark, setDark] = useState(
     () => window.matchMedia("(prefers-color-scheme: dark)").matches,
@@ -82,10 +78,12 @@ const useDarkMode = () => {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+  }, [dark]);
   return dark;
 };
 
-/** Everything derived from one successful analyze response. */
 interface ReportState {
   imageDescriptions: ImageDescriptions;
   wastedList: FileWastedSummary[];
@@ -135,16 +133,13 @@ const App = () => {
     setImageName(image);
     setLoading(true);
     try {
-      // Encode image so `?arch=` on the image ref and registry paths stay intact.
       let reqUrl = `/analyze?image=${encodeURIComponent(image)}`;
       if (!/^(file|docker):\/\//.test(image) && arch) {
-        // Append arch as a query on the image ref (backend parse_image_info).
         reqUrl = `/analyze?image=${encodeURIComponent(`${image}?arch=${arch}`)}`;
       }
       const { data } = await request.get<ImageAnalyzeResult>(reqUrl, {
         timeout: 10 * 60 * 1000,
       });
-      // 为每个file tree item增加key
       (data.fileTreeList || []).forEach((fileTree) => {
         addKeyToFileTreeItem(fileTree, "");
       });
@@ -193,7 +188,7 @@ const App = () => {
         setVersion(data.version);
       })
       .catch(() => {
-        // 首屏的最近镜像列表是装饰性的，拉取失败静默忽略
+        /* decorative list */
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -212,8 +207,6 @@ const App = () => {
     setViewOption((opt) => ({ ...opt, ...patch }));
   };
 
-  // 关键词/过滤条件通过 useDeferredValue 延迟到低优先级渲染，输入保持
-  // 流畅；flatten 结果按依赖 memo，不再每次 setState 都全树重算。
   const deferredOption = useDeferredValue(viewOption);
   const fileTreeRows = useMemo(() => {
     const rows: FileTreeRow[] = [];
@@ -259,14 +252,11 @@ const App = () => {
       1000 * 1000,
       10 * 1000 * 1000,
     ].map((size) => {
-      let label = `>= ${prettyBytes(size)}`;
+      let label = `≥ ${prettyBytes(size)}`;
       if (size === 0) {
-        label = "No Limit";
+        label = "No limit";
       }
-      return {
-        value: size,
-        label,
-      };
+      return { value: size, label };
     });
   }, []);
 
@@ -282,187 +272,188 @@ const App = () => {
 
   const getLayerContentView = () => {
     if (!report) {
-      return <></>;
+      return null;
     }
     const layerInfo = report.layers[currentLayer];
     if (!layerInfo) {
-      return <></>;
-    }
-    const layerFilter = (
-      <Row gutter={20}>
-        <Col span={6}>
-          <Form.Item label={i18nGet("layerLabel")}>
-            <Select
-              defaultValue={0}
-              style={{
-                width: "100%",
-              }}
-              onChange={setCurrentLayer}
-              options={layerOptions}
-            />
-          </Form.Item>
-        </Col>
-        <Col span={4}>
-          <Form.Item label={i18nGet("sizeLabel")}>
-            <Select
-              defaultValue={0}
-              options={sizeOptions}
-              onChange={(limit: number) => {
-                updateOption({ sizeLimit: limit });
-              }}
-            />
-          </Form.Item>
-        </Col>
-        <Col span={3}>
-          <Form.Item>
-            <Checkbox
-              onChange={(e) => {
-                updateOption({ onlyModifiedRemoved: e.target.checked });
-              }}
-            >
-              {i18nGet("modificationLabel")}
-            </Checkbox>
-          </Form.Item>
-        </Col>
-        <Col span={3}>
-          <Form.Item>
-            <Checkbox
-              onChange={(e) => {
-                updateOption({ expandAll: e.target.checked });
-              }}
-            >
-              {i18nGet("expandLabel")}
-            </Checkbox>
-          </Form.Item>
-        </Col>
-        <Col span={8}>
-          <Form.Item>
-            <Input
-              addonBefore={i18nGet("keywordsLabel")}
-              allowClear
-              onChange={(e) => {
-                updateOption({ keyword: e.target.value.trim() });
-              }}
-            />
-          </Form.Item>
-        </Col>
-      </Row>
-    );
-    let fileTreeListClassName = "fileTree";
-    if (isDark) {
-      fileTreeListClassName += " dark";
+      return null;
     }
     return (
-      <div className="mtop30">
-        <Card title={i18nGet("layerContentTitle")}>
-          {layerFilter}
-          <Card className="command">
-            <Space direction="vertical">
-              <span>
-                <span className="bold">{i18nGet("createdLabel")}: </span>
-                {new Date(layerInfo.created).toLocaleString()}
-              </span>
-              <span>
-                <span className="bold">{i18nGet("commandLabel")}: </span>
-                {layerInfo.cmd}
-              </span>
-            </Space>
-          </Card>
-          <ul className={fileTreeListClassName + " fileTreeHeaderOnly"}>
-            <li>
-              <span>{i18nGet("permissionLabel")}</span>
-              <span>UID:GID</span>
-              <span>{i18nGet("sizeLabel")}</span>
-              <span>{i18nGet("fileTreeLabel")}</span>
-            </li>
-          </ul>
-          <VirtualFileTree
-            rows={fileTreeRows}
-            layer={layerInfo}
-            onToggleExpand={onToggleExpand}
-            isDark={isDark}
-          />
-        </Card>
-      </div>
+      <Card className="panel" title={i18nGet("layerContentTitle")}>
+        <div className="layerToolbar">
+          <Row gutter={[12, 4]}>
+            <Col xs={24} sm={12} md={8}>
+              <Form.Item
+                label={i18nGet("layerLabel")}
+                style={{ marginBottom: 12 }}
+              >
+                <Select
+                  value={currentLayer}
+                  style={{ width: "100%" }}
+                  onChange={setCurrentLayer}
+                  options={layerOptions}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={6} md={4}>
+              <Form.Item
+                label={i18nGet("sizeLabel")}
+                style={{ marginBottom: 12 }}
+              >
+                <Select
+                  defaultValue={0}
+                  options={sizeOptions}
+                  style={{ width: "100%" }}
+                  onChange={(limit: number) => {
+                    updateOption({ sizeLimit: limit });
+                  }}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={6} md={4}>
+              <Form.Item label=" " colon={false} style={{ marginBottom: 12 }}>
+                <Checkbox
+                  onChange={(e) => {
+                    updateOption({ onlyModifiedRemoved: e.target.checked });
+                  }}
+                >
+                  {i18nGet("modificationLabel")}
+                </Checkbox>
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={6} md={3}>
+              <Form.Item label=" " colon={false} style={{ marginBottom: 12 }}>
+                <Checkbox
+                  onChange={(e) => {
+                    updateOption({ expandAll: e.target.checked });
+                  }}
+                >
+                  {i18nGet("expandLabel")}
+                </Checkbox>
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12} md={5}>
+              <Form.Item
+                label={i18nGet("keywordsLabel")}
+                style={{ marginBottom: 12 }}
+              >
+                <Input
+                  allowClear
+                  placeholder="path…"
+                  onChange={(e) => {
+                    updateOption({ keyword: e.target.value.trim() });
+                  }}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+        </div>
+        <div className="layerCmd">
+          <div>
+            <span className="label">{i18nGet("createdLabel")}</span>
+            {new Date(layerInfo.created).toLocaleString()}
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <span className="label">{i18nGet("commandLabel")}</span>
+            <span className="cmd">{layerInfo.cmd || "—"}</span>
+          </div>
+        </div>
+        <ul className="fileTreeHeaderOnly">
+          <li>
+            <span>{i18nGet("permissionLabel")}</span>
+            <span>UID:GID</span>
+            <span>{i18nGet("sizeLabel")}</span>
+            <span>{i18nGet("fileTreeLabel")}</span>
+          </li>
+        </ul>
+        <VirtualFileTree
+          rows={fileTreeRows}
+          layer={layerInfo}
+          onToggleExpand={onToggleExpand}
+        />
+      </Card>
     );
   };
-
-  let headerClass = "header";
-  if (isDark) {
-    headerClass += " dark";
-  }
 
   return (
     <ConfigProvider
       theme={{
         algorithm: isDark ? darkAlgorithm : defaultAlgorithm,
+        token: {
+          colorPrimary: isDark ? "#2dd4bf" : "#0d9488",
+          colorInfo: isDark ? "#38bdf8" : "#0284c7",
+          colorSuccess: isDark ? "#34d399" : "#059669",
+          colorWarning: isDark ? "#fbbf24" : "#d97706",
+          colorError: isDark ? "#f87171" : "#dc2626",
+          borderRadius: 8,
+          fontFamily: '"IBM Plex Sans", system-ui, -apple-system, sans-serif',
+          colorBgContainer: isDark ? "#141d26" : "#ffffff",
+          colorBgLayout: isDark ? "#0b1218" : "#eef3f6",
+          colorText: isDark ? "#e8eef2" : "#0f1c24",
+          colorBorder: isDark
+            ? "rgba(232, 238, 242, 0.1)"
+            : "rgba(15, 28, 36, 0.1)",
+        },
       }}
     >
-      <Layout>
+      <Layout className="appLayout">
         {getGithubIcon(isDark)}
-        <Header className={headerClass}>
-          <div className="contentWrapper">
+        <Header className="header">
+          <div className="headerInner">
             <div
               className="logo"
               onClick={() => {
                 window.location.href = "/";
               }}
             >
-              <Space>
-                {getLogoIcon(isDark)}
-                <span>Diving {version}</span>
-              </Space>
+              {getLogoIcon(isDark)}
+              <span>Diving</span>
+              {version && <span className="version">v{version}</span>}
             </div>
-            {report && <div className="search">{searchBar}</div>}
+            {report && <div className="headerSearch">{searchBar}</div>}
           </div>
         </Header>
+
         {!report && (
-          <div className="fixSearch">
-            {searchBar}
-            <div className="desc">
-              <Paragraph>
-                {i18nGet("imageAnalyzeDesc")}
-                <br />
-                redis:alpine, vicanso/diving
-                <br />
-                quay.io/prometheus/node-exporter
-                <br />
-                dragonwell-registry.cn-hangzhou.cr.aliyuncs.com/dragonwell/dragonwell
-                <br />
-                xxx.com/user/image:tag
-                <br />
-                {i18nGet("imageSlowDesc")}
-              </Paragraph>
+          <div className="landing">
+            <div className="landingInner">
+              <div className="landingEyebrow">Docker · OCI · layers</div>
+              <h1 className="landingTitle">{i18nGet("landingTitle")}</h1>
+              <p className="landingLead">{i18nGet("landingLead")}</p>
+              <div className="landingSearch">{searchBar}</div>
+              <div className="exampleChips">
+                {EXAMPLE_IMAGES.map((img) => (
+                  <button
+                    key={img}
+                    type="button"
+                    className="exampleChip"
+                    onClick={() => onSearch(img)}
+                  >
+                    {img}
+                  </button>
+                ))}
+              </div>
+              <p className="landingHint">{i18nGet("imageSlowDesc")}</p>
             </div>
           </div>
         )}
+
         {report && (
           <Content>
-            <div className="contentWrapper">
-              <ImageSummaryCard desc={report.imageDescriptions} />
-              <TagsCard tags={report.tags} />
+            <div className="contentWrapper reportStack">
+              <ImageSummaryCard
+                desc={report.imageDescriptions}
+                tags={report.tags}
+              />
               {getLayerContentView()}
-              <WastedSummaryCard
-                wastedList={report.wastedList}
-                isDark={isDark}
-              />
-              <SensitiveFilesCard
-                files={report.sensitiveFiles}
-                isDark={isDark}
-              />
-              <DuplicateGroupsCard
-                groups={report.duplicateGroups}
-                isDark={isDark}
-              />
-              <BigModifiedFilesCard
-                files={report.bigModifiedFileList}
-                isDark={isDark}
-              />
-              <RecommendationsCard
-                recommendations={report.recommendations}
-                isDark={isDark}
-              />
-              <DockerfileCard dockerfile={report.dockerfile} isDark={isDark} />
+              <div className="findingsGrid">
+                <WastedSummaryCard wastedList={report.wastedList} />
+                <SensitiveFilesCard files={report.sensitiveFiles} />
+                <DuplicateGroupsCard groups={report.duplicateGroups} />
+                <BigModifiedFilesCard files={report.bigModifiedFileList} />
+                <RecommendationsCard recommendations={report.recommendations} />
+                <DockerfileCard dockerfile={report.dockerfile} />
+              </div>
             </div>
           </Content>
         )}

@@ -1,10 +1,13 @@
 export default {
   analyzeButton: "Analyze",
-  imageInputPlaceholder: "input the name of image",
+  imageInputPlaceholder: "redis:alpine, ghcr.io/org/app:tag…",
+  landingTitle: "Dive into every layer",
+  landingLead:
+    "See wasted space, risk tags, and bloat across Docker/OCI images — no daemon required.",
   imageAnalyzeDesc:
     "Input the name of image to explore each layer in a docker image, for example:",
   imageSlowDesc:
-    "The first time may be slow(more than 10 minutes) because download the layer data",
+    "First analysis downloads layer blobs and may take a few minutes; later runs use cache.",
   imageSummaryTitle: "Image Summary",
   imageScoreLabel: "Efficiency Score",
   imageSizeLabel: "Image Size",

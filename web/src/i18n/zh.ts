@@ -1,8 +1,12 @@
 export default {
   analyzeButton: "开始分析",
-  imageInputPlaceholder: "请输入镜像名称",
+  imageInputPlaceholder: "redis:alpine、ghcr.io/org/app:tag…",
+  landingTitle: "潜入每一层镜像",
+  landingLead:
+    "发现浪费空间、风险标签与体积膨胀 — 支持 Docker/OCI，无需 daemon。",
   imageAnalyzeDesc: "请输入需要分析镜像名称，例如:",
-  imageSlowDesc: "首次分析镜像需要先下载分层数据，因此会较慢（可能大于10分钟）",
+  imageSlowDesc:
+    "首次分析会下载分层数据，可能需要几分钟；之后使用本地缓存会更快。",
   imageSummaryTitle: "镜像概要",
   imageScoreLabel: "分数",
   imageSizeLabel: "镜像大小",

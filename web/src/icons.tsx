@@ -27,17 +27,16 @@ export const minusOutlined = (
 );
 
 export const getLogoIcon = (isDarkMode: boolean) => {
-  let color = `rgb(0, 0, 0)`;
-  if (isDarkMode) {
-    color = `rgb(255, 255, 255)`;
-  }
+  const color = isDarkMode ? "#2dd4bf" : "#0d9488";
   return (
     <svg
-      height="32"
+      height="28"
       viewBox="0 0 64 64"
       xmlns="http://www.w3.org/2000/svg"
       style={{
         fill: color,
+        display: "block",
+        flexShrink: 0,
       }}
     >
       <path d="m27.04 24.126c.419-.293.977-.288 1.39.013l7.807 5.681c4.489 3.265 10.827 2.623 14.43-1.465 2.143-2.431 3.324-5.553 3.324-8.791 0-7.889-6.359-14.308-14.174-14.308h-25.397c-7.4 0-13.42 6.077-13.42 13.546v.762c0 4.31 2.104 8.369 5.627 10.859 1.685 1.191 3.671 1.785 5.669 1.785 2.028-.001 4.069-.613 5.82-1.838zm-18.578 3.7c-2.682-1.895-4.282-4.983-4.282-8.262v-.762c0-5.716 4.594-10.366 10.241-10.366h25.397c6.063 0 10.995 4.992 10.995 11.128 0 2.463-.898 4.839-2.53 6.688-2.531 2.868-6.999 3.307-10.174.997l-8.046-5.855c-1.368-.995-3.217-1.012-4.603-.043l-9.166 6.414c-2.379 1.665-5.528 1.69-7.832.061z" />
@@ -51,24 +50,24 @@ export const getGithubIcon = (isDarkMode: boolean) => {
   if (window.location.host.indexOf("diving") === -1) {
     return;
   }
-  let color = `rgb(0, 0, 0)`;
-  if (isDarkMode) {
-    color = `rgb(255, 255, 255)`;
-  }
+  const color = isDarkMode ? "#e8eef2" : "#0f1c24";
   return (
     <a
+      className="githubCorner"
       href="https://github.com/vicanso/diving-rs"
       style={{
-        position: "absolute",
-        padding: "15px 30px",
+        position: "fixed",
+        padding: "14px 18px",
         right: 0,
         top: 0,
+        zIndex: 120,
+        lineHeight: 0,
       }}
     >
       <svg
-        height="32"
+        height="28"
         viewBox="0 0 16 16"
-        width="32"
+        width="28"
         aria-hidden="true"
         style={{
           fill: color,
@@ -81,32 +80,33 @@ export const getGithubIcon = (isDarkMode: boolean) => {
 };
 
 export const getDownloadIcon = () => {
-  const color = `#646cff`;
   return (
     <svg
-      width="16px"
+      width="14"
+      height="14"
       viewBox="0 0 24 24"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
+      style={{ verticalAlign: "middle", color: "var(--accent)" }}
     >
       <path
         d="M12 16L12 8"
-        stroke={color}
-        strokeWidth="3"
+        stroke="currentColor"
+        strokeWidth="2.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
         d="M9 13L11.913 15.913V15.913C11.961 15.961 12.039 15.961 12.087 15.913V15.913L15 13"
-        stroke={color}
-        strokeWidth="3"
+        stroke="currentColor"
+        strokeWidth="2.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
         d="M3 15L3 16L3 19C3 20.1046 3.89543 21 5 21L19 21C20.1046 21 21 20.1046 21 19L21 16L21 15"
-        stroke={color}
-        strokeWidth="3"
+        stroke="currentColor"
+        strokeWidth="2.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
