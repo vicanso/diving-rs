@@ -4,13 +4,42 @@ on:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
     # branches: [ main ]
 
+# The automatic workflow token creates the release and uploads assets.
+# Unlike the previous `secrets.GH_TOKEN` PAT it never expires (an expired
+# PAT silently broke every release job with "Unable to create new release").
+permissions:
+  contents: write
+
 env:
-  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
   IMAGE_NAME: vicanso/diving
 
 jobs:
+  # Pre-create the draft release for this tag exactly once, so the four
+  # platform jobs below never race to create it (racing creates can leave
+  # duplicate untagged drafts). upload_asset.sh keeps its own create as a
+  # fallback for manual/partial runs.
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release exists for tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          release_ids="$(
+            gh api --paginate "repos/${{ github.repository }}/releases" \
+              -q ".[] | select(.tag_name == \"${tag}\") | .id" 2>/dev/null || true
+          )"
+          if [ -z "${release_ids}" ]; then
+            echo "No release for $tag; creating draft..."
+            gh release create "$tag" -R "${{ github.repository }}" \
+              --draft --title "$tag" --notes ""
+          else
+            echo "Found release for $tag (id(s): $(echo "$release_ids" | tr '\n' ' '))"
+          fi
+
   macos:
+    needs: [prepare-release]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v3
@@ -37,6 +66,7 @@ jobs:
           ./.github/workflows/upload_asset.sh ./diving-darwin-x86_64 $GITHUB_TOKEN
 
   windows:
+    needs: [prepare-release]
     runs-on: windows-latest
     defaults:
       run:
@@ -58,6 +88,7 @@ jobs:
           ./.github/workflows/upload_asset.sh ./diving-windows.exe $GITHUB_TOKEN
 
   linux:
+    needs: [prepare-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -78,6 +109,7 @@ jobs:
           ./.github/workflows/upload_asset.sh ./diving-linux-x86_64 $GITHUB_TOKEN
 
   linux-aarch64:
+    needs: [prepare-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
