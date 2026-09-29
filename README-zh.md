@@ -20,7 +20,7 @@
 - 🛡️ **安全卫生检查** —— 标记泄漏的密钥文件（`.env`、SSH / 云厂商密钥、证书）、`ENV`/label/Dockerfile 中的硬编码凭证（仅报字段名，绝不回显值）、setuid 与全局可写文件，以及以 root 运行的容器。
 - 🤖 **AI 优化报告** —— 把完整分析交给任意 OpenAI 兼容模型，得到按优先级排序的修复清单，并支持版本间的劣化对比。
 - 🚦 **CI 卡口** —— 镜像效率 / 浪费字节低于阈值时让流水线失败。
-- 🌐 **终端 · Web · JSON / Markdown · 企微** —— 交互浏览、暴露 HTTP API、导出报告，或推送到群聊。
+- 🌐 **终端 · Web · MCP · JSON / Markdown · 企微** —— 交互浏览、暴露 HTTP API 或供 AI agent 调用的 MCP 端点、导出报告，或推送到群聊。
 
 > **能力边界说明：** diving 聚焦于体积、结构与基础安全检查（密钥泄漏、文件权限、是否以 root 运行等）。它扫描文件**路径**与镜像元数据 —— **不做** CVE/漏洞扫描，也**不扫描文件内容**。漏洞覆盖请配合 Trivy / grype / docker scout 使用。
 
@@ -213,6 +213,37 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```
 
+### MCP
+
+Web 模式同时在 `/mcp` 提供 [MCP](https://modelcontextprotocol.io) 服务（Streamable HTTP 传输），Claude Code 等 AI agent 可以直接调用它分析镜像：
+
+```bash
+claude mcp add --transport http diving http://127.0.0.1:7001/mcp
+```
+
+| 工具 | 返回内容 |
+|------|----------|
+| `analyze_image` | Markdown 分析报告（与 `format=markdown` 相同） |
+| `get_findings` | JSON 格式的结论：效率分、浪费空间、优化建议、敏感文件、重复文件、运行时兼容性、各层概要 |
+| `list_files` | 分页的文件列表，可按层、目录、关键字、大小过滤 |
+| `read_file` | 读取某一层中的文本文件（最多 256 KiB，仅支持 registry 镜像） |
+| `latest_images` | 最近分析过的镜像 |
+
+层号从 1 开始，与报告中的编号一致。MCP 调用与 `/api/analyze` 共用分析缓存、并发请求去重和 `registry_allowlist`。首次分析大镜像可能需要几分钟；如果客户端带了 progress token，diving 会每 10 秒发一次进度通知。
+
+访问控制：
+
+- 默认只接受 `Host` 为 loopback（`localhost`、`127.0.0.1`、`::1`）的请求，用来防御网页发起的 DNS rebinding 攻击。要给远程客户端使用，二选一：
+  - 用 `--mcp-token <token>`（或 `$DIVING_MCP_TOKEN`）设置 token。之后每个请求都必须带 `Authorization: Bearer <token>`，同时不再校验 `Host`：
+    ```bash
+    claude mcp add --transport http diving https://diving.example.com/mcp \
+      --header "Authorization: Bearer <token>"
+    ```
+  - 在 `~/.diving/config.yml` 中用 `mcp_allowed_hosts: [diving.example.com]` 放行你的域名（配成 `"*"` 则关闭校验）。
+- `--no-mcp` 关闭该端点。
+
+Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以通过环境变量传入 token，例如 `docker run -e DIVING_MCP_TOKEN=<token> …`。同一台主机上的客户端直接用 `http://127.0.0.1:7001/mcp` 即可，不需要 token。
+
 ## 敏感文件扫描
 
 分析过程中，diving 会对每个文件**路径**执行内置规则扫描（`.env` 文件、SSH 私钥、AWS/GCP 凭证、TLS 私钥、kubeconfig、`.htpasswd`、误拷入的 `.git` 目录等），命中结果以 **Security Warnings** 形式出现在报告中。（它扫描路径与元数据，不扫描文件内容。）
@@ -254,6 +285,7 @@ curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&ski
 | `lowest_efficiency` | `0.95` | CI 检查 —— 最低效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520` | CI 检查 —— 最大浪费字节数（20 MB） |
 | `highest_user_wasted_percent` | `0.1` | CI 检查 —— 最大浪费比例（0–1） |
+| `mcp_allowed_hosts` | — | Web 模式：`/mcp` 在 loopback 之外额外放行的 `Host`（配成 `"*"` 关闭校验；设置了 `--mcp-token` 时忽略） |
 
 ```yaml
 layer_ttl: 30d

@@ -77,7 +77,7 @@ fn get_latest_image_cache() -> &'static std::sync::Mutex<LruCache<String, ()>> {
         std::sync::Mutex::new(c)
     })
 }
-fn add_to_latest_image_cache(name: &str) {
+pub(crate) fn add_to_latest_image_cache(name: &str) {
     if let Ok(mut cache) = get_latest_image_cache().lock() {
         cache.put(name.to_owned(), ());
     }
@@ -89,7 +89,7 @@ fn add_to_latest_image_cache(name: &str) {
 /// Language is deliberately NOT part of the key: it only affects the derived
 /// recommendations. A waiter whose language differs from the flight's rebuilds
 /// them below — one clone + rule pass instead of a duplicate full analysis.
-async fn analyze_singleflight(
+pub(crate) async fn analyze_singleflight(
     image: String,
     lang: i18n::Lang,
     verify_dup: bool,
@@ -148,7 +148,7 @@ async fn analyze_singleflight(
 /// registry 白名单校验：允许列表为空时不限制；否则仅放行列表内的
 /// registry host，`file://` / `docker://` 需显式加入 `local-file` /
 /// `local-docker`（对公网部署它们等价于任意本地文件读取 / 命令执行面）。
-fn ensure_registry_allowed(image_info: &ImageInfo) -> HTTPResult<()> {
+pub(crate) fn ensure_registry_allowed(image_info: &ImageInfo) -> HTTPResult<()> {
     let allowlist = get_registry_allowlist();
     if allowlist.is_empty() {
         return Ok(());
@@ -227,14 +227,18 @@ struct LatestImageResp {
     pub version: String,
 }
 
-async fn get_latest_images() -> JSONResult<LatestImageResp> {
-    let image_list = if let Ok(cache) = get_latest_image_cache().lock() {
+/// Most-recently analyzed image names, newest first.
+pub(crate) fn latest_images() -> Vec<String> {
+    if let Ok(cache) = get_latest_image_cache().lock() {
         cache.iter().map(|(name, _)| name.clone()).collect()
     } else {
         vec![]
-    };
+    }
+}
+
+async fn get_latest_images() -> JSONResult<LatestImageResp> {
     Ok(Json(LatestImageResp {
-        images: image_list,
+        images: latest_images(),
         version: VERSION.to_owned(),
     }))
 }

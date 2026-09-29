@@ -11,6 +11,7 @@ pub mod error;
 pub mod i18n;
 pub mod image;
 pub mod markdown;
+pub mod mcp;
 pub mod middleware;
 pub mod recommend;
 pub mod store;
@@ -30,7 +31,7 @@ use std::{env, str::FromStr};
 use tokio::signal;
 use tower::ServiceBuilder;
 use tracing::Level;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 use controller::new_router;
@@ -96,6 +97,14 @@ pub struct Args {
     /// `--username` / `$REGISTRY_USERNAME`.
     #[arg(long)]
     password_stdin: bool,
+    /// Web mode: bearer token required on the `/mcp` endpoint (or
+    /// $DIVING_MCP_TOKEN). Without it `/mcp` only accepts loopback `Host`
+    /// headers plus `mcp_allowed_hosts` from config.yml.
+    #[arg(long)]
+    mcp_token: Option<String>,
+    /// Web mode: don't serve the MCP endpoint at `/mcp`
+    #[arg(long)]
+    no_mcp: bool,
 }
 
 impl Args {
@@ -448,9 +457,18 @@ pub async fn run(args: Args) {
         }
     } else {
         start_cleanup_task();
+        let mut routes = new_router();
+        if !args.no_mcp {
+            let mcp_token = args
+                .mcp_token
+                .or_else(|| env::var("DIVING_MCP_TOKEN").ok())
+                .filter(|t| !t.trim().is_empty());
+            warn_if_mcp_unreachable(&args.listen, mcp_token.is_some());
+            routes = routes.merge(mcp::new_router(mcp_token));
+        }
         // build our application with a route
         let app = Router::new()
-            .merge(new_router())
+            .merge(routes)
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(error::handle_error))
@@ -485,6 +503,22 @@ pub async fn run(args: Args) {
         {
             error!(err = err.to_string(), "server error");
         }
+    }
+}
+
+/// `/mcp` rejects non-loopback `Host` headers unless a token or
+/// `mcp_allowed_hosts` is configured; say so when the server is exposed
+/// beyond loopback, instead of leaving remote clients with a bare 403.
+fn warn_if_mcp_unreachable(listen: &str, has_token: bool) {
+    let exposed = listen
+        .parse::<SocketAddr>()
+        .is_ok_and(|addr| !addr.ip().is_loopback());
+    if exposed && !has_token && config::get_mcp_allowed_hosts().is_empty() {
+        warn!(
+            listen,
+            "/mcp only accepts loopback Host headers; set --mcp-token or \
+             mcp_allowed_hosts in ~/.diving/config.yml for remote MCP clients"
+        );
     }
 }
 

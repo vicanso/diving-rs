@@ -20,7 +20,7 @@ A single, fast Rust binary that pulls images straight from any registry and show
 - 🛡️ **Security hygiene checks** — flags leaked secret files (`.env`, SSH / cloud keys, certs), hardcoded credentials in `ENV`/labels/Dockerfile (key names only, never the value), setuid & world-writable files, and containers that run as root.
 - 🤖 **AI optimization report** — hand the full analysis to any OpenAI-compatible model and get a prioritized fix list, plus version-over-version regression detection.
 - 🚦 **CI gate** — fail the pipeline when an image drops below your efficiency / wasted-bytes thresholds.
-- 🌐 **Terminal · Web · JSON / Markdown · WeCom** — explore interactively, expose an HTTP API, export a report, or push results to a chat.
+- 🌐 **Terminal · Web · MCP · JSON / Markdown · WeCom** — explore interactively, expose an HTTP API or an MCP endpoint for AI agents, export a report, or push results to a chat.
 
 > **Scope note:** diving focuses on size, structure, and basic security checks (leaked secret files, file permissions, runs-as-root, etc.). It scans file **paths** and image metadata — it does **not** do CVE/vulnerability scanning or file-content scanning. Pair it with Trivy/grype/docker scout for vulnerability coverage.
 
@@ -213,6 +213,37 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```
 
+### MCP
+
+Web mode also serves an [MCP](https://modelcontextprotocol.io) endpoint at `/mcp` (Streamable HTTP transport), so AI agents such as Claude Code can analyze images themselves:
+
+```bash
+claude mcp add --transport http diving http://127.0.0.1:7001/mcp
+```
+
+| Tool | Returns |
+|------|---------|
+| `analyze_image` | The Markdown report (same as `format=markdown`) |
+| `get_findings` | Findings as JSON: efficiency, wasted bytes, recommendations, sensitive files, duplicates, runtime compatibility, per-layer summary |
+| `list_files` | A page of files, filterable by layer, directory, keyword and size |
+| `read_file` | One text file from a layer (up to 256 KiB; registry images only) |
+| `latest_images` | Recently analyzed images |
+
+Layer numbers are 1-based and match the report. MCP calls share the analysis cache, request deduplication and `registry_allowlist` with `/api/analyze`. A cold analysis can take minutes; when the client sends a progress token, diving emits a progress notification every 10 seconds.
+
+Access control:
+
+- By default `/mcp` only accepts requests whose `Host` is loopback (`localhost`, `127.0.0.1`, `::1`), which blocks DNS-rebinding attacks from web pages. To serve remote clients, pick one:
+  - Set a token with `--mcp-token <token>` (or `$DIVING_MCP_TOKEN`). Every request must then carry `Authorization: Bearer <token>`, and the `Host` check is skipped:
+    ```bash
+    claude mcp add --transport http diving https://diving.example.com/mcp \
+      --header "Authorization: Bearer <token>"
+    ```
+  - Allow your hostnames in `~/.diving/config.yml` with `mcp_allowed_hosts: [diving.example.com]` (`"*"` turns the check off).
+- `--no-mcp` turns the endpoint off.
+
+The Docker image listens on `0.0.0.0`, so for remote MCP clients pass the token as an environment variable, e.g. `docker run -e DIVING_MCP_TOKEN=<token> …`. Clients on the same host can use `http://127.0.0.1:7001/mcp` without one.
+
 ## Sensitive-file scanning
 
 During analysis diving scans every file **path** against built-in rules (`.env` files, SSH private keys, AWS/GCP credentials, TLS private keys, kubeconfig, `.htpasswd`, an accidentally-copied `.git` directory, …) and reports matches under **Security Warnings**. (It scans paths and metadata, not file contents.)
@@ -254,6 +285,7 @@ Config file: `~/.diving/config.yml`.
 | `lowest_efficiency` | `0.95` | CI check — minimum efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` | CI check — maximum wasted bytes (20 MB) |
 | `highest_user_wasted_percent` | `0.1` | CI check — maximum wasted percentage (0–1) |
+| `mcp_allowed_hosts` | — | Web mode: extra `Host` values `/mcp` accepts besides loopback (`"*"` turns the check off; ignored when `--mcp-token` is set) |
 
 ```yaml
 layer_ttl: 30d

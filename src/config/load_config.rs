@@ -40,6 +40,10 @@ pub struct DivingConfig {
     /// layer blob 缓存目录的总大小上限；超出时按访问时间从旧到新淘汰。
     /// 未配置（默认）则只按 TTL 清理。
     pub max_layer_cache_size: Option<ByteSize>,
+    /// Web 模式 `/mcp` 额外放行的 `Host` 头（如 `diving.example.com`、
+    /// `10.0.0.5:7001`）。默认只接受 loopback，防 DNS rebinding；配置
+    /// `*` 关闭校验。设置了 `--mcp-token` 时不做 Host 校验（token 已足够）。
+    pub mcp_allowed_hosts: Option<Vec<String>>,
 }
 
 pub fn must_load_config() -> &'static DivingConfig {
@@ -244,6 +248,21 @@ pub fn get_max_download_file_size() -> u64 {
         .max_download_file_size
         .map(|v| v.0)
         .unwrap_or(100 * 1024 * 1024)
+}
+
+/// `/mcp` 额外放行的 `Host` 列表，条目已归一化为小写、去掉空白。
+pub fn get_mcp_allowed_hosts() -> &'static [String] {
+    static LIST: OnceCell<Vec<String>> = OnceCell::new();
+    LIST.get_or_init(|| {
+        must_load_config()
+            .mcp_allowed_hosts
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
 }
 
 /// layer 缓存目录总大小上限（字节）；`None` 表示不设上限。

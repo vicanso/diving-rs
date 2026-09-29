@@ -11,7 +11,7 @@ RUN apk update \
 # version for reproducible builds; the non-slim base already ships
 # build-essential + pkg-config, so no extra apt install is needed for
 # our C dependencies (zstd-sys, blake3, mimalloc).
-FROM rust:1.95.0 AS builder
+FROM rust:1.98.1 AS builder
 
 COPY --from=webbuilder /diving-rs /diving-rs
 
@@ -33,7 +33,7 @@ EXPOSE 7001
 # Instead of `apt-get install ca-certificates` here — which permanently bakes
 # ~1.6 MiB of dpkg/debconf cruft into the layer (the rewritten
 # /var/lib/dpkg/status DB survives `rm -rf /var/lib/apt/lists/*`) — copy the
-# bundle the rust:1.95.0 builder already carries. No package manager runs in
+# bundle the rust:1.98.1 builder already carries. No package manager runs in
 # this stage, so there is no apt/dpkg waste to clean up.
 #
 # tzdata is intentionally not installed: reports and access logs render in UTC

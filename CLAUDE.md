@@ -17,6 +17,7 @@ On top of the raw layer/file data, the analysis derives:
 - **ELF runtime-compat probe** (`src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS
 - **AI report** (`src/ai.rs`, enabled by `--ai-api-key` / `$OPENAI_API_KEY`): sends the Markdown analysis (plus the previous snapshot under `~/.diving/ai_history/` for regression comparison) to an OpenAI-compatible endpoint
 - **WeCom push** (`src/wecom.rs`, `--wecom-webhook`): sends the AI report or a concise summary to a WeCom group bot
+- **MCP endpoint** (`src/mcp.rs`, web mode `/mcp`): exposes the analysis as MCP tools to AI agents
 
 ## Build System & Common Commands
 
@@ -124,6 +125,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **`src/ai.rs`**: OpenAI-compatible AI report + `~/.diving/ai_history/` snapshots for regression comparison
 - **`src/wecom.rs`**: WeCom group-bot markdown push
 - **`src/markdown.rs`**: Markdown rendering of the analysis result
+- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
 - **`src/i18n.rs`**: Rust-side en/zh string catalog (`tr` / `fill`); web has its own catalog in `web/src/i18n/`
 - **`src/ui/`**: Terminal UI (ratatui-based)
   - `mod.rs`: Main app event loop, state management
@@ -222,6 +224,8 @@ registry_allowlist:                        # Non-empty => /api/analyze only acce
   - ghcr.io
 max_download_file_size: 104857600          # /api/file per-file cap (default 100MB)
 max_layer_cache_size: 10737418240          # Layer cache total cap; evicts oldest-accessed blobs
+mcp_allowed_hosts:                         # Extra Host headers /mcp accepts (default loopback only;
+  - diving.example.com                     #   "*" disables; ignored when --mcp-token is set)
 ```
 
 Additional user config files under `~/.diving/`:
