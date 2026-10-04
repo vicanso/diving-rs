@@ -65,6 +65,38 @@ fn flatten_tree(items: &[FileTreeItem], prefix: &str, out: &mut LayerFiles) {
     }
 }
 
+/// Rows shown per change kind in each layer; the rest collapse into one
+/// "N more files" row. Without a cap a single `chown -R` / `apt-get upgrade`
+/// layer lists thousands of files and balloons the report — and with it the
+/// AI and MCP payloads built from this Markdown.
+const LAYER_FILES_LIMIT: usize = 50;
+
+/// Append one change kind's rows for a layer, largest first, capped at
+/// [`LAYER_FILES_LIMIT`].
+fn push_file_rows(md: &mut String, op: &str, files: &mut [FileEntry], lang: Lang) {
+    files.sort_by_key(|e| Reverse(e.size));
+    for e in files.iter().take(LAYER_FILES_LIMIT) {
+        md.push_str(&format!(
+            "| {} | `{}` | {} | `{}` | {}:{} |\n",
+            op,
+            e.path,
+            ByteSize(e.size),
+            e.mode,
+            e.uid,
+            e.gid,
+        ));
+    }
+    if files.len() > LAYER_FILES_LIMIT {
+        md.push_str(&format!(
+            "| … | {} | | | |\n",
+            i18n::fill(
+                i18n::tr(lang, "md.moremfiles"),
+                &[&(files.len() - LAYER_FILES_LIMIT).to_string()]
+            )
+        ));
+    }
+}
+
 /// Find the index of the first "user layer" by locating the largest time gap
 /// between consecutive layers. Base image layers were built months/years ago;
 /// user layers are all built within the same `docker build` run (seconds apart).
@@ -456,56 +488,84 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
                 t("md.col.owner"),
             ));
 
-            for e in &files.removed {
-                md.push_str(&format!(
-                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
-                    t("md.op.removed"),
-                    e.path,
-                    ByteSize(e.size),
-                    e.mode,
-                    e.uid,
-                    e.gid,
-                ));
-            }
-            for e in &files.modified {
-                md.push_str(&format!(
-                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
-                    t("md.op.modified"),
-                    e.path,
-                    ByteSize(e.size),
-                    e.mode,
-                    e.uid,
-                    e.gid,
-                ));
-            }
-
-            // Sort added files by size descending; cap at 50 to keep output readable
-            files.added.sort_by_key(|e| Reverse(e.size));
-            const ADDED_LIMIT: usize = 50;
-            for e in files.added.iter().take(ADDED_LIMIT) {
-                md.push_str(&format!(
-                    "| {} | `{}` | {} | `{}` | {}:{} |\n",
-                    t("md.op.added"),
-                    e.path,
-                    ByteSize(e.size),
-                    e.mode,
-                    e.uid,
-                    e.gid,
-                ));
-            }
-            if files.added.len() > ADDED_LIMIT {
-                md.push_str(&format!(
-                    "| … | {} | | | |\n",
-                    f(
-                        "md.moremfiles",
-                        &[&(files.added.len() - ADDED_LIMIT).to_string()]
-                    )
-                ));
-            }
+            push_file_rows(&mut md, &t("md.op.removed"), &mut files.removed, lang);
+            push_file_rows(&mut md, &t("md.op.modified"), &mut files.modified, lang);
+            push_file_rows(&mut md, &t("md.op.added"), &mut files.added, lang);
 
             md.push('\n');
         }
     }
 
     md
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::ImageLayer;
+
+    fn files(prefix: &str, count: u64, op: Op) -> Vec<FileTreeItem> {
+        (1..=count)
+            .map(|i| FileTreeItem {
+                name: format!("{prefix}{i:03}"),
+                size: i,
+                mode: "-rw-r--r--".to_string(),
+                op: op.clone(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn one_layer_result(children: Vec<FileTreeItem>) -> DockerAnalyzeResult {
+        DockerAnalyzeResult {
+            name: "fixture:latest".to_string(),
+            layers: vec![ImageLayer {
+                created: "2024-01-01T00:00:00Z".to_string(),
+                digest: "sha256:aaa".to_string(),
+                cmd: "RUN chown -R app /srv".to_string(),
+                ..Default::default()
+            }],
+            file_tree_list: vec![vec![FileTreeItem {
+                name: "srv".to_string(),
+                children,
+                ..Default::default()
+            }]],
+            ..Default::default()
+        }
+    }
+
+    fn rows(md: &str, op: &str) -> usize {
+        let prefix = format!("| {op} | `");
+        md.lines().filter(|l| l.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn layer_file_rows_are_capped_per_change_kind() {
+        let mut children = files("del", 55, Op::Removed);
+        children.extend(files("mod", 60, Op::Modified));
+        children.extend(files("add", 3, Op::None));
+        let md = to_markdown(&one_layer_result(children), false, Lang::En);
+
+        assert_eq!(rows(&md, "Removed"), LAYER_FILES_LIMIT);
+        assert_eq!(rows(&md, "Modified"), LAYER_FILES_LIMIT);
+        assert_eq!(rows(&md, "Added"), 3);
+        assert_eq!(md.matches("| … | *5 more files not shown* |").count(), 1);
+        assert_eq!(md.matches("| … | *10 more files not shown* |").count(), 1);
+
+        // The cap keeps the largest files: mod011..=mod060 stay, mod010 goes.
+        assert!(md.contains("| Modified | `srv/mod060` |"));
+        assert!(md.contains("| Modified | `srv/mod011` |"));
+        assert!(!md.contains("`srv/mod010`"));
+    }
+
+    #[test]
+    fn layer_file_rows_under_the_cap_are_all_listed() {
+        let mut children = files("del", 2, Op::Removed);
+        children.extend(files("mod", LAYER_FILES_LIMIT as u64, Op::Modified));
+        let md = to_markdown(&one_layer_result(children), false, Lang::En);
+
+        assert_eq!(rows(&md, "Removed"), 2);
+        assert_eq!(rows(&md, "Modified"), LAYER_FILES_LIMIT);
+        assert!(!md.contains("more files not shown"));
+    }
 }
