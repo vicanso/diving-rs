@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Take};
 use std::path::Path;
-use tar::Archive;
+use tar::{Archive, EntryType};
 
 use super::ImageFileInfo;
 
@@ -74,6 +74,22 @@ fn is_safe_tar_path(path: &str) -> bool {
     true
 }
 
+/// `st_mode` file-type bits for a tar entry. A tar header's mode field holds
+/// only the permission bits, so without these `unix_mode::to_string` renders
+/// the type slot as `?` — and checks keyed on `-` (regular file) never match.
+fn file_type_bits(entry_type: EntryType) -> u32 {
+    match entry_type {
+        EntryType::Symlink => 0o120000,
+        EntryType::Directory => 0o040000,
+        EntryType::Char => 0o020000,
+        EntryType::Block => 0o060000,
+        EntryType::Fifo => 0o010000,
+        // Regular files, hard links (which point at one) and the rare
+        // vendor-specific types all read as a plain file.
+        _ => 0o100000,
+    }
+}
+
 /// Parse every tar entry header from `archive`, collecting file metadata.
 /// File content is never read — the tar crate reads and discards it when
 /// advancing to the next entry.
@@ -131,7 +147,8 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
                 is_whiteout = Some(true);
             }
         }
-        let mode = header.mode().context(TarSnafu {})?;
+        let mode =
+            (header.mode().context(TarSnafu {})? & 0o7777) | file_type_bits(header.entry_type());
         files.push(ImageFileInfo {
             path,
             link,
@@ -442,6 +459,49 @@ mod tests {
         h.set_gid(0);
         h.set_cksum();
         builder.append(&h, data).unwrap();
+    }
+
+    #[test]
+    fn modes_carry_the_file_type_character() {
+        use std::io::Cursor;
+        use tar::{Builder, Header};
+
+        let mut builder = Builder::new(Vec::new());
+        append(&mut builder, "etc/app.conf", b"a: 1");
+        let mut suid = Header::new_gnu();
+        suid.set_path("usr/bin/su").unwrap();
+        suid.set_size(2);
+        suid.set_mode(0o4755);
+        suid.set_uid(0);
+        suid.set_gid(0);
+        suid.set_cksum();
+        builder.append(&suid, &b"su"[..]).unwrap();
+        let mut link = Header::new_gnu();
+        link.set_entry_type(EntryType::Symlink);
+        link.set_path("bin/sh").unwrap();
+        link.set_link_name("/bin/busybox").unwrap();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_uid(0);
+        link.set_gid(0);
+        link.set_cksum();
+        builder.append(&link, &b""[..]).unwrap();
+        let data = builder.into_inner().unwrap();
+
+        let info = get_files_from_layer(Cursor::new(data), "application/tar", 0).unwrap();
+        let modes: Vec<(&str, &str)> = info
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.mode.as_str()))
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                ("etc/app.conf", "-rw-r--r--"),
+                ("usr/bin/su", "-rwsr-xr-x"),
+                ("bin/sh", "lrwxrwxrwx"),
+            ]
+        );
     }
 
     #[test]

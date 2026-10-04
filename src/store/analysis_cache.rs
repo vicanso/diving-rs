@@ -41,7 +41,10 @@ use crate::image::DockerAnalyzeResult;
 /// fall back to a basename search across layers. v3 caches captured an
 /// empty `runtime_compat` for those images; bump forces a re-analysis
 /// so the new code actually gets to run.
-const SCHEMA_VERSION: u32 = 4;
+/// v5: file modes carry the file-type character (`-rw-r--r--`, not
+/// `?rw-r--r--`). v4 caches hold the old strings, with which the
+/// world-writable-file check could never match; bump forces a re-analysis.
+const SCHEMA_VERSION: u32 = 5;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

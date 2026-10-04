@@ -173,6 +173,8 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - `fileSummaryList`: Deleted/modified files for efficiency calculation
 - `bigModifiedFileList`: Large files added/modified in upper layers
 
+**AnalyzeReport** (`DockerAnalyzeResult::report`): the result flattened together with `efficiencyScore` / `wastedSize` / `wastedPercent`. This is what `-o` JSON and `/api/analyze` serialize; the bare `DockerAnalyzeResult` (analysis cache) does not store those derived numbers.
+
 **FileTreeItem**: Hierarchical file representation with operation type:
 - Op 0: Normal (added in this layer)
 - Op 1: Removed (whiteout)
@@ -199,8 +201,9 @@ When `CI=true` env var is set:
   1. Minimum efficiency threshold (default 95%)
   2. Maximum wasted bytes (default 20MB)
   3. Maximum wasted percent (default 10%)
-- Optional fourth check, `fail_on_severity` (off by default): fail when any recommendation is at that severity or above
-- Exits with code 1 on failure
+- Optional fourth check, `fail_on_severity` (off by default): fail when any recommendation is at that severity or above; ids in `ignore_recommendations` (`Recommendation::id`, e.g. `runasroot`) are excluded from it
+- The gate is evaluated before anything is sent (`evaluate_gate` in `src/lib.rs`) and also applies after an AI report / WeCom push when `CI=true` (outside CI those paths end the run); in CI the WeCom message opens with the verdict
+- Exit codes: `1` = image failed the gate, `2` (`EXIT_ERROR`) = diving itself failed (analysis error, bad config, panic hook, failed push)
 - Can output JSON analysis to file with `-o/--output-file`
 
 ## Configuration
@@ -217,6 +220,7 @@ lowest_efficiency: 0.95                    # CI efficiency threshold (0-1)
 highest_wasted_bytes: 20971520             # 20MB, CI wasted bytes limit
 highest_user_wasted_percent: 0.1           # 10%, CI wasted percent limit
 fail_on_severity: high                     # CI: also fail on recommendations at/above this severity (unset = off)
+ignore_recommendations: [runasroot]        # CI: recommendation ids that don't count toward fail_on_severity
 worker_threads: 4                          # Tokio runtime worker count
 layer_concurrency: 8                       # Concurrent layer download/decompress per image
 threads: 4                                 # Legacy single knob (fallback for the two above)

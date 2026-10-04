@@ -105,6 +105,30 @@ async fn analyze_local_tar_end_to_end() {
     assert!(result.dockerfile.contains("RUN apt-get install -y curl"));
     assert!(result.dockerfile.contains("ENV APP_MODE=prod"));
 
+    // Every recommendation carries a stable, unique rule id — the handle
+    // `ignore_recommendations` uses.
+    let mut ids: Vec<&str> = result
+        .recommendations
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert!(ids.iter().all(|id| !id.is_empty()), "{ids:?}");
+    assert!(ids.contains(&"secfiles"), "{ids:?}");
+    ids.sort_unstable();
+    let total = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "duplicate rule ids");
+
+    // The serialized report adds the efficiency numbers that CI scripts and
+    // dashboards need but `DockerAnalyzeResult` itself does not store.
+    let summary = result.summary();
+    let json = serde_json::to_value(result.report(&summary)).unwrap();
+    assert_eq!(json["efficiencyScore"], summary.score);
+    assert_eq!(json["wastedSize"], summary.wasted_size);
+    assert!(json["wastedPercent"].is_number());
+    assert_eq!(json["arch"], "amd64");
+    assert!(json["fileTreeList"].is_array());
+
     // Derived recommendations exist (pkg cache + secret file at minimum).
     assert!(result.recommendations.iter().any(|r| r.category == "size"));
     assert!(result

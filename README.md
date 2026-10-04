@@ -67,7 +67,7 @@ diving file:///tmp/redis.tar
 ## Export a report
 
 ```bash
-# JSON
+# JSON — the full analysis plus efficiencyScore / wastedSize / wastedPercent
 diving redis:alpine --output-file result.json
 
 # Markdown (detected by the .md extension)
@@ -82,7 +82,7 @@ diving myimage:latest --output-file - --no-skip-base
 
 ## CI gate
 
-Run diving in CI to keep images lean. With `CI=true` it prints the efficiency score and **exits `1`** when any threshold is exceeded.
+Run diving in CI to keep images lean. With `CI=true` it prints the efficiency score and **exits `1`** when any threshold is exceeded (see [exit codes](#exit-codes)).
 
 ```bash
 CI=true diving redis:alpine
@@ -102,6 +102,51 @@ CI=true diving --config .diving.yml myimage:latest
 | `fail_on_severity` | — (off) | Also fail when any recommendation is at this severity or above: `high`, `medium`, `low` or `info` |
 
 By default the recommendations (leaked secret files, runs-as-root, …) are only printed and do not affect the exit code. Set `fail_on_severity: high` to make findings such as a private key baked into the image fail the pipeline. `medium` and below also count heuristic suggestions (Dockerfile lint, docs/locale files, …), so expect more noise. A misspelled value stops diving at startup instead of silently disabling the check.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Passed |
+| `1` | The image failed the gate (a threshold above, or `fail_on_severity`) |
+| `2` | diving itself failed: the image could not be pulled or analyzed, the config is invalid, an AI or WeCom call failed, … |
+
+With `CI=true` the gate also applies when an [AI report](#ai-analysis) or [WeCom push](#wecom-push) is configured: diving sends the report first, then runs the checks.
+
+### Accepting known findings
+
+Every recommendation has a stable id, printed in parentheses in the CI output and available as `id` in the JSON. List the findings you have reviewed and accept under `ignore_recommendations`. They are still printed, marked `ignored`, but no longer count toward `fail_on_severity` (the three thresholds above are unaffected):
+
+```yaml
+fail_on_severity: high
+ignore_recommendations:
+  - secfiles
+```
+
+| Id | Recommendation | Severity |
+|----|----------------|----------|
+| `secfiles` | Potential secrets in image | high |
+| `secmeta` | Secrets in image metadata (ENV / labels / Dockerfile) | high |
+| `worldread` | World-readable secret files | high |
+| `runtimecompat` | Entrypoint binary incompatible with the base image's libc | high (medium for a musl binary on a glibc image) |
+| `wasted` | Reclaim wasted space | medium (high above 10% wasted) |
+| `crossdup` | Files duplicated across layers | low (medium from 5 MB, high from 50 MB) |
+| `pkgcache` | Remove package manager cache | medium |
+| `devart` | Exclude development artifacts | medium |
+| `runasroot` | Container runs as root | medium |
+| `setuid` | setuid/setgid binaries | medium |
+| `worldwrite` | World-writable files | medium |
+| `oversized` | Oversized layer(s) | low or medium |
+| `dflint` | Dockerfile anti-patterns | low or medium |
+| `layercount` | Reduce layer count | low |
+| `junk` | Editor/OS junk files | low |
+| `slimbase` | Consider a slimmer base image | low |
+| `buildonly` | Build-only files in runtime image | low |
+| `doclocale` | Documentation / man / locale data | low |
+| `logtemp` | Log / temp files baked into image | low |
+| `toolchain` | Build toolchain present in final image | low |
+| `bigfiles` | Large files added in recent layers | info |
+| `netreclaim` | Net reclaimable estimate | info |
 
 ## AI analysis
 
@@ -144,6 +189,8 @@ Pass a WeCom (企业微信) group-bot webhook to push the result straight into a
 
 - with `--ai-api-key` set → the concise AI report is pushed
 - without AI → a short summary (efficiency score, wasted space, recommendations)
+
+With `CI=true` the message opens with the [CI gate](#ci-gate) verdict — passed, or failed with the checks that failed — so the chat shows the outcome without opening the pipeline.
 
 ```bash
 # bot key (expanded to the standard webhook URL automatically)
@@ -290,17 +337,23 @@ Config file: `~/.diving/config.yml`. Use `--config <file>` (`-c`) or `$DIVING_CO
 | `layer_ttl` | `90d` | TTL for cached layer blobs **and** analysis results; an entry is purged if not accessed within this duration |
 | `analysis_path` | `~/.diving/analysis` | Analysis-result cache directory |
 | `cleanup_interval_hours` | `1` | How often (hours) caches are swept for expired entries |
-| `threads` | `min(layers, 2 × CPUs)` | Concurrent layer fetch + decompression tasks. Raise on fast networks with many layers; lower when sharing the host |
+| `layer_concurrency` | `min(layers, 2 × CPUs)` | Concurrent layer fetch + decompression tasks per image. Raise on fast networks with many layers; lower when sharing the host |
+| `worker_threads` | number of CPUs | Tokio runtime worker threads. Raise for a web server that handles many requests at once |
+| `threads` | — | Legacy single knob: used for both of the two options above when they are not set |
 | `lowest_efficiency` | `0.95` | CI check — minimum efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` | CI check — maximum wasted bytes (20 MB) |
 | `highest_user_wasted_percent` | `0.1` | CI check — maximum wasted percentage (0–1) |
 | `fail_on_severity` | — | CI check — fail when any recommendation is at this severity or above (`high` / `medium` / `low` / `info`); unset = recommendations never fail the run |
+| `ignore_recommendations` | — | CI check — recommendation ids excluded from `fail_on_severity` (see [Accepting known findings](#accepting-known-findings)) |
+| `registry_allowlist` | — | Web mode: when non-empty, `/api/analyze` and MCP only accept images from these registry hosts (e.g. `index.docker.io`, `ghcr.io`); add `local-file` / `local-docker` to allow `file://` / `docker://` |
+| `max_download_file_size` | `104857600` | Web mode: largest single file `/api/file` will serve (100 MB) |
+| `max_layer_cache_size` | — | Total size cap for the layer cache; when exceeded, the least recently accessed blobs are evicted. Unset = TTL cleanup only |
 | `mcp_allowed_hosts` | — | Web mode: extra `Host` values `/mcp` accepts besides loopback (`"*"` turns the check off; ignored when `--mcp-token` is set) |
 
 ```yaml
 layer_ttl: 30d
 cleanup_interval_hours: 6
-threads: 4
+layer_concurrency: 4
 lowest_efficiency: 0.95
 highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1

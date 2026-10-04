@@ -35,10 +35,10 @@ use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 use controller::new_router;
-use image::{analyze_docker_image, parse_image_info};
+use image::{analyze_docker_image, parse_image_info, DockerAnalyzeResult, DockerAnalyzeSummary};
 use mcp::McpStatus;
 use middleware::{access_log, entry};
-use recommend::severity_at_least;
+use recommend::gate_violations;
 use store::{clear_analysis_files, clear_blob_files, enforce_layer_cache_limit};
 use task_local::{generate_trace_id, TRACE_ID};
 
@@ -185,6 +185,14 @@ fn is_ci() -> bool {
     env::var_os("CI").unwrap_or_default() == "true"
 }
 
+/// Exit code when the image fails the CI gate. Kept apart from
+/// [`EXIT_ERROR`] so a pipeline can tell "this image is not good enough"
+/// from "diving could not do its job".
+const EXIT_GATE_FAILED: i32 = 1;
+/// Exit code when diving itself fails: the image can't be pulled or
+/// analyzed, the config is invalid, a push fails, …
+pub const EXIT_ERROR: i32 = 2;
+
 // 镜像分析的入参集合（由 CLI args 解析而来）。
 struct AnalyzeOptions {
     image: String,
@@ -198,8 +206,83 @@ struct AnalyzeOptions {
     credentials: Option<image::RegistryCredentials>,
 }
 
-// 分析镜像（错误直接以字符串返回）
-async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
+/// One failed CI check: the i18n key of its message plus the arguments that
+/// follow the `{0}` "FAIL" label.
+struct GateFailure {
+    key: &'static str,
+    args: Vec<String>,
+}
+
+impl GateFailure {
+    fn render(&self, lang: i18n::Lang, label: &str) -> String {
+        let mut args = vec![label];
+        args.extend(self.args.iter().map(String::as_str));
+        i18n::fill(i18n::tr(lang, self.key), &args)
+    }
+}
+
+/// Run the CI checks: the three efficiency thresholds plus the optional
+/// `fail_on_severity` gate. Empty means the image passes.
+fn evaluate_gate(
+    result: &DockerAnalyzeResult,
+    summary: &DockerAnalyzeSummary,
+    lang: i18n::Lang,
+) -> Vec<GateFailure> {
+    let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
+    let highest_wasted_bytes = config::get_highest_wasted_bytes();
+    let highest_user_wasted_percent = config::get_highest_user_wasted_percent();
+    let mut failures = vec![];
+    if summary.score < lowest_efficiency {
+        failures.push(GateFailure {
+            key: "cli.check.eff",
+            args: vec![lowest_efficiency.to_string()],
+        });
+    }
+    if summary.wasted_size > highest_wasted_bytes {
+        failures.push(GateFailure {
+            key: "cli.check.bytes",
+            args: vec![ByteSize(highest_wasted_bytes).to_string()],
+        });
+    }
+    if summary.wasted_percent > highest_user_wasted_percent {
+        failures.push(GateFailure {
+            key: "cli.check.pct",
+            args: vec![format!("{highest_user_wasted_percent:.2}")],
+        });
+    }
+    if let Some(threshold) = config::get_fail_on_severity() {
+        let ignored = config::get_ignore_recommendations();
+        let count = gate_violations(&result.recommendations, threshold, ignored).len();
+        if count > 0 {
+            failures.push(GateFailure {
+                key: "cli.check.severity",
+                args: vec![
+                    count.to_string(),
+                    i18n::tr(lang, &format!("sev.{threshold}")).to_string(),
+                ],
+            });
+        }
+    }
+    failures
+}
+
+/// The gate outcome as Markdown, for the WeCom push: a bold verdict line and,
+/// when it failed, one bullet per failed check.
+fn gate_verdict_md(failures: &[GateFailure], lang: i18n::Lang) -> String {
+    if failures.is_empty() {
+        return format!("**{}**", i18n::tr(lang, "cli.gate.pass"));
+    }
+    let label = i18n::tr(lang, "cli.fail");
+    let mut md = format!("**{}**", i18n::tr(lang, "cli.gate.fail"));
+    for failure in failures {
+        md.push_str(&format!("\n- {}", failure.render(lang, label)));
+    }
+    md
+}
+
+// 分析镜像。`Ok(false)` 表示分析成功但没通过 CI 卡口；`Err` 是分析或
+// 输出本身失败（错误直接以字符串返回）。
+async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
     let AnalyzeOptions {
         image,
         output_file,
@@ -226,7 +309,13 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
     let result = analyze_docker_image(image_info, lang, false, verify_dup, credentials)
         .await
         .map_err(|item| item.to_string())?;
+    // The gate is decided before anything is sent, so in CI the WeCom push
+    // can carry the verdict instead of leaving readers to guess.
+    let summary = result.summary();
+    let failures = evaluate_gate(&result, &summary, lang);
+    let verdict = is_ci().then(|| gate_verdict_md(&failures, lang));
     // AI analysis takes precedence: print the model's report and skip the TUI.
+    let reported = ai_cfg.is_some() || wecom_cfg.is_some();
     if let Some(ai_cfg) = ai_cfg {
         let mut md = markdown::to_markdown(&result, skip_base, lang);
         // Inline the actual ENTRYPOINT/CMD startup script(s) so the model can
@@ -244,21 +333,19 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
         println!("{report}");
         // Smart selection: with AI enabled, push the concise AI report.
         if let Some(wecom_cfg) = wecom_cfg.as_ref() {
-            push_to_wecom(wecom_cfg, &image, &report, lang).await?;
+            push_to_wecom(wecom_cfg, &image, verdict.as_deref(), &report, lang).await?;
         }
-        return Ok(());
+    } else if let Some(wecom_cfg) = wecom_cfg.as_ref() {
+        // WeCom push without AI: send a concise summary and skip the TUI.
+        let content = wecom_summary(&result, lang);
+        push_to_wecom(wecom_cfg, &image, verdict.as_deref(), &content, lang).await?;
     }
-    // WeCom push without AI: send a concise summary and skip the TUI.
-    if let Some(wecom_cfg) = wecom_cfg.as_ref() {
-        let summary = wecom_summary(&result, lang);
-        push_to_wecom(wecom_cfg, &image, &summary, lang).await?;
-        return Ok(());
+    // Outside CI the AI report / WeCom push is the whole run. In CI the gate
+    // below still applies: sending a report must not switch the checks off.
+    if reported && !is_ci() {
+        return Ok(true);
     }
     if is_ci() || !output_file.is_empty() {
-        let summary = result.summary();
-        let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
-        let highest_wasted_bytes = config::get_highest_wasted_bytes();
-        let highest_user_wasted_percent = config::get_highest_user_wasted_percent();
         println!("{}", i18n::tr(lang, "cli.result").bold().green());
         println!(
             "{}",
@@ -277,6 +364,7 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
                 ]
             )
         );
+        let ignored = config::get_ignore_recommendations();
         if !result.recommendations.is_empty() {
             println!("{}", i18n::tr(lang, "cli.recs").bold().green());
             for r in &result.recommendations {
@@ -299,62 +387,19 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
                     "low" => tag.green(),
                     _ => tag.cyan(),
                 };
-                println!("  {colored} {}{saved}", r.title);
+                // The id is what `ignore_recommendations` takes.
+                let note = if ignored.contains(&r.id) {
+                    format!(" ({}, {})", r.id, i18n::tr(lang, "cli.ignored"))
+                } else {
+                    format!(" ({})", r.id)
+                };
+                println!("  {colored} {}{saved}{note}", r.title);
             }
         }
 
-        let mut passed = true;
         let fail = i18n::tr(lang, "cli.fail").red().to_string();
-        if summary.score < lowest_efficiency {
-            println!(
-                "{}",
-                i18n::fill(
-                    i18n::tr(lang, "cli.check.eff"),
-                    &[&fail, &lowest_efficiency.to_string()]
-                )
-            );
-            passed = false;
-        }
-        if summary.wasted_size > highest_wasted_bytes {
-            println!(
-                "{}",
-                i18n::fill(
-                    i18n::tr(lang, "cli.check.bytes"),
-                    &[&fail, &ByteSize(highest_wasted_bytes).to_string()]
-                )
-            );
-            passed = false;
-        }
-        if summary.wasted_percent > highest_user_wasted_percent {
-            println!(
-                "{}",
-                i18n::fill(
-                    i18n::tr(lang, "cli.check.pct"),
-                    &[&fail, &format!("{highest_user_wasted_percent:.2}")]
-                )
-            );
-            passed = false;
-        }
-        if let Some(threshold) = config::get_fail_on_severity() {
-            let count = result
-                .recommendations
-                .iter()
-                .filter(|r| severity_at_least(&r.severity, threshold))
-                .count();
-            if count > 0 {
-                println!(
-                    "{}",
-                    i18n::fill(
-                        i18n::tr(lang, "cli.check.severity"),
-                        &[
-                            &fail,
-                            &count.to_string(),
-                            i18n::tr(lang, &format!("sev.{threshold}")),
-                        ]
-                    )
-                );
-                passed = false;
-            }
+        for failure in &failures {
+            println!("{}", failure.render(lang, &fail));
         }
         if !output_file.is_empty() {
             let is_markdown = output_file == "-"
@@ -363,7 +408,7 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
             let content = if is_markdown {
                 markdown::to_markdown(&result, skip_base, lang)
             } else {
-                serde_json::to_string(&result).map_err(|err| err.to_string())?
+                serde_json::to_string(&result.report(&summary)).map_err(|err| err.to_string())?
             };
             if output_file == "-" {
                 print!("{}", content);
@@ -375,27 +420,32 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
         // write `-o/--output-file`. Previously a non-empty output path
         // swallowed threshold failures (exit 0), which broke pipelines that
         // both archive the report and enforce efficiency checks.
-        if is_ci() && !passed {
-            return Err(i18n::tr(lang, "cli.cifail").to_string());
+        if is_ci() && !failures.is_empty() {
+            return Ok(false);
         }
     } else {
         ui::run_app(result, lang).map_err(|item| item.to_string())?;
     }
-    Ok(())
+    Ok(true)
 }
 
 // 将分析结果（AI 报告或精简摘要）推送到企微机器人
 async fn push_to_wecom(
     cfg: &wecom::WecomConfig,
     image: &str,
+    verdict: Option<&str>,
     content: &str,
     lang: i18n::Lang,
 ) -> Result<(), String> {
     eprintln!("{}", i18n::tr(lang, "wecom.sending"));
+    // The CI verdict sits right under the title: WeCom truncates long
+    // messages from the end, and the verdict is the part that must survive.
+    let verdict = verdict.map(|v| format!("{v}\n\n")).unwrap_or_default();
     let msg = format!(
-        "## {}: {}\n\n{}",
+        "## {}: {}\n\n{}{}",
         i18n::tr(lang, "wecom.title"),
         image,
+        verdict,
         content
     );
     wecom::send_markdown(cfg, &msg)
@@ -464,7 +514,7 @@ pub async fn run(args: Args) {
         if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
-                    if let Err(err) = analyze(AnalyzeOptions {
+                    let outcome = analyze(AnalyzeOptions {
                         image: value,
                         output_file: args.output_file.unwrap_or_default(),
                         skip_base,
@@ -475,15 +525,23 @@ pub async fn run(args: Args) {
                         wecom_cfg,
                         credentials,
                     })
-                    .await
-                    {
-                        error!(err, "analyze image fail");
-                        std::process::exit(1)
+                    .await;
+                    match outcome {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            error!("{}", i18n::tr(lang, "cli.cifail"));
+                            std::process::exit(EXIT_GATE_FAILED)
+                        }
+                        Err(err) => {
+                            error!(err, "analyze image fail");
+                            std::process::exit(EXIT_ERROR)
+                        }
                     }
                 })
                 .await;
         } else {
-            error!("image can not be nil")
+            error!("image can not be nil");
+            std::process::exit(EXIT_ERROR)
         }
     } else {
         start_cleanup_task();
@@ -525,7 +583,7 @@ pub async fn run(args: Args) {
                     addr = args.listen,
                     "failed to bind TCP listener"
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             });
 
         if let Err(err) = axum::serve(
@@ -581,4 +639,33 @@ async fn shutdown_signal() {
     }
 
     info!("signal received, starting graceful shutdown");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use i18n::Lang;
+
+    #[test]
+    fn gate_verdict_lists_each_failed_check_under_the_verdict() {
+        assert_eq!(gate_verdict_md(&[], Lang::En), "**CI gate: passed**");
+
+        let failures = [
+            GateFailure {
+                key: "cli.check.eff",
+                args: vec!["95".to_string()],
+            },
+            GateFailure {
+                key: "cli.check.severity",
+                args: vec!["2".to_string(), "high".to_string()],
+            },
+        ];
+        assert_eq!(
+            gate_verdict_md(&failures, Lang::En),
+            "**CI gate: failed**\n\
+             - FAIL: lowest efficiency check, lowest: 95\n\
+             - FAIL: recommendation severity check, 2 at high or above"
+        );
+        assert!(gate_verdict_md(&failures, Lang::Zh).starts_with("**CI 卡口：未通过**"));
+    }
 }

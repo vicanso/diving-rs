@@ -41,6 +41,9 @@ pub struct DivingConfig {
     /// CI 严重度卡口：存在该级别及以上的优化建议时 CI 失败（如 `high`
     /// 拦截镜像内的密钥文件）。未配置（默认）则建议只打印、不影响结果。
     pub fail_on_severity: Option<SeverityThreshold>,
+    /// 已知并接受的建议（规则 id，如 `runasroot`）：不参与
+    /// `fail_on_severity` 判定，CI 输出里仍会列出并标注为已忽略。
+    pub ignore_recommendations: Option<Vec<String>>,
     // Interval between layer cache cleanup runs, in hours (default: 1)
     pub cleanup_interval_hours: Option<u64>,
     /// Web 模式 `/api/analyze` 的 registry 白名单（host 形式，如
@@ -286,6 +289,21 @@ pub fn get_fail_on_severity() -> Option<&'static str> {
         })
 }
 
+/// `fail_on_severity` 判定时忽略的建议 id，已归一化为小写、去掉空白。
+pub fn get_ignore_recommendations() -> &'static [String] {
+    static LIST: OnceCell<Vec<String>> = OnceCell::new();
+    LIST.get_or_init(|| {
+        must_load_config()
+            .ignore_recommendations
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
 /// Web 模式的 registry 白名单，条目已归一化为小写、去掉空白。
 /// 空切片表示不限制。
 pub fn get_registry_allowlist() -> &'static [String] {
@@ -390,6 +408,12 @@ mod tests {
         assert_eq!(
             parse("fail_on_severity: info").unwrap().fail_on_severity,
             Some(SeverityThreshold::Info)
+        );
+        assert_eq!(
+            parse("ignore_recommendations: [runasroot, setuid]")
+                .unwrap()
+                .ignore_recommendations,
+            Some(vec!["runasroot".to_string(), "setuid".to_string()])
         );
         // A typo must fail loudly rather than silently disable the gate.
         let err = parse("fail_on_severity: hgih").unwrap_err().to_string();

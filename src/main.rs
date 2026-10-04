@@ -24,7 +24,7 @@ fn main() {
         .expect("failed to install ring CryptoProvider");
     std::panic::set_hook(Box::new(|e| {
         error!(category = "panic", message = e.to_string(),);
-        std::process::exit(1);
+        std::process::exit(diving::EXIT_ERROR);
     }));
     let args = diving::Args::parse();
     diving::init_logger(args.is_terminal_type());

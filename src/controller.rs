@@ -187,10 +187,11 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
         return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
     }
 
+    let summary = result.summary();
     if include_tree {
         // Serialize straight from the shared Arc — the file trees can run to
         // tens of MB and a `.clone()` here doubled peak memory per request.
-        return Ok(Json(&*result).into_response());
+        return Ok(Json(result.report(&summary)).into_response());
     }
     // Slim response: drop the hierarchical file trees (often the bulk of
     // the payload) while keeping layers, recommendations, sensitive files,
@@ -220,7 +221,7 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
         duplicate_groups: src.duplicate_groups.clone(),
         runtime_compat: src.runtime_compat.clone(),
     };
-    Ok(Json(slim).into_response())
+    Ok(Json(slim.report(&summary)).into_response())
 }
 
 #[derive(Debug, Serialize)]

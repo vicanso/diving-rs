@@ -32,6 +32,10 @@ pub const SEVERITY_INFO: &str = "info";
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recommendation {
+    /// Stable, language-independent rule id (`runasroot`, `secfiles`, …);
+    /// what `ignore_recommendations` in config.yml refers to.
+    #[serde(default)]
+    pub id: String,
     /// `size` | `necessity` | `security`
     pub category: String,
     /// `high` | `medium` | `low` | `info`
@@ -64,6 +68,20 @@ fn severity_rank(s: &str) -> u8 {
 /// `info`). Backs the CI `fail_on_severity` gate.
 pub fn severity_at_least(severity: &str, threshold: &str) -> bool {
     severity_rank(severity) <= severity_rank(threshold)
+}
+
+/// Recommendations that trip the CI `fail_on_severity` gate: at `threshold`
+/// or worse, and not accepted via `ignore_recommendations` (rule ids).
+pub fn gate_violations<'a>(
+    recommendations: &'a [Recommendation],
+    threshold: &str,
+    ignored: &[String],
+) -> Vec<&'a Recommendation> {
+    recommendations
+        .iter()
+        .filter(|r| severity_at_least(&r.severity, threshold))
+        .filter(|r| !ignored.contains(&r.id))
+        .collect()
 }
 
 /// A leaf file collected from the per-layer file trees.
@@ -588,6 +606,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: severity.into(),
+            id: "wasted".into(),
             title: t("rec.wasted.title"),
             detail: f(
                 "rec.wasted.detail",
@@ -618,6 +637,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_MEDIUM.into(),
+                id: "pkgcache".into(),
                 title: t("rec.pkgcache.title"),
                 detail: f(
                     "rec.pkgcache.detail",
@@ -650,6 +670,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_MEDIUM.into(),
+                id: "devart".into(),
                 title: t("rec.devart.title"),
                 detail: f(
                     "rec.devart.detail",
@@ -702,6 +723,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: severity.into(),
+            id: "crossdup".into(),
             title: t("rec.crossdup.title"),
             detail: f(
                 "rec.crossdup.detail",
@@ -761,6 +783,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: severity.into(),
+                id: "runtimecompat".into(),
                 title: t(title_key),
                 detail,
                 dockerfile_hint: hint,
@@ -776,6 +799,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: SEVERITY_LOW.into(),
+            id: "layercount".into(),
             title: t("rec.layercount.title"),
             detail: f("rec.layercount.detail", &[&result.layers.len().to_string()]),
             dockerfile_hint: t("rec.layercount.hint"),
@@ -798,6 +822,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SIZE.into(),
             severity: SEVERITY_INFO.into(),
+            id: "bigfiles".into(),
             title: t("rec.bigfiles.title"),
             detail: f(
                 "rec.bigfiles.detail",
@@ -828,6 +853,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "junk".into(),
                 title: t("rec.junk.title"),
                 detail: f(
                     "rec.junk.detail",
@@ -871,6 +897,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "slimbase".into(),
                 title: t("rec.slimbase.title"),
                 detail,
                 dockerfile_hint: t("rec.slimbase.hint"),
@@ -914,6 +941,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: sev.into(),
+                id: "oversized".into(),
                 title: t("rec.oversized.title"),
                 detail: f(
                     "rec.oversized.detail",
@@ -943,6 +971,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: severity.into(),
+                id: "dflint".into(),
                 title: t("rec.dflint.title"),
                 detail: f(
                     "rec.dflint.detail",
@@ -972,6 +1001,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "buildonly".into(),
                 title: t("rec.buildonly.title"),
                 detail: f(
                     "rec.buildonly.detail",
@@ -1003,6 +1033,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "doclocale".into(),
                 title: t("rec.doclocale.title"),
                 detail: f(
                     "rec.doclocale.detail",
@@ -1034,6 +1065,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "logtemp".into(),
                 title: t("rec.logtemp.title"),
                 detail: f(
                     "rec.logtemp.detail",
@@ -1065,6 +1097,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_NECESSITY.into(),
                 severity: SEVERITY_LOW.into(),
+                id: "toolchain".into(),
                 title: t("rec.toolchain.title"),
                 detail: f(
                     "rec.toolchain.detail",
@@ -1094,6 +1127,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SECURITY.into(),
             severity: SEVERITY_HIGH.into(),
+            id: "secfiles".into(),
             title: t("rec.secfiles.title"),
             detail: f(
                 "rec.secfiles.detail",
@@ -1140,6 +1174,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_HIGH.into(),
+                id: "secmeta".into(),
                 title: t("rec.secmeta.title"),
                 detail: f("rec.secmeta.detail", &[&total.to_string(), &entword]),
                 dockerfile_hint: t("rec.secmeta.hint"),
@@ -1165,6 +1200,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_HIGH.into(),
+                id: "worldread".into(),
                 title: t("rec.worldread.title"),
                 detail: f("rec.worldread.detail", &[&total.to_string()]),
                 dockerfile_hint: t("rec.worldread.hint"),
@@ -1179,6 +1215,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         out.push(Recommendation {
             category: CATEGORY_SECURITY.into(),
             severity: SEVERITY_MEDIUM.into(),
+            id: "runasroot".into(),
             title: t("rec.runasroot.title"),
             detail: t("rec.runasroot.detail"),
             dockerfile_hint: t("rec.runasroot.hint"),
@@ -1209,6 +1246,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_MEDIUM.into(),
+                id: "setuid".into(),
                 title: t("rec.setuid.title"),
                 detail: f("rec.setuid.detail", &[&total.to_string(), &binword]),
                 dockerfile_hint: t("rec.setuid.hint"),
@@ -1222,6 +1260,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
             out.push(Recommendation {
                 category: CATEGORY_SECURITY.into(),
                 severity: SEVERITY_MEDIUM.into(),
+                id: "worldwrite".into(),
                 title: t("rec.worldwrite.title"),
                 detail: f("rec.worldwrite.detail", &[&total.to_string()]),
                 dockerfile_hint: t("rec.worldwrite.hint"),
@@ -1268,6 +1307,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
                 out.push(Recommendation {
                     category: CATEGORY_SIZE.into(),
                     severity: SEVERITY_INFO.into(),
+                    id: "netreclaim".into(),
                     title: t("rec.netreclaim.title"),
                     detail: f(
                         "rec.netreclaim.detail",
@@ -1306,6 +1346,34 @@ mod tests {
         // `info` as the threshold catches every recommendation.
         assert!(severity_at_least(SEVERITY_INFO, SEVERITY_INFO));
         assert!(severity_at_least(SEVERITY_LOW, SEVERITY_INFO));
+    }
+
+    #[test]
+    fn gate_violations_respects_threshold_and_ignore_list() {
+        let rec = |id: &str, severity: &str| Recommendation {
+            id: id.to_string(),
+            severity: severity.to_string(),
+            ..Default::default()
+        };
+        let recs = vec![
+            rec("secfiles", SEVERITY_HIGH),
+            rec("runasroot", SEVERITY_MEDIUM),
+            rec("junk", SEVERITY_LOW),
+        ];
+        let ids = |threshold: &str, ignored: &[&str]| -> Vec<String> {
+            let ignored: Vec<String> = ignored.iter().map(|s| s.to_string()).collect();
+            gate_violations(&recs, threshold, &ignored)
+                .iter()
+                .map(|r| r.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(SEVERITY_HIGH, &[]), ["secfiles"]);
+        assert_eq!(ids(SEVERITY_MEDIUM, &[]), ["secfiles", "runasroot"]);
+        // An accepted finding no longer counts; the others still do.
+        assert_eq!(ids(SEVERITY_MEDIUM, &["runasroot"]), ["secfiles"]);
+        assert!(ids(SEVERITY_HIGH, &["secfiles"]).is_empty());
+        // Ids that match nothing change nothing.
+        assert_eq!(ids(SEVERITY_HIGH, &["run-as-root"]), ["secfiles"]);
     }
 
     #[test]

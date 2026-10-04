@@ -262,6 +262,12 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
             "{0}: recommendation severity check, {1} at {2} or above"
         }
         (Lang::Zh, "cli.check.severity") => "{0}：建议严重度检查，{1} 条达到「{2}」及以上",
+        (Lang::En, "cli.gate.pass") => "CI gate: passed",
+        (Lang::Zh, "cli.gate.pass") => "CI 卡口：通过",
+        (Lang::En, "cli.gate.fail") => "CI gate: failed",
+        (Lang::Zh, "cli.gate.fail") => "CI 卡口：未通过",
+        (Lang::En, "cli.ignored") => "ignored",
+        (Lang::Zh, "cli.ignored") => "已忽略",
         (Lang::En, "cli.cifail") => "CI check fail",
         (Lang::Zh, "cli.cifail") => "CI 检查失败",
 

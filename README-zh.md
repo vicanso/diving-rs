@@ -67,7 +67,7 @@ diving file:///tmp/redis.tar
 ## 导出报告
 
 ```bash
-# JSON
+# JSON —— 完整分析结果，外加 efficiencyScore / wastedSize / wastedPercent
 diving redis:alpine --output-file result.json
 
 # Markdown（通过 .md 后缀自动识别）
@@ -82,7 +82,7 @@ diving myimage:latest --output-file - --no-skip-base
 
 ## CI 卡口
 
-在 CI 中运行 diving 以保持镜像精简。设置 `CI=true` 后，它会输出效率评分，并在任一阈值超标时**以退出码 `1` 退出**。
+在 CI 中运行 diving 以保持镜像精简。设置 `CI=true` 后，它会输出效率评分，并在任一阈值超标时**以退出码 `1` 退出**（见[退出码](#退出码)）。
 
 ```bash
 CI=true diving redis:alpine
@@ -102,6 +102,51 @@ CI=true diving --config .diving.yml myimage:latest
 | `fail_on_severity` | —（关闭） | 存在该严重度及以上的优化建议时同样判定失败：`high`、`medium`、`low` 或 `info` |
 
 默认情况下，优化建议（泄漏的密钥文件、以 root 运行等）只打印，不影响退出码。设置 `fail_on_severity: high` 后，镜像里打包了私钥这类问题会让流水线失败。`medium` 及以下还会把启发式建议（Dockerfile lint、文档/locale 文件等）算进去，噪音会更多。值写错时 diving 会在启动时直接报错退出，而不是悄悄关掉这项检查。
+
+### 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| `0` | 通过 |
+| `1` | 镜像没有通过卡口（上面的阈值或 `fail_on_severity`） |
+| `2` | diving 自身失败：镜像拉取或分析失败、配置有误、AI 或企微调用失败等 |
+
+设置 `CI=true` 时，即使配置了 [AI 分析](#ai-分析) 或 [企微推送](#企微推送)，卡口同样生效：diving 先发送报告，再执行检查。
+
+### 接受已知问题
+
+每条建议都有一个固定的 id，CI 输出里显示在括号中，JSON 里是 `id` 字段。把已经评估并接受的问题写进 `ignore_recommendations`，它们仍会打印（标注「已忽略」），但不再参与 `fail_on_severity` 判定（上面三项阈值不受影响）：
+
+```yaml
+fail_on_severity: high
+ignore_recommendations:
+  - secfiles
+```
+
+| Id | 建议 | 严重度 |
+|----|------|--------|
+| `secfiles` | 镜像中疑似存在密钥 | 高 |
+| `secmeta` | 镜像元数据中的密钥（ENV / label / Dockerfile） | 高 |
+| `worldread` | 所有人可读的密钥文件 | 高 |
+| `runtimecompat` | 启动二进制与基础镜像的 libc 不兼容 | 高（musl 二进制运行在 glibc 镜像时为中） |
+| `wasted` | 回收浪费的空间 | 中（浪费比例超过 10% 时为高） |
+| `crossdup` | 跨层重复文件 | 低（达到 5 MB 为中，达到 50 MB 为高） |
+| `pkgcache` | 清理包管理器缓存 | 中 |
+| `devart` | 排除开发/构建产物 | 中 |
+| `runasroot` | 容器以 root 运行 | 中 |
+| `setuid` | setuid/setgid 二进制文件 | 中 |
+| `worldwrite` | 所有人可写的文件 | 中 |
+| `oversized` | 超大镜像层 | 低或中 |
+| `dflint` | Dockerfile 反模式 | 低或中 |
+| `layercount` | 减少镜像层数 | 低 |
+| `junk` | 编辑器/系统垃圾文件 | 低 |
+| `slimbase` | 考虑更精简的基础镜像 | 低 |
+| `buildonly` | 运行时镜像中的纯构建期文件 | 低 |
+| `doclocale` | 文档 / man / locale 数据 | 低 |
+| `logtemp` | 打进镜像的日志 / 临时文件 | 低 |
+| `toolchain` | 最终镜像中存在构建工具链 | 低 |
+| `bigfiles` | 近期层中新增的大文件 | 提示 |
+| `netreclaim` | 净可回收空间估算 | 提示 |
 
 ## AI 分析
 
@@ -144,6 +189,8 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 
 - 已设置 `--ai-api-key` → 推送精简的 AI 报告
 - 未启用 AI → 推送精简摘要（效率评分、浪费空间、优化建议）
+
+设置 `CI=true` 时，消息开头会带上 [CI 卡口](#ci-卡口)的结论：通过，或未通过及具体是哪几项检查没过。这样在群里就能看到结果，不用再去翻流水线。
 
 ```bash
 # 使用机器人 key（自动展开为标准 webhook 地址）
@@ -290,17 +337,23 @@ Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以�
 | `layer_ttl` | `90d` | layer blob **与**分析结果缓存的有效期；超过该时长未访问则清除 |
 | `analysis_path` | `~/.diving/analysis` | 分析结果缓存目录 |
 | `cleanup_interval_hours` | `1` | 扫描并清除过期缓存的间隔（小时） |
-| `threads` | `min(层数, 2 × CPU 数)` | 并发 layer 拉取 + 解压任务数。网络快且层数多时调大，与其它负载共享主机时调小 |
+| `layer_concurrency` | `min(层数, 2 × CPU 数)` | 每个镜像并发拉取 + 解压 layer 的任务数。网络快且层数多时调大，与其它负载共享主机时调小 |
+| `worker_threads` | CPU 核数 | Tokio 运行时的工作线程数。web 服务需要同时处理较多请求时调大 |
+| `threads` | — | 旧的单一配置项：上面两项未设置时，同时作为它们的取值 |
 | `lowest_efficiency` | `0.95` | CI 检查 —— 最低效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520` | CI 检查 —— 最大浪费字节数（20 MB） |
 | `highest_user_wasted_percent` | `0.1` | CI 检查 —— 最大浪费比例（0–1） |
 | `fail_on_severity` | — | CI 检查 —— 存在该严重度及以上的优化建议时失败（`high` / `medium` / `low` / `info`）；不配置则建议不影响结果 |
+| `ignore_recommendations` | — | CI 检查 —— 不参与 `fail_on_severity` 判定的建议 id（见[接受已知问题](#接受已知问题)） |
+| `registry_allowlist` | — | Web 模式：非空时，`/api/analyze` 和 MCP 只接受这些 registry 的镜像（如 `index.docker.io`、`ghcr.io`）；要允许 `file://` / `docker://` 需加入 `local-file` / `local-docker` |
+| `max_download_file_size` | `104857600` | Web 模式：`/api/file` 单个文件的大小上限（100 MB） |
+| `max_layer_cache_size` | — | layer 缓存的总大小上限；超出时按最近访问时间从旧到新淘汰。不配置则只按 TTL 清理 |
 | `mcp_allowed_hosts` | — | Web 模式：`/mcp` 在 loopback 之外额外放行的 `Host`（配成 `"*"` 关闭校验；设置了 `--mcp-token` 时忽略） |
 
 ```yaml
 layer_ttl: 30d
 cleanup_interval_hours: 6
-threads: 4
+layer_concurrency: 4
 lowest_efficiency: 0.95
 highest_wasted_bytes: 20971520
 highest_user_wasted_percent: 0.1

@@ -391,7 +391,33 @@ pub struct DockerAnalyzeSummary {
     pub score: u64,
 }
 
+/// The analysis as handed to external consumers (`-o` JSON, `/api/analyze`):
+/// the result itself plus the efficiency numbers, which are otherwise only
+/// derived on demand by [`DockerAnalyzeResult::summary`] and so were missing
+/// from the JSON that CI scripts and dashboards read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeReport<'a> {
+    #[serde(flatten)]
+    pub result: &'a DockerAnalyzeResult,
+    pub efficiency_score: u64,
+    pub wasted_size: u64,
+    pub wasted_percent: f64,
+}
+
 impl DockerAnalyzeResult {
+    /// `self` wrapped with the derived efficiency numbers for serialization.
+    /// `summary` comes from the full result — a slimmed copy may be passed
+    /// as `self` to keep the file trees out of the payload.
+    pub fn report<'a>(&'a self, summary: &DockerAnalyzeSummary) -> AnalyzeReport<'a> {
+        AnalyzeReport {
+            result: self,
+            efficiency_score: summary.score,
+            wasted_size: summary.wasted_size,
+            wasted_percent: summary.wasted_percent,
+        }
+    }
+
     pub fn summary(&self) -> DockerAnalyzeSummary {
         let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
         let mut path_index: HashMap<&str, usize> = HashMap::new();
@@ -1633,7 +1659,12 @@ impl DockerClient {
         let scan = scan_layers(&config, &manifest.layers, &info_list);
 
         tl_info!(repo = repo.as_str(), tag = tag, "analyze image done",);
-        let image_name = format!("{repo}:{tag}");
+        // Local sources (`file://`, some `docker://` refs) have no tag.
+        let image_name = if tag.is_empty() {
+            repo.to_string()
+        } else {
+            format!("{repo}:{tag}")
+        };
         let (run_user, envs, labels) = extract_image_meta(&config);
 
         // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown".
