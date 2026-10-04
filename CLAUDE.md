@@ -133,7 +133,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **`src/controller.rs`: Web API endpoints**
   - `/api/analyze`: Initiate image analysis (singleflight-deduplicated; `format=markdown`, `includeTree=false`, `noVerifyDup` variants)
   - `/api/file`: Download individual files from layers
-  - `/api/latest-images`: Return recent analyses
+  - `/api/latest-images`: Return recent analyses, the version, and `mcp: {enabled, tokenRequired}` for the web UI
   - Fallback handler serves static assets from embedded `dist/`
 - **`src/store/`**: `blob.rs` (atomic blob I/O, sha256 helpers, TTL cleanup), `analysis_cache.rs` (schema-versioned analysis-result JSON cache)
 - **`src/config/`**: Configuration loading from `~/.diving/config.yml` + user sensitive patterns
@@ -151,7 +151,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
   - `App.tsx`: state + layout wiring (search flow, layer filter, dark-mode hook)
   - `types.ts`: API/view-model interfaces
   - `analysis.ts`: pure computation — summary derivation, file-tree flattening for the virtualized list
-  - `components.tsx`: memoized report cards + `VirtualFileTree` + `SearchBar`
+  - `components.tsx`: memoized report cards + `VirtualFileTree` + `SearchBar` + `McpGuide` (header MCP button and setup dialog; shown when `/api/latest-images` reports `mcp.enabled`)
   - `icons.tsx`: inline SVG icons
 - **Perf notes**: file-tree rows are `useMemo`-cached and filter changes go through `useDeferredValue`, so keyword typing stays responsive on huge trees; report cards are `memo`-ized
 - **Key Components**:

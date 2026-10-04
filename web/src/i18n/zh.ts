@@ -46,4 +46,23 @@ export default {
   duplicateWastedLabel: "浪费",
   dockerfileTitle: "反推 Dockerfile",
   runAsUserLabel: "运行用户",
+  mcpButton: "MCP",
+  mcpTitle: "通过 MCP 接入 AI",
+  mcpIntro:
+    "把 diving 接入支持 MCP 的 AI 客户端（Claude Code、Cursor 等），AI 就能直接分析镜像、查询文件。",
+  mcpEndpointLabel: "接入地址",
+  mcpClaudeLabel: "Claude Code",
+  mcpJsonLabel: "其它客户端（JSON 配置）",
+  mcpJsonNote:
+    "适用于 Claude Code 的 .mcp.json、Cursor 等；个别客户端的字段名略有不同，以其文档为准。",
+  mcpTokenNotice:
+    "此服务需要 token：请把 <token> 换成启动服务时用 --mcp-token 或 DIVING_MCP_TOKEN 设置的值。",
+  mcpHostBlocked:
+    "当前地址 {host} 不在 MCP 允许的 Host 列表中，客户端用上面的地址连接会被拒绝（403）。请在启动服务时设置 --mcp-token，或在 ~/.diving/config.yml 的 mcp_allowed_hosts 中加入该地址。",
+  mcpToolsLabel: "提供的工具",
+  mcpToolAnalyzeImage: "分析镜像，返回 Markdown 报告",
+  mcpToolGetFindings: "同样的结论，以 JSON 返回",
+  mcpToolListFiles: "分页查询文件，可按层、目录、关键字、大小过滤",
+  mcpToolReadFile: "读取某一层中的文本文件",
+  mcpToolLatestImages: "最近分析过的镜像",
 };

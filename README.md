@@ -221,6 +221,8 @@ Web mode also serves an [MCP](https://modelcontextprotocol.io) endpoint at `/mcp
 claude mcp add --transport http diving http://127.0.0.1:7001/mcp
 ```
 
+The **MCP** button in the web UI's header shows the same setup, filled in with the address you are browsing: the endpoint, the Claude Code command and a JSON config for other clients, each with a copy button. It also warns when that address would be rejected by the `Host` check below.
+
 | Tool | Returns |
 |------|---------|
 | `analyze_image` | The Markdown report (same as `format=markdown`) |

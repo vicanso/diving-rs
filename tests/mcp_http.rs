@@ -8,7 +8,8 @@
 mod common;
 
 use common::build_fixture_tar;
-use diving::mcp::new_router;
+use diving::controller;
+use diving::mcp::{new_router, McpStatus};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use rustls::crypto::ring::default_provider;
 use serde_json::{json, Value};
@@ -227,4 +228,31 @@ async fn mcp_rejects_foreign_host_without_token() {
     .await
     .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// The web UI's MCP button and setup dialog are driven by this field.
+#[tokio::test]
+async fn latest_images_reports_mcp_status() {
+    let status = McpStatus {
+        enabled: true,
+        token_required: true,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, controller::new_router(status))
+            .await
+            .unwrap();
+    });
+
+    let resp: Value = client()
+        .get(format!("http://{addr}/api/latest-images"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["mcp"], json!({"enabled": true, "tokenRequired": true}));
+    assert!(resp["version"].is_string());
 }

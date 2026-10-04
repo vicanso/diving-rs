@@ -36,6 +36,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use controller::new_router;
 use image::{analyze_docker_image, parse_image_info};
+use mcp::McpStatus;
 use middleware::{access_log, entry};
 use store::{clear_analysis_files, clear_blob_files, enforce_layer_cache_limit};
 use task_local::{generate_trace_id, TRACE_ID};
@@ -457,13 +458,17 @@ pub async fn run(args: Args) {
         }
     } else {
         start_cleanup_task();
-        let mut routes = new_router();
-        if !args.no_mcp {
-            let mcp_token = args
-                .mcp_token
-                .or_else(|| env::var("DIVING_MCP_TOKEN").ok())
-                .filter(|t| !t.trim().is_empty());
-            warn_if_mcp_unreachable(&args.listen, mcp_token.is_some());
+        let mcp_token = args
+            .mcp_token
+            .or_else(|| env::var("DIVING_MCP_TOKEN").ok())
+            .filter(|t| !t.trim().is_empty());
+        let mcp_status = McpStatus {
+            enabled: !args.no_mcp,
+            token_required: !args.no_mcp && mcp_token.is_some(),
+        };
+        let mut routes = new_router(mcp_status);
+        if mcp_status.enabled {
+            warn_if_mcp_unreachable(&args.listen, mcp_status.token_required);
             routes = routes.merge(mcp::new_router(mcp_token));
         }
         // build our application with a route

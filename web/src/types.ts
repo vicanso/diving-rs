@@ -124,7 +124,13 @@ export interface ImageDescriptions {
   runUser: string;
 }
 
+export interface McpStatus {
+  enabled: boolean;
+  tokenRequired: boolean;
+}
+
 export interface LatestImages {
   images: string[];
   version: string;
+  mcp?: McpStatus;
 }

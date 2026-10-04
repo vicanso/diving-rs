@@ -2,7 +2,7 @@
 // in App does not re-render them.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Card, Input, List, Select, Typography } from "antd";
+import { Alert, Card, Input, List, Modal, Select, Typography } from "antd";
 import prettyBytes from "pretty-bytes";
 import i18nGet from "./i18n";
 import { FileTreeRow, opModified, opRemoved } from "./analysis";
@@ -11,6 +11,7 @@ import {
   DuplicateGroup,
   ImageDescriptions,
   Layer,
+  McpStatus,
   ModifiedFile,
   Recommendation,
   SensitiveFile,
@@ -554,6 +555,117 @@ export const LatestImagesList = memo(({ images }: { images: string[] }) => {
         </List.Item>
       )}
     />
+  );
+});
+
+const MCP_TOOLS = [
+  ["analyze_image", "mcpToolAnalyzeImage"],
+  ["get_findings", "mcpToolGetFindings"],
+  ["list_files", "mcpToolListFiles"],
+  ["read_file", "mcpToolReadFile"],
+  ["latest_images", "mcpToolLatestImages"],
+];
+
+const CodeSnippet = ({ code }: { code: string }) => (
+  <div className="codeSnippet">
+    <pre>{code}</pre>
+    <Typography.Text className="codeSnippetCopy" copyable={{ text: code }} />
+  </div>
+);
+
+/** Header button + dialog explaining how to connect an AI client to `/mcp`. */
+export const McpGuide = memo(({ status }: { status: McpStatus }) => {
+  const [open, setOpen] = useState(false);
+  const [hostBlocked, setHostBlocked] = useState(false);
+  // Same origin and base path the page itself was served from.
+  const endpoint = new URL("./mcp", window.location.href).href;
+
+  useEffect(() => {
+    // Without a token the server only accepts allow-listed Host headers.
+    // Ask it whether this address passes rather than mirroring its rules.
+    if (!open || status.tokenRequired) {
+      return;
+    }
+    fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2025-06-18",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    })
+      .then((resp) => setHostBlocked(resp.status === 403))
+      .catch(() => {
+        /* advisory check only */
+      });
+  }, [open, status.tokenRequired, endpoint]);
+
+  const bearer = "Bearer <token>";
+  const claudeCommand = status.tokenRequired
+    ? `claude mcp add --transport http diving ${endpoint} \\\n  --header "Authorization: ${bearer}"`
+    : `claude mcp add --transport http diving ${endpoint}`;
+  const jsonConfig = JSON.stringify(
+    {
+      mcpServers: {
+        diving: {
+          type: "http",
+          url: endpoint,
+          ...(status.tokenRequired && {
+            headers: { Authorization: bearer },
+          }),
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      <button type="button" className="mcpButton" onClick={() => setOpen(true)}>
+        {i18nGet("mcpButton")}
+      </button>
+      <Modal
+        className="mcpGuide"
+        title={i18nGet("mcpTitle")}
+        open={open}
+        onCancel={() => setOpen(false)}
+        footer={null}
+        width={640}
+      >
+        <p className="mcpIntro">{i18nGet("mcpIntro")}</p>
+        {hostBlocked && (
+          <Alert
+            type="warning"
+            showIcon
+            title={i18nGet("mcpHostBlocked").replace(
+              "{host}",
+              window.location.host,
+            )}
+          />
+        )}
+        {status.tokenRequired && (
+          <Alert type="info" showIcon title={i18nGet("mcpTokenNotice")} />
+        )}
+        <h4>{i18nGet("mcpEndpointLabel")}</h4>
+        <CodeSnippet code={endpoint} />
+        <h4>{i18nGet("mcpClaudeLabel")}</h4>
+        <CodeSnippet code={claudeCommand} />
+        <h4>{i18nGet("mcpJsonLabel")}</h4>
+        <CodeSnippet code={jsonConfig} />
+        <p className="mcpNote">{i18nGet("mcpJsonNote")}</p>
+        <h4>{i18nGet("mcpToolsLabel")}</h4>
+        <ul className="mcpTools">
+          {MCP_TOOLS.map(([name, descKey]) => (
+            <li key={name}>
+              <code>{name}</code>
+              <span>{i18nGet(descKey)}</span>
+            </li>
+          ))}
+        </ul>
+      </Modal>
+    </>
   );
 });
 

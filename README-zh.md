@@ -221,6 +221,8 @@ Web 模式同时在 `/mcp` 提供 [MCP](https://modelcontextprotocol.io) 服务�
 claude mcp add --transport http diving http://127.0.0.1:7001/mcp
 ```
 
+Web 界面页头的 **MCP** 按钮会给出同样的接入说明，并按你当前访问的地址自动填好：接入地址、Claude Code 命令、其它客户端用的 JSON 配置，都可以一键复制。如果当前地址会被下面的 `Host` 校验拒绝，弹窗里也会提示。
+
 | 工具 | 返回内容 |
 |------|----------|
 | `analyze_image` | Markdown 分析报告（与 `format=markdown` 相同） |

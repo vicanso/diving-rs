@@ -46,5 +46,25 @@ export default {
   duplicateCountLabel: "Copies",
   duplicateWastedLabel: "Wasted",
   dockerfileTitle: "Reconstructed Dockerfile",
+  mcpButton: "MCP",
+  mcpTitle: "Connect AI via MCP",
+  mcpIntro:
+    "Add diving to an MCP-capable AI client (Claude Code, Cursor, …) and the AI can analyze images and query their files directly.",
+  mcpEndpointLabel: "Endpoint",
+  mcpClaudeLabel: "Claude Code",
+  mcpJsonLabel: "Other clients (JSON config)",
+  mcpJsonNote:
+    "Works for Claude Code's .mcp.json, Cursor and similar; a few clients name the fields differently — check their docs.",
+  mcpTokenNotice:
+    "This server requires a token: replace <token> with the value set via --mcp-token or DIVING_MCP_TOKEN when the server was started.",
+  mcpHostBlocked:
+    "The current address {host} is not in MCP's allowed Host list, so clients using the endpoint above will be rejected (403). Start the server with --mcp-token, or add this address to mcp_allowed_hosts in ~/.diving/config.yml.",
+  mcpToolsLabel: "Tools",
+  mcpToolAnalyzeImage: "Analyze an image and return a Markdown report",
+  mcpToolGetFindings: "The same findings as JSON",
+  mcpToolListFiles:
+    "Page through files, filtered by layer, directory, keyword or size",
+  mcpToolReadFile: "Read a text file from one layer",
+  mcpToolLatestImages: "Recently analyzed images",
   runAsUserLabel: "User",
 };

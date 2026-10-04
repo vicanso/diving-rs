@@ -7,10 +7,12 @@ use crate::image::{
     resolve_explicit, DockerAnalyzeResult, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
 };
 use crate::markdown;
+use crate::mcp::McpStatus;
 use crate::recommend::build_recommendations;
 use crate::store::{get_blob_path, is_safe_blob_id};
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::{extract::Query, routing::get, Json, Router};
+use axum::{routing::get, Json, Router};
 use futures::future::{FutureExt, Shared};
 use futures::Future;
 use http::header;
@@ -42,13 +44,14 @@ fn in_flight() -> &'static Mutex<HashMap<String, AnalysisFuture>> {
     IN_FLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn new_router() -> Router {
+pub fn new_router(mcp: McpStatus) -> Router {
     Router::new()
         .route("/ping", get(ping))
         .route("/api/analyze", get(analyze))
         .route("/api/file", get(get_file))
         .route("/api/latest-images", get(get_latest_images))
         .fallback(get(serve))
+        .with_state(mcp)
 }
 
 async fn ping() -> &'static str {
@@ -225,6 +228,8 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
 struct LatestImageResp {
     pub images: Vec<String>,
     pub version: String,
+    /// Drives the web UI's MCP button / setup dialog.
+    pub mcp: McpStatus,
 }
 
 /// Most-recently analyzed image names, newest first.
@@ -236,10 +241,11 @@ pub(crate) fn latest_images() -> Vec<String> {
     }
 }
 
-async fn get_latest_images() -> JSONResult<LatestImageResp> {
+async fn get_latest_images(State(mcp): State<McpStatus>) -> JSONResult<LatestImageResp> {
     Ok(Json(LatestImageResp {
         images: latest_images(),
         version: VERSION.to_owned(),
+        mcp,
     }))
 }
 

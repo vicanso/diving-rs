@@ -153,6 +153,15 @@ struct FileQuery {
 #[derive(Debug, Clone, Default)]
 pub struct DivingMcp;
 
+/// What the web UI needs to describe the endpoint to a visitor, reported by
+/// `/api/latest-images`. Only whether a token is required — never the token.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpStatus {
+    pub enabled: bool,
+    pub token_required: bool,
+}
+
 #[tool_router]
 impl DivingMcp {
     #[tool(

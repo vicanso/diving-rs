@@ -81,6 +81,120 @@
   max-width: 720px;
 }
 
+.mcpButton {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+
+.mcpButton:hover,
+.mcpButton:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* The fixed GitHub corner covers the header's right edge once the centered
+   content column (--content-max) reaches it; keep the MCP button clear. */
+@media (max-width: 1248px) {
+  .headerInner.withCorner {
+    padding-right: 52px;
+  }
+}
+
+/* On phones the header search already fills (and overflows) the row, so the
+   MCP entry only shows on the landing page there. */
+@media (max-width: 640px) {
+  .headerSearch + .mcpButton {
+    display: none;
+  }
+}
+
+/* —— MCP guide dialog (rendered in a portal, outside .appLayout) —— */
+.mcpGuide h4 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.mcpGuide .mcpIntro {
+  margin: 0 0 12px;
+  color: var(--ink-secondary);
+  line-height: 1.6;
+}
+
+.mcpGuide .ant-alert {
+  margin-bottom: 8px;
+}
+
+.mcpGuide .mcpNote {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.codeSnippet {
+  position: relative;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.codeSnippet pre {
+  margin: 0;
+  padding: 10px 40px 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--ink-secondary);
+}
+
+.codeSnippet .codeSnippetCopy {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+}
+
+.mcpTools {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcpTools li {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 13px;
+  color: var(--ink-secondary);
+  border-top: 1px solid var(--border);
+}
+
+.mcpTools li:first-child {
+  border-top: none;
+}
+
+.mcpTools code {
+  flex: 0 0 116px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent-deep);
+}
+
 /* —— landing —— */
 .landing {
   min-height: calc(100vh - var(--header-h));

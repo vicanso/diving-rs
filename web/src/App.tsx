@@ -36,6 +36,7 @@ import {
   EXAMPLE_IMAGES,
   ImageSummaryCard,
   LatestImagesList,
+  McpGuide,
   RecommendationsCard,
   SearchBar,
   SensitiveFilesCard,
@@ -51,6 +52,7 @@ import {
   ImageDescriptions,
   LatestImages,
   Layer,
+  McpStatus,
   ModifiedFile,
   Recommendation,
   SensitiveFile,
@@ -120,6 +122,7 @@ const App = () => {
   );
   const [latestImages, setLatestImages] = useState<string[]>([]);
   const [version, setVersion] = useState("");
+  const [mcp, setMcp] = useState<McpStatus | null>(null);
 
   const onSearch = async (value: string) => {
     const image = value.trim();
@@ -186,6 +189,7 @@ const App = () => {
       .then(({ data }) => {
         setLatestImages(data.images);
         setVersion(data.version);
+        setMcp(data.mcp || null);
       })
       .catch(() => {
         /* decorative list */
@@ -375,6 +379,8 @@ const App = () => {
     );
   };
 
+  const githubIcon = getGithubIcon(isDark);
+
   return (
     <ConfigProvider
       theme={{
@@ -397,9 +403,11 @@ const App = () => {
       }}
     >
       <Layout className="appLayout">
-        {getGithubIcon(isDark)}
+        {githubIcon}
         <Header className="header">
-          <div className="headerInner">
+          <div
+            className={githubIcon ? "headerInner withCorner" : "headerInner"}
+          >
             <div
               className="logo"
               onClick={() => {
@@ -411,6 +419,7 @@ const App = () => {
               {version && <span className="version">v{version}</span>}
             </div>
             {report && <div className="headerSearch">{searchBar}</div>}
+            {mcp?.enabled && <McpGuide status={mcp} />}
           </div>
         </Header>
 
