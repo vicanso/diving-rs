@@ -199,6 +199,7 @@ When `CI=true` env var is set:
   1. Minimum efficiency threshold (default 95%)
   2. Maximum wasted bytes (default 20MB)
   3. Maximum wasted percent (default 10%)
+- Optional fourth check, `fail_on_severity` (off by default): fail when any recommendation is at that severity or above
 - Exits with code 1 on failure
 - Can output JSON analysis to file with `-o/--output-file`
 
@@ -215,6 +216,7 @@ cleanup_interval_hours: 1                  # Cache sweep interval (web mode)
 lowest_efficiency: 0.95                    # CI efficiency threshold (0-1)
 highest_wasted_bytes: 20971520             # 20MB, CI wasted bytes limit
 highest_user_wasted_percent: 0.1           # 10%, CI wasted percent limit
+fail_on_severity: high                     # CI: also fail on recommendations at/above this severity (unset = off)
 worker_threads: 4                          # Tokio runtime worker count
 layer_concurrency: 8                       # Concurrent layer download/decompress per image
 threads: 4                                 # Legacy single knob (fallback for the two above)

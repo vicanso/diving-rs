@@ -258,6 +258,10 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "cli.check.bytes") => "{0}：浪费字节上限检查，上限：{1}",
         (Lang::En, "cli.check.pct") => "{0}: highest user wasted percent check, highest: {1}",
         (Lang::Zh, "cli.check.pct") => "{0}：浪费比例上限检查，上限：{1}",
+        (Lang::En, "cli.check.severity") => {
+            "{0}: recommendation severity check, {1} at {2} or above"
+        }
+        (Lang::Zh, "cli.check.severity") => "{0}：建议严重度检查，{1} 条达到「{2}」及以上",
         (Lang::En, "cli.cifail") => "CI check fail",
         (Lang::Zh, "cli.cifail") => "CI 检查失败",
 

@@ -60,6 +60,12 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
+/// Whether `severity` is `threshold` or worse (`high` > `medium` > `low` >
+/// `info`). Backs the CI `fail_on_severity` gate.
+pub fn severity_at_least(severity: &str, threshold: &str) -> bool {
+    severity_rank(severity) <= severity_rank(threshold)
+}
+
 /// A leaf file collected from the per-layer file trees.
 struct Leaf {
     path: String,
@@ -1288,6 +1294,19 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn severity_at_least_follows_severity_order() {
+        assert!(severity_at_least(SEVERITY_HIGH, SEVERITY_HIGH));
+        assert!(!severity_at_least(SEVERITY_MEDIUM, SEVERITY_HIGH));
+        assert!(severity_at_least(SEVERITY_HIGH, SEVERITY_MEDIUM));
+        assert!(severity_at_least(SEVERITY_MEDIUM, SEVERITY_MEDIUM));
+        assert!(!severity_at_least(SEVERITY_LOW, SEVERITY_MEDIUM));
+        assert!(!severity_at_least(SEVERITY_INFO, SEVERITY_LOW));
+        // `info` as the threshold catches every recommendation.
+        assert!(severity_at_least(SEVERITY_INFO, SEVERITY_INFO));
+        assert!(severity_at_least(SEVERITY_LOW, SEVERITY_INFO));
+    }
 
     #[test]
     fn aws_key_detection() {

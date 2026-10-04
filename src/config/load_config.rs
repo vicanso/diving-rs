@@ -1,3 +1,4 @@
+use crate::recommend::{SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM};
 use bytesize::ByteSize;
 use config::{Config, File};
 use glob::Pattern;
@@ -5,6 +6,17 @@ use home::home_dir;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
+
+/// `fail_on_severity` 的取值。用枚举而不是字符串：写错的值在启动时就让
+/// 配置反序列化失败，而不是悄悄把卡口关掉。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeverityThreshold {
+    High,
+    Medium,
+    Low,
+    Info,
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DivingConfig {
@@ -26,6 +38,9 @@ pub struct DivingConfig {
     pub lowest_efficiency: Option<f64>,
     pub highest_wasted_bytes: Option<ByteSize>,
     pub highest_user_wasted_percent: Option<f64>,
+    /// CI 严重度卡口：存在该级别及以上的优化建议时 CI 失败（如 `high`
+    /// 拦截镜像内的密钥文件）。未配置（默认）则建议只打印、不影响结果。
+    pub fail_on_severity: Option<SeverityThreshold>,
     // Interval between layer cache cleanup runs, in hours (default: 1)
     pub cleanup_interval_hours: Option<u64>,
     /// Web 模式 `/api/analyze` 的 registry 白名单（host 形式，如
@@ -226,6 +241,18 @@ pub fn get_highest_user_wasted_percent() -> f64 {
     0.1
 }
 
+/// CI 严重度卡口的阈值（`recommend::SEVERITY_*` 之一）；`None` 表示不检查。
+pub fn get_fail_on_severity() -> Option<&'static str> {
+    must_load_config()
+        .fail_on_severity
+        .map(|threshold| match threshold {
+            SeverityThreshold::High => SEVERITY_HIGH,
+            SeverityThreshold::Medium => SEVERITY_MEDIUM,
+            SeverityThreshold::Low => SEVERITY_LOW,
+            SeverityThreshold::Info => SEVERITY_INFO,
+        })
+}
+
 /// Web 模式的 registry 白名单，条目已归一化为小写、去掉空白。
 /// 空切片表示不限制。
 pub fn get_registry_allowlist() -> &'static [String] {
@@ -293,4 +320,33 @@ pub fn get_layer_concurrency(layer_count: usize) -> usize {
         .or(config.threads)
         .unwrap_or_else(|| layer_count.min(num_cpus::get() * 2))
         .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::FileFormat;
+
+    fn parse(yaml: &str) -> Result<DivingConfig, config::ConfigError> {
+        Config::builder()
+            .add_source(File::from_str(yaml, FileFormat::Yaml))
+            .build()?
+            .try_deserialize()
+    }
+
+    #[test]
+    fn fail_on_severity_accepts_known_levels_only() {
+        assert_eq!(parse("layer_ttl: 30d").unwrap().fail_on_severity, None);
+        assert_eq!(
+            parse("fail_on_severity: high").unwrap().fail_on_severity,
+            Some(SeverityThreshold::High)
+        );
+        assert_eq!(
+            parse("fail_on_severity: info").unwrap().fail_on_severity,
+            Some(SeverityThreshold::Info)
+        );
+        // A typo must fail loudly rather than silently disable the gate.
+        let err = parse("fail_on_severity: hgih").unwrap_err().to_string();
+        assert!(err.contains("hgih"), "{err}");
+    }
 }

@@ -38,6 +38,7 @@ use controller::new_router;
 use image::{analyze_docker_image, parse_image_info};
 use mcp::McpStatus;
 use middleware::{access_log, entry};
+use recommend::severity_at_least;
 use store::{clear_analysis_files, clear_blob_files, enforce_layer_cache_limit};
 use task_local::{generate_trace_id, TRACE_ID};
 
@@ -326,6 +327,27 @@ async fn analyze(opts: AnalyzeOptions) -> Result<(), String> {
                 )
             );
             passed = false;
+        }
+        if let Some(threshold) = config::get_fail_on_severity() {
+            let count = result
+                .recommendations
+                .iter()
+                .filter(|r| severity_at_least(&r.severity, threshold))
+                .count();
+            if count > 0 {
+                println!(
+                    "{}",
+                    i18n::fill(
+                        i18n::tr(lang, "cli.check.severity"),
+                        &[
+                            &fail,
+                            &count.to_string(),
+                            i18n::tr(lang, &format!("sev.{threshold}")),
+                        ]
+                    )
+                );
+                passed = false;
+            }
         }
         if !output_file.is_empty() {
             let is_markdown = output_file == "-"

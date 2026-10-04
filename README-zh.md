@@ -95,6 +95,9 @@ CI=true diving redis:alpine
 | `lowest_efficiency` | `0.95` | 最低可接受的效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520`（20 MB） | 最大允许浪费字节数 |
 | `highest_user_wasted_percent` | `0.1` | 最大允许浪费比例（0–1） |
+| `fail_on_severity` | —（关闭） | 存在该严重度及以上的优化建议时同样判定失败：`high`、`medium`、`low` 或 `info` |
+
+默认情况下，优化建议（泄漏的密钥文件、以 root 运行等）只打印，不影响退出码。设置 `fail_on_severity: high` 后，镜像里打包了私钥这类问题会让流水线失败。`medium` 及以下还会把启发式建议（Dockerfile lint、文档/locale 文件等）算进去，噪音会更多。值写错时 diving 会在启动时直接报错退出，而不是悄悄关掉这项检查。
 
 ## AI 分析
 
@@ -287,6 +290,7 @@ Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以�
 | `lowest_efficiency` | `0.95` | CI 检查 —— 最低效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520` | CI 检查 —— 最大浪费字节数（20 MB） |
 | `highest_user_wasted_percent` | `0.1` | CI 检查 —— 最大浪费比例（0–1） |
+| `fail_on_severity` | — | CI 检查 —— 存在该严重度及以上的优化建议时失败（`high` / `medium` / `low` / `info`）；不配置则建议不影响结果 |
 | `mcp_allowed_hosts` | — | Web 模式：`/mcp` 在 loopback 之外额外放行的 `Host`（配成 `"*"` 关闭校验；设置了 `--mcp-token` 时忽略） |
 
 ```yaml

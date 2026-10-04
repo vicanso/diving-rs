@@ -95,6 +95,9 @@ Thresholds are configurable in `~/.diving/config.yml`:
 | `lowest_efficiency` | `0.95` | Minimum acceptable efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` (20 MB) | Maximum wasted bytes |
 | `highest_user_wasted_percent` | `0.1` | Maximum wasted percentage (0–1) |
+| `fail_on_severity` | — (off) | Also fail when any recommendation is at this severity or above: `high`, `medium`, `low` or `info` |
+
+By default the recommendations (leaked secret files, runs-as-root, …) are only printed and do not affect the exit code. Set `fail_on_severity: high` to make findings such as a private key baked into the image fail the pipeline. `medium` and below also count heuristic suggestions (Dockerfile lint, docs/locale files, …), so expect more noise. A misspelled value stops diving at startup instead of silently disabling the check.
 
 ## AI analysis
 
@@ -287,6 +290,7 @@ Config file: `~/.diving/config.yml`.
 | `lowest_efficiency` | `0.95` | CI check — minimum efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` | CI check — maximum wasted bytes (20 MB) |
 | `highest_user_wasted_percent` | `0.1` | CI check — maximum wasted percentage (0–1) |
+| `fail_on_severity` | — | CI check — fail when any recommendation is at this severity or above (`high` / `medium` / `low` / `info`); unset = recommendations never fail the run |
 | `mcp_allowed_hosts` | — | Web mode: extra `Host` values `/mcp` accepts besides loopback (`"*"` turns the check off; ignored when `--mcp-token` is set) |
 
 ```yaml
