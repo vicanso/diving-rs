@@ -205,7 +205,7 @@ When `CI=true` env var is set:
 
 ## Configuration
 
-Config file: `~/.diving/config.yml`
+Config file: `~/.diving/config.yml`, or the file given by `--config` / `-c` (wins) or `$DIVING_CONFIG`. A file given that way must exist (startup error otherwise) and is always parsed as YAML. `main.rs` calls `config::set_config_file` before the first config read; only `config.yml` moves — `sensitive-files`, `ai_history/` and the default cache dirs stay under `~/.diving/`.
 
 Example:
 ```yaml

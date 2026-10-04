@@ -88,7 +88,11 @@ diving myimage:latest --output-file - --no-skip-base
 CI=true diving redis:alpine
 ```
 
-阈值可在 `~/.diving/config.yml` 中配置：
+阈值可在 `~/.diving/config.yml` 中配置，也可以用 `--config` 指定配置文件，方便把卡口规则和代码放在一起：
+
+```bash
+CI=true diving --config .diving.yml myimage:latest
+```
 
 | 选项 | 默认值 | 含义 |
 |------|--------|------|
@@ -278,7 +282,7 @@ Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以�
 
 ## 配置
 
-配置文件：`~/.diving/config.yml`。
+配置文件：`~/.diving/config.yml`。可以用 `--config <文件>`（`-c`）或 `$DIVING_CONFIG` 指定其它文件，命令行参数优先于环境变量。这样指定的文件必须存在，否则 diving 会报错退出，而不是回退到默认值；文件一律按 YAML 解析，与扩展名无关。改变的只是配置文件的位置，`sensitive-files`、`ai_history/` 和默认缓存目录仍在 `~/.diving/` 下。
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|

@@ -54,6 +54,9 @@ pub struct Args {
     /// The listen addr of web mode
     #[arg(short, long, default_value = "127.0.0.1:7001")]
     listen: String,
+    /// Config file path (or $DIVING_CONFIG). Defaults to ~/.diving/config.yml
+    #[arg(short, long)]
+    config: Option<String>,
     /// The result output file
     #[arg(short, long)]
     output_file: Option<String>,
@@ -112,6 +115,10 @@ pub struct Args {
 impl Args {
     pub fn is_terminal_type(&self) -> bool {
         self.mode == "terminal"
+    }
+    /// The `--config` path, if given.
+    pub fn config_file(&self) -> Option<&str> {
+        self.config.as_deref()
     }
 }
 

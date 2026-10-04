@@ -1,11 +1,11 @@
 use crate::recommend::{SEVERITY_HIGH, SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM};
 use bytesize::ByteSize;
-use config::{Config, File};
+use config::{Config, File, FileFormat};
 use glob::Pattern;
 use home::home_dir;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 /// `fail_on_severity` 的取值。用枚举而不是字符串：写错的值在启动时就让
 /// 配置反序列化失败，而不是悄悄把卡口关掉。
@@ -61,20 +61,53 @@ pub struct DivingConfig {
     pub mcp_allowed_hosts: Option<Vec<String>>,
 }
 
+/// `--config` 指定的配置文件。未设置时依次回退到 `$DIVING_CONFIG`、
+/// `~/.diving/config.yml`。
+static CONFIG_FILE: OnceCell<PathBuf> = OnceCell::new();
+
+/// 指定配置文件路径（`--config`）。必须在第一次读取配置之前调用，
+/// 之后的调用不生效。只改变 `config.yml` 的位置，`sensitive-files`、
+/// `ai_history/` 与默认缓存目录仍在 `~/.diving/` 下。
+pub fn set_config_file(path: &str) {
+    let _ = CONFIG_FILE.set(PathBuf::from(path));
+}
+
+/// 用户指定的配置文件：`--config` 优先于 `$DIVING_CONFIG`；都没有则为
+/// `None`（使用默认路径）。
+fn custom_config_file(flag: Option<PathBuf>, env: Option<String>) -> Option<PathBuf> {
+    flag.or_else(|| env.filter(|v| !v.trim().is_empty()).map(PathBuf::from))
+}
+
 pub fn must_load_config() -> &'static DivingConfig {
     static DIVING_CONFIG: OnceCell<DivingConfig> = OnceCell::new();
     DIVING_CONFIG.get_or_init(|| {
-        let config_file = get_config_path().join("config.yml");
-        if !config_file.exists() {
-            fs::File::create(&config_file)
-                .expect("failed to create ~/.diving/config.yml: check directory permissions");
-        }
+        let custom = custom_config_file(CONFIG_FILE.get().cloned(), env::var("DIVING_CONFIG").ok());
+        let config_file = match custom {
+            // 指定的文件必须存在：路径写错时若悄悄回退到默认值，CI 卡口
+            // 会被无声地放宽。
+            Some(path) => {
+                if !path.is_file() {
+                    panic!("config file not found: {}", path.display());
+                }
+                path
+            }
+            None => {
+                let path = get_config_path().join("config.yml");
+                if !path.exists() {
+                    fs::File::create(&path).expect(
+                        "failed to create ~/.diving/config.yml: check directory permissions",
+                    );
+                }
+                path
+            }
+        };
+        // 显式指定 YAML：自定义路径不一定带 .yml 扩展名。
         Config::builder()
-            .add_source(File::from(config_file))
+            .add_source(File::from(config_file.as_path()).format(FileFormat::Yaml))
             .build()
-            .expect("failed to build config")
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", config_file.display()))
             .try_deserialize::<DivingConfig>()
-            .expect("config.yml contains invalid fields: check ~/.diving/config.yml")
+            .unwrap_or_else(|e| panic!("{} contains invalid fields: {e}", config_file.display()))
     })
 }
 
@@ -325,13 +358,26 @@ pub fn get_layer_concurrency(layer_count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use config::FileFormat;
 
     fn parse(yaml: &str) -> Result<DivingConfig, config::ConfigError> {
         Config::builder()
             .add_source(File::from_str(yaml, FileFormat::Yaml))
             .build()?
             .try_deserialize()
+    }
+
+    #[test]
+    fn custom_config_file_prefers_flag_over_env() {
+        let flag = || Some(PathBuf::from("ci/diving.yml"));
+        let env = || Some("/etc/diving.yml".to_string());
+        assert_eq!(custom_config_file(flag(), env()), flag());
+        assert_eq!(
+            custom_config_file(None, env()),
+            Some(PathBuf::from("/etc/diving.yml"))
+        );
+        // Unset / blank env falls through to the default path.
+        assert_eq!(custom_config_file(None, None), None);
+        assert_eq!(custom_config_file(None, Some("  ".to_string())), None);
     }
 
     #[test]

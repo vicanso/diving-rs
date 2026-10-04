@@ -88,7 +88,11 @@ Run diving in CI to keep images lean. With `CI=true` it prints the efficiency sc
 CI=true diving redis:alpine
 ```
 
-Thresholds are configurable in `~/.diving/config.yml`:
+Thresholds are configurable in `~/.diving/config.yml`, or in a file you point to with `--config` — handy for keeping the gate next to the code:
+
+```bash
+CI=true diving --config .diving.yml myimage:latest
+```
 
 | Option | Default | Meaning |
 |--------|---------|---------|
@@ -278,7 +282,7 @@ Lines starting with `#` and blank lines are ignored. Globs are case-insensitive;
 
 ## Configuration
 
-Config file: `~/.diving/config.yml`.
+Config file: `~/.diving/config.yml`. Use `--config <file>` (`-c`) or `$DIVING_CONFIG` to read a different file; the flag wins over the environment variable. A file given this way must exist — diving exits with an error instead of falling back to defaults — and is parsed as YAML whatever its extension. Only the config file moves: `sensitive-files`, `ai_history/` and the default cache directories stay under `~/.diving/`.
 
 | Option | Default | Description |
 |--------|---------|-------------|

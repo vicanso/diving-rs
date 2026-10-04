@@ -29,6 +29,10 @@ fn main() {
     let args = diving::Args::parse();
     diving::init_logger(args.is_terminal_type());
 
+    // Must precede the first config read (`get_worker_threads` just below).
+    if let Some(path) = args.config_file() {
+        diving::config::set_config_file(path);
+    }
     let worker_threads = diving::config::get_worker_threads();
 
     tokio::runtime::Builder::new_multi_thread()
