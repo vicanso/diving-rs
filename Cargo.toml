@@ -46,9 +46,12 @@ colored = "3.1.1"
 # drops the ron/json5/ini/toml parsers and their transitive deps.
 config = { version = "0.15.26", default-features = false, features = ["yaml"] }
 crossterm = "0.29.0"
-# gzip layer decompression. flate2's default (miniz_oxide) is ~2x faster
-# than libflate in our measured workloads; pure-Rust, no extra C deps.
-flate2 = "1.1.10"
+# gzip layer decompression. flate2 replaced libflate, whose decoder was ~2x
+# slower than flate2's default miniz_oxide in our measured workloads. It now
+# runs on the zlib-rs backend: still pure Rust (no C toolchain for the musl
+# builds), and on python:3.12 (424 MB of layers) it spent ~30% less CPU than
+# miniz_oxide (2.28s -> 1.55s for the file-listing pass) for ~33 KiB of binary.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures = "0.3.34"
 glob = "0.3.4"
 # ELF parsing for runtime-compatibility checks (DT_NEEDED + glibc version

@@ -404,7 +404,7 @@ const App = () => {
     >
       <Layout className="appLayout">
         {githubIcon}
-        <Header className="header">
+        <Header className={report ? "header hasSearch" : "header"}>
           <div
             className={githubIcon ? "headerInner withCorner" : "headerInner"}
           >

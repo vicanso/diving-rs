@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::build_fixture_tar;
+use common::{build_fixture_tar, use_default_config};
 use diving::controller;
 use diving::mcp::{new_router, McpStatus};
 use reqwest::{Client, RequestBuilder, StatusCode};
@@ -94,6 +94,7 @@ fn fixture_image() -> (NamedTempFile, String) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_tools_analyze_local_image() {
+    use_default_config();
     let url = spawn(None).await;
     let client = client();
     let (_tmp, image) = fixture_image();
@@ -189,6 +190,7 @@ async fn mcp_tools_analyze_local_image() {
 
 #[tokio::test]
 async fn mcp_token_is_required_when_configured() {
+    use_default_config();
     let url = spawn(Some("s3cret")).await;
     let client = client();
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
@@ -217,6 +219,7 @@ async fn mcp_token_is_required_when_configured() {
 
 #[tokio::test]
 async fn mcp_rejects_foreign_host_without_token() {
+    use_default_config();
     let url = spawn(None).await;
     let resp = post(
         &client(),
@@ -233,6 +236,7 @@ async fn mcp_rejects_foreign_host_without_token() {
 /// The web UI's MCP button and setup dialog are driven by this field.
 #[tokio::test]
 async fn latest_images_reports_mcp_status() {
+    use_default_config();
     let status = McpStatus {
         enabled: true,
         token_required: true,
@@ -261,6 +265,7 @@ async fn latest_images_reports_mcp_status() {
 /// (the test above reads the same endpoint as plain JSON).
 #[tokio::test]
 async fn api_responses_are_gzipped_on_request() {
+    use_default_config();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

@@ -113,11 +113,24 @@
   }
 }
 
-/* On phones the header search already fills (and overflows) the row, so the
-   MCP entry only shows on the landing page there. */
+/* On phones the search bar cannot share a row with the logo without
+   overflowing, so the report header becomes two rows: logo and MCP button
+   on top, the search bar across the full width below. */
 @media (max-width: 640px) {
-  .headerSearch + .mcpButton {
-    display: none;
+  .header.hasSearch {
+    height: auto !important;
+    line-height: normal !important;
+  }
+  .header.hasSearch .headerInner {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    height: auto;
+    padding: 10px 0;
+  }
+  .header.hasSearch .headerSearch {
+    order: 1;
+    flex-basis: 100%;
+    max-width: none;
   }
 }
 

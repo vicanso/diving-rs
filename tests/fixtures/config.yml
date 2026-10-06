@@ -1,0 +1,3 @@
+# Empty on purpose: integration tests load this instead of the developer's
+# ~/.diving/config.yml, so a local registry_allowlist, threshold or typo
+# cannot change (or break) the test run. Every option keeps its default.

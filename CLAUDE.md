@@ -125,7 +125,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **`src/ai.rs`**: OpenAI-compatible AI report + `~/.diving/ai_history/` snapshots for regression comparison
 - **`src/wecom.rs`**: WeCom group-bot markdown push
 - **`src/markdown.rs`**: Markdown rendering of the analysis result
-- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
+- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report; `read_file` on a symlink/hard link answers with the link target instead of empty content. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
 - **`src/i18n.rs`**: Rust-side en/zh string catalog (`tr` / `fill`); web has its own catalog in `web/src/i18n/`
 - **`src/ui/`**: Terminal UI (ratatui-based)
   - `mod.rs`: Main app event loop, state management
@@ -274,6 +274,7 @@ All targets require `make build-web` before Rust compilation.
 - Unit tests live inline (`#[cfg(test)]`) across most modules; run with `cargo test --lib`
 - CI (`.github/workflows/test.yml`) runs `make build-web`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on pushes to main and on pull requests
 - `tests/analyze_local.rs` runs the full analyze pipeline end-to-end over a generated `file://` docker-save fixture (no network); run everything with `cargo test`
+- Integration tests start with `common::use_default_config()`, which points diving at the empty `tests/fixtures/config.yml` so the developer's `~/.diving/config.yml` cannot change or break a run
 - For terminal: `make dev` (redis:alpine), `make dev-docker` (local docker)
 - For web: `make dev-web` (Vite dev server) + backend running in another terminal
 - CI mode testing: `CI=true make dev` outputs pass/fail checks
@@ -283,7 +284,7 @@ All targets require `make build-web` before Rust compilation.
 - **Async Runtime**: tokio (multi-threaded with signal handling)
 - **HTTP Client**: reqwest with rustls (no OpenSSL)
 - **JSON**: serde_json
-- **Compression**: flate2 (gzip), zstd
+- **Compression**: flate2 on the pure-Rust `zlib-rs` backend (gzip; ~30% less CPU than the default miniz_oxide on large layers), zstd
 - **No `regex`**: the two patterns the project needed (the `WWW-Authenticate` challenge and `exec` lines in entrypoint scripts) are parsed by hand; the crate cost ~460 KiB of binary
 - **TUI**: ratatui + crossterm for terminal control
 - **Web Server**: axum with tower for middleware/timeouts

@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::build_fixture_tar;
+use common::{build_fixture_tar, use_default_config};
 use diving::i18n::Lang;
 use diving::image::{analyze_docker_image, parse_image_info, FileTreeItem, Op};
 
@@ -28,6 +28,7 @@ fn find_leaf<'a>(items: &'a [FileTreeItem], path: &str) -> Option<&'a FileTreeIt
 
 #[tokio::test(flavor = "multi_thread")]
 async fn analyze_local_tar_end_to_end() {
+    use_default_config();
     let tmp = tempfile::Builder::new()
         .suffix(".tar")
         .tempfile()

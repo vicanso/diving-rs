@@ -1,5 +1,17 @@
 //! Shared test fixtures.
 
+use diving::config::set_config_file;
+
+/// Point diving at the checked-in empty config instead of the developer's
+/// `~/.diving/config.yml`. Call it first in every test: only the first call
+/// in a process counts, and it must come before anything reads the config.
+pub fn use_default_config() {
+    set_config_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/config.yml"
+    ));
+}
+
 pub fn tar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (path, data) in files {

@@ -252,9 +252,21 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
         if layer.empty || !is_safe_blob_id(&layer.digest) {
             return Err(format!("layer {} has no file content", params.layer));
         }
+        let file_path = normalize_path(&params.path).to_string();
+        // A link has no content of its own. Say where it points instead of
+        // returning an empty string the model cannot tell from an empty file.
+        let link = layer_slot(params.layer, result.file_tree_list.len())
+            .and_then(|i| find_file(&result.file_tree_list[i], &file_path))
+            .map(|item| item.link.as_str())
+            .filter(|link| !link.is_empty());
+        if let Some(link) = link {
+            return Ok(format!(
+                "{file_path} is a link to {} — read that path instead (it may be in another layer).",
+                resolve_link(&file_path, link)
+            ));
+        }
         let blob_path = get_blob_path(&layer.digest);
         let media_type = layer.media_type.clone();
-        let file_path = normalize_path(&params.path).to_string();
         let max_bytes = get_max_download_file_size();
         let wanted = file_path.clone();
         // Decompression is CPU-bound; keep it off the async workers.
@@ -413,6 +425,48 @@ fn normalize_path(path: &str) -> &str {
     let path = path.trim();
     let path = path.strip_prefix("./").unwrap_or(path);
     path.trim_start_matches('/')
+}
+
+/// The entry at `path` in one layer's tree, if that layer has it.
+fn find_file<'a>(items: &'a [FileTreeItem], path: &str) -> Option<&'a FileTreeItem> {
+    // Tars that store `./usr/...` put everything under a `.` root.
+    let items = match items {
+        [root] if root.name == "." => &root.children,
+        _ => items,
+    };
+    let (name, rest) = match path.split_once('/') {
+        Some((name, rest)) => (name, Some(rest)),
+        None => (path, None),
+    };
+    match rest {
+        None => items.iter().find(|item| item.name == name),
+        Some(rest) => items
+            .iter()
+            .filter(|item| item.name == name)
+            .find_map(|dir| find_file(&dir.children, rest)),
+    }
+}
+
+/// The image path a link at `path` points to: absolute targets are taken
+/// from the image root, relative ones from the link's own directory.
+fn resolve_link(path: &str, target: &str) -> String {
+    let mut parts: Vec<&str> = if target.starts_with('/') {
+        vec![]
+    } else {
+        let mut dir: Vec<&str> = path.split('/').collect();
+        dir.pop();
+        dir
+    };
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
 }
 
 fn op_name(op: &Op) -> &'static str {
@@ -782,6 +836,50 @@ mod tests {
         ]];
         let page = list_files_in(&trees, &query()).unwrap();
         assert_eq!(paths(&page), vec![(1, "var/log")]);
+    }
+
+    #[test]
+    fn resolve_link_handles_relative_absolute_and_sibling_targets() {
+        // Debian's /etc/os-release
+        assert_eq!(
+            resolve_link("etc/os-release", "../usr/lib/os-release"),
+            "usr/lib/os-release"
+        );
+        // Alpine's /bin/sh -> /bin/busybox
+        assert_eq!(resolve_link("bin/sh", "/bin/busybox"), "bin/busybox");
+        assert_eq!(
+            resolve_link("usr/bin/python", "python3.12"),
+            "usr/bin/python3.12"
+        );
+        assert_eq!(resolve_link("a/b/c", "./d/../e"), "a/b/e");
+        // More `..` than there are directories stops at the image root.
+        assert_eq!(resolve_link("bin/x", "../../../etc/passwd"), "etc/passwd");
+    }
+
+    #[test]
+    fn find_file_walks_one_layer_tree() {
+        let mut link = file("os-release", 0, Op::None);
+        link.link = "../usr/lib/os-release".to_string();
+        let tree = vec![
+            dir("etc", vec![link, file("hostname", 5, Op::None)]),
+            dir(
+                "usr",
+                vec![dir("lib", vec![file("os-release", 267, Op::None)])],
+            ),
+        ];
+        assert_eq!(
+            find_file(&tree, "etc/os-release").map(|f| f.link.as_str()),
+            Some("../usr/lib/os-release")
+        );
+        assert_eq!(
+            find_file(&tree, "usr/lib/os-release").map(|f| f.size),
+            Some(267)
+        );
+        assert!(find_file(&tree, "etc/missing").is_none());
+        assert!(find_file(&tree, "etc/hostname/x").is_none());
+        // A `./`-rooted tar keeps everything under a `.` directory.
+        let dotted = vec![dir(".", tree)];
+        assert_eq!(find_file(&dotted, "etc/hostname").map(|f| f.size), Some(5));
     }
 
     #[test]
