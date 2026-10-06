@@ -467,14 +467,23 @@ async fn push_to_wecom(
 // 无 AI 时推送的精简摘要：效率分 / 浪费空间 / 优化建议
 fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> String {
     let summary = result.summary();
-    let mut s = format!(
+    let mut s = String::new();
+    // A cached result shown because the registry was unavailable says so
+    // up front, like the Markdown report does.
+    if let Some(as_of) = &result.stale_as_of {
+        s.push_str(&format!(
+            "> {}\n\n",
+            i18n::fill(i18n::tr(lang, "md.stale"), &[as_of])
+        ));
+    }
+    s.push_str(&format!(
         "**{}:** {} %\n**{}:** {} bytes ({})\n",
         i18n::tr(lang, "md.f.eff"),
         summary.score,
         i18n::tr(lang, "md.f.wasted"),
         summary.wasted_size,
         ByteSize(summary.wasted_size),
-    );
+    ));
     if !result.recommendations.is_empty() {
         s.push_str(&format!("\n### {}\n", i18n::tr(lang, "md.recs")));
         for r in &result.recommendations {
@@ -654,6 +663,25 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use i18n::Lang;
+
+    #[test]
+    fn wecom_summary_flags_a_stale_result_first() {
+        let fresh = DockerAnalyzeResult::default();
+        assert!(wecom_summary(&fresh, Lang::En).starts_with("**Efficiency"));
+
+        let stale = DockerAnalyzeResult {
+            stale_as_of: Some("2026-10-06T04:22:25+00:00".to_string()),
+            ..Default::default()
+        };
+        let summary = wecom_summary(&stale, Lang::En);
+        assert!(
+            summary.starts_with(
+                "> Registry unavailable — this is the analysis cached at 2026-10-06T04:22:25+00:00"
+            ),
+            "{summary}"
+        );
+        assert!(summary.contains("**Efficiency"));
+    }
 
     #[test]
     fn gate_verdict_lists_each_failed_check_under_the_verdict() {

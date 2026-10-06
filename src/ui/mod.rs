@@ -46,6 +46,8 @@ struct WidgetState {
     // 文件树模式
     file_tree_mode: u8,
     summary: DockerAnalyzeSummary,
+    // registry 不可用时显示的是缓存结果：该结果的生成时间
+    stale_as_of: Option<String>,
     // 优化建议
     recommendations: Vec<Recommendation>,
     // 基础镜像 OS 指纹（与 markdown 中 Base OS 字段同源）
@@ -148,6 +150,7 @@ pub fn run_app(result: DockerAnalyzeResult, lang: i18n::Lang) -> Result<(), Box<
         recommendations: result.recommendations,
         base_os: result.base_os,
         runtime_compat: result.runtime_compat,
+        stale_as_of: result.stale_as_of,
         lang,
         // 可以选中的widget列表顺序
         active_list: vec![LAYERS_WIDGET.to_string(), FILES_WIDGET.to_string()],
@@ -284,6 +287,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
         recommendations: state.recommendations.clone(),
         base_os: state.base_os.clone(),
         runtime_compat: state.runtime_compat.clone(),
+        stale_as_of: state.stale_as_of.clone(),
         lang: state.lang,
     });
     f.render_widget(layers_widget.widget, left_chunks[0]);

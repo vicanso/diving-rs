@@ -1,4 +1,5 @@
 use bytesize::ByteSize;
+use chrono::{DateTime, Utc};
 use ratatui::{prelude::*, widgets::*};
 
 use super::util;
@@ -20,7 +21,22 @@ pub struct ImageDetailWidgetOption {
     pub recommendations: Vec<Recommendation>,
     pub base_os: String,
     pub runtime_compat: RuntimeCompat,
+    /// Set when this is a cached result shown because the registry was
+    /// unavailable (see `DockerAnalyzeResult::stale_as_of`).
+    pub stale_as_of: Option<String>,
     pub lang: i18n::Lang,
+}
+
+/// `2026-10-06T04:22:25+00:00` → `2026-10-06 04:22 UTC`: this panel is half
+/// a terminal wide and does not wrap, so the notice has to stay short.
+fn short_time(rfc3339: &str) -> String {
+    DateTime::parse_from_rfc3339(rfc3339)
+        .map(|t| {
+            t.with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
+        .unwrap_or_else(|_| rfc3339.to_string())
 }
 
 pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailWidget<'a> {
@@ -70,7 +86,23 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
     if !opt.arch.is_empty() {
         name += &format!("({}/{})", opt.os, opt.arch);
     }
-    let mut spans_list = vec![
+    let mut spans_list = vec![];
+    // First thing in the panel, so it stays on screen for as long as the
+    // (possibly outdated) numbers below it do.
+    if let Some(as_of) = &opt.stale_as_of {
+        let warn = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        spans_list.extend(vec![
+            Line::from(Span::styled(i18n::tr(opt.lang, "tui.stale"), warn)),
+            Line::from(vec![
+                Span::styled(i18n::tr(opt.lang, "tui.stale.asof"), warn),
+                Span::styled(short_time(as_of), Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![]),
+        ]);
+    }
+    spans_list.extend(vec![
         Line::from(vec![
             Span::styled(
                 i18n::tr(opt.lang, "tui.imgname"),
@@ -99,7 +131,7 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             ),
             Span::from(format!("{score} %")),
         ]),
-    ];
+    ]);
     // Base OS — same source as the markdown "Base OS" row. Skip when empty
     // so scratch/distroless images don't show a blank line.
     if !opt.base_os.is_empty() {
@@ -241,4 +273,69 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
         "tui.imgdetails.title",
     )));
     ImageDetailWidget { widget }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// Render the panel 44 columns wide — half of a narrow terminal — and
+    /// return its rows as text.
+    fn render(stale_as_of: Option<&str>, lang: i18n::Lang) -> Vec<String> {
+        let widget = new_image_detail_widget(ImageDetailWidgetOption {
+            name: "library/redis:alpine".to_string(),
+            arch: "amd64".to_string(),
+            os: "linux".to_string(),
+            total_size: 100,
+            size: 50,
+            summary: DockerAnalyzeSummary::default(),
+            recommendations: vec![],
+            base_os: String::new(),
+            runtime_compat: RuntimeCompat::default(),
+            stale_as_of: stale_as_of.map(str::to_string),
+            lang,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(44, 12)).unwrap();
+        terminal
+            .draw(|f| f.render_widget(widget.widget, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stale_result_is_flagged_at_the_top_of_the_panel() {
+        let rows = render(Some("2026-10-06T04:22:25+00:00"), i18n::Lang::En);
+        // Row 0 is the border; the notice comes before the image name and
+        // fits the narrow panel without being cut off.
+        assert!(rows[1].contains("Registry unavailable"), "{rows:#?}");
+        assert!(
+            rows[2].contains("Cached at: 2026-10-06 04:22 UTC"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[4].contains("Image name: library/redis:alpine"),
+            "{rows:#?}"
+        );
+
+        let rows = render(None, i18n::Lang::En);
+        assert!(rows[1].contains("Image name: "), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("Registry unavailable")));
+    }
+
+    #[test]
+    fn short_time_keeps_unparseable_input_as_is() {
+        assert_eq!(
+            short_time("2026-10-06T12:22:25+08:00"),
+            "2026-10-06 04:22 UTC"
+        );
+        assert_eq!(short_time("yesterday"), "yesterday");
+    }
 }

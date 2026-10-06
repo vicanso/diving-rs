@@ -46,9 +46,11 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
     )))
     .alignment(Alignment::Left)
     .wrap(Wrap { trim: true });
-    // 拆分左侧栏
-    let mut detail_height = detail_word_width / opt.width;
-    if detail_word_width.is_multiple_of(opt.width) {
+    // 拆分左侧栏。没有尺寸的伪终端会报告宽度 0（管道输入的 `script`、
+    // 某些容器环境），按 1 处理，避免除以零直接崩溃。
+    let width = opt.width.max(1);
+    let mut detail_height = detail_word_width / width;
+    if detail_word_width.is_multiple_of(width) {
         detail_height += 1;
     }
     // title + command tag + created tag + created time + border bottom
@@ -56,5 +58,28 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
     DetailWidget {
         height: detail_height,
         widget: paragraph,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_width_terminal_does_not_panic() {
+        let layer = ImageLayer {
+            cmd: "RUN apt-get update && apt-get install -y curl".to_string(),
+            ..Default::default()
+        };
+        for width in [0, 1, 40] {
+            let widget = new_layer_detail_widget(
+                &layer,
+                DetailWidgetOption {
+                    width,
+                    lang: i18n::Lang::En,
+                },
+            );
+            assert!(widget.height >= 5, "width {width}");
+        }
     }
 }
