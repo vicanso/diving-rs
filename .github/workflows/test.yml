@@ -1,14 +1,42 @@
-name: "publish"
+name: "test"
 on:
   push:
-    # tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
     branches: [ main ]
+  pull_request:
 
 env:
-  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Formatting, lints and the full test suite (unit + integration; none of
+  # them need network access).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: yarn
+          cache-dependency-path: web/yarn.lock
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # `yarn build` runs `tsc` first, so this is also the frontend
+      # type-check; the Rust build embeds the resulting dist/.
+      - name: build-web
+        run: make build-web
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+
+  # Windows has no test run; a release build is the smoke check that the
+  # platform-specific code still compiles there.
   windows:
     runs-on: windows-latest
     defaults:

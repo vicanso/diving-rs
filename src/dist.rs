@@ -43,7 +43,7 @@ impl IntoResponse for StaticFile {
         if let Some(s_max_age) = s_max_age {
             max_age = format!("{max_age}, s-maxage={s_max_age}");
         }
-        // 静态文件压缩由前置缓存服务器处理
+        // 压缩由路由上的 CompressionLayer 统一处理（见 controller::new_router）
         (
             [
                 // content type

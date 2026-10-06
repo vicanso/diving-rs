@@ -256,3 +256,26 @@ async fn latest_images_reports_mcp_status() {
     assert_eq!(resp["mcp"], json!({"enabled": true, "tokenRequired": true}));
     assert!(resp["version"].is_string());
 }
+
+/// Web responses are gzipped for clients that ask, and left alone otherwise
+/// (the test above reads the same endpoint as plain JSON).
+#[tokio::test]
+async fn api_responses_are_gzipped_on_request() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, controller::new_router(McpStatus::default()))
+            .await
+            .unwrap();
+    });
+
+    let resp = client()
+        .get(format!("http://{addr}/api/latest-images"))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.headers()["content-encoding"], "gzip");
+    let body = resp.bytes().await.unwrap();
+    assert_eq!(&body[..2], [0x1f, 0x8b], "gzip magic bytes");
+}

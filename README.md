@@ -233,7 +233,7 @@ Open `http://127.0.0.1:7001/` in the browser.
 
 ![](./assets/diving-web.png)
 
-The container runs as a non-root UID (`1000:1000`); the `chown` above lets it write the layer cache (without it the container fails to start). The image is based on `debian:bookworm-slim` with `ca-certificates` and `tzdata`. It ships no `wget`/`curl`, so there is no in-image `HEALTHCHECK` — probe `GET /ping` from your orchestrator (Kubernetes `livenessProbe`, a sidecar, etc.) instead.
+The container runs as a non-root UID (`1000:1000`); the `chown` above lets it write the layer cache (without it the container fails to start). The image is based on `debian:trixie-slim` plus a CA certificate bundle. It has no `tzdata`, so timestamps are in UTC, and it ships no `wget`/`curl`, so there is no in-image `HEALTHCHECK` — probe `GET /ping` from your orchestrator (Kubernetes `livenessProbe`, a sidecar, etc.) instead.
 
 Change the listen address with `--listen`:
 
@@ -347,6 +347,8 @@ Config file: `~/.diving/config.yml`. Use `--config <file>` (`-c`) or `$DIVING_CO
 | `ignore_recommendations` | — | CI check — recommendation ids excluded from `fail_on_severity` (see [Accepting known findings](#accepting-known-findings)) |
 | `registry_allowlist` | — | Web mode: when non-empty, `/api/analyze` and MCP only accept images from these registry hosts (e.g. `index.docker.io`, `ghcr.io`); add `local-file` / `local-docker` to allow `file://` / `docker://` |
 | `max_download_file_size` | `104857600` | Web mode: largest single file `/api/file` will serve (100 MB) |
+| `analysis_memory_ttl` | `1m` | Web mode: how long a finished analysis is kept in memory. Requests for the same image within this window are answered without contacting the registry; the price is that a re-pushed tag can take this long to show up. `0s` turns it off |
+| `max_concurrent_analyses` | — | Web mode: how many different images may be analyzed at once; further requests wait their turn. Unset = no limit |
 | `max_layer_cache_size` | — | Total size cap for the layer cache; when exceeded, the least recently accessed blobs are evicted. Unset = TTL cleanup only |
 | `mcp_allowed_hosts` | — | Web mode: extra `Host` values `/mcp` accepts besides loopback (`"*"` turns the check off; ignored when `--mcp-token` is set) |
 

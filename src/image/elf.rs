@@ -23,8 +23,6 @@
 //! best-effort static table covering mainstream distros, not an
 //! exhaustive registry.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
@@ -326,10 +324,17 @@ fn scan_tree_for_basename(items: &[FileTreeItem], basename: &str, prefix: &str) 
 /// the right answer for libc classification).
 fn parse_exec_target(script: &[u8], cmd_first: Option<&str>) -> Option<String> {
     let text = std::str::from_utf8(script).ok()?;
-    static EXEC_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"(?m)^\s*exec\s+(\S+)"#).expect("exec regex compiles"));
-    for cap in EXEC_RE.captures_iter(text) {
-        let raw = cap.get(1)?.as_str();
+    for line in text.lines() {
+        // A line whose first word is `exec`; its next word is the target.
+        let Some(after) = line.trim_start().strip_prefix("exec") else {
+            continue;
+        };
+        if !after.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(raw) = after.split_whitespace().next() else {
+            continue;
+        };
         let token = raw
             .trim_start_matches(['"', '\''])
             .trim_end_matches(['"', '\'']);
@@ -719,6 +724,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_exec_only_matches_exec_as_the_first_word() {
+        // `executable=…`, a comment and `echo exec …` are not exec lines;
+        // the indented one further down is.
+        let s = b"executable=1\n# exec commented\necho exec /not/first\n\texec  /bin/real --x\r\n";
+        assert_eq!(parse_exec_target(s, None), Some("/bin/real".to_string()));
+        // A bare `exec`, or one whose target is an empty string, is skipped.
+        let s = b"exec\nexec \"\"\nexec /after\n";
+        assert_eq!(parse_exec_target(s, None), Some("/after".to_string()));
+    }
+
+    #[test]
     fn parse_exec_extracts_absolute_path() {
         let s = b"#!/bin/sh\nset -e\nexec /usr/local/bin/myapp --port 8080\n";
         assert_eq!(
@@ -767,7 +783,7 @@ mod tests {
     #[test]
     fn parse_exec_first_match_wins() {
         // Some scripts have an early `exec 3<file` (redirection — not a
-        // command replacement). The regex matches `3<file` and we return
+        // command replacement). The parser takes `3<file` and we return
         // it. That's a known cheap-and-cheerful limitation; the more
         // common pattern (single `exec <cmd>` at end of script) works.
         let s = b"exec 3<somefile\nexec /usr/local/bin/app\n";

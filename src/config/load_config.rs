@@ -5,7 +5,9 @@ use glob::Pattern;
 use home::home_dir;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::{env, fs, path::PathBuf};
+use tracing::warn;
 
 /// `fail_on_severity` 的取值。用枚举而不是字符串：写错的值在启动时就让
 /// 配置反序列化失败，而不是悄悄把卡口关掉。
@@ -58,6 +60,13 @@ pub struct DivingConfig {
     /// layer blob 缓存目录的总大小上限；超出时按访问时间从旧到新淘汰。
     /// 未配置（默认）则只按 TTL 清理。
     pub max_layer_cache_size: Option<ByteSize>,
+    /// Web 模式下分析结果在内存中保留的时长（默认 `1m`，`0s` 关闭）。
+    /// 有效期内对同一镜像的请求直接复用结果，不再访问 registry；代价是
+    /// 同一个 tag 被重新推送后，最多要等这么久才能看到新结果。
+    pub analysis_memory_ttl: Option<String>,
+    /// Web 模式下同时进行的镜像分析数上限（不同镜像之间）。超出的请求
+    /// 排队等待。未配置（默认）或为 0 则不限制。
+    pub max_concurrent_analyses: Option<usize>,
     /// Web 模式 `/mcp` 额外放行的 `Host` 头（如 `diving.example.com`、
     /// `10.0.0.5:7001`）。默认只接受 loopback，防 DNS rebinding；配置
     /// `*` 关闭校验。设置了 `--mcp-token` 时不做 Host 校验（token 已足够）。
@@ -289,6 +298,36 @@ pub fn get_fail_on_severity() -> Option<&'static str> {
         })
 }
 
+/// Web 模式下分析结果在内存中保留的时长；`Duration::ZERO` 表示不缓存。
+/// 值无法解析时回退到默认值并告警，而不是让服务在处理请求时崩溃。
+pub fn get_analysis_memory_ttl() -> Duration {
+    const DEFAULT: Duration = Duration::from_secs(60);
+    static TTL: OnceCell<Duration> = OnceCell::new();
+    *TTL.get_or_init(|| {
+        let Some(value) = must_load_config().analysis_memory_ttl.as_deref() else {
+            return DEFAULT;
+        };
+        match value.parse::<humantime::Duration>() {
+            Ok(ttl) => ttl.into(),
+            Err(err) => {
+                warn!(
+                    value,
+                    err = err.to_string(),
+                    "invalid analysis_memory_ttl, using 1m"
+                );
+                DEFAULT
+            }
+        }
+    })
+}
+
+/// Web 模式下同时进行的分析数上限；`None` 表示不限制。
+pub fn get_max_concurrent_analyses() -> Option<usize> {
+    must_load_config()
+        .max_concurrent_analyses
+        .filter(|limit| *limit > 0)
+}
+
 /// `fail_on_severity` 判定时忽略的建议 id，已归一化为小写、去掉空白。
 pub fn get_ignore_recommendations() -> &'static [String] {
     static LIST: OnceCell<Vec<String>> = OnceCell::new();
@@ -414,6 +453,13 @@ mod tests {
                 .unwrap()
                 .ignore_recommendations,
             Some(vec!["runasroot".to_string(), "setuid".to_string()])
+        );
+        // 0 would be a semaphore nobody can ever pass; it means "no limit".
+        assert_eq!(
+            parse("max_concurrent_analyses: 2")
+                .unwrap()
+                .max_concurrent_analyses,
+            Some(2)
         );
         // A typo must fail loudly rather than silently disable the gate.
         let err = parse("fail_on_severity: hgih").unwrap_err().to_string();

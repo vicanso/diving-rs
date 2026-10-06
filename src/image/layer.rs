@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(index.size_of("missing"), None);
         assert_eq!(index.read("manifest.json").unwrap(), b"[]");
         assert_eq!(index.read("abc/layer.tar").unwrap(), b"layer-bytes-here");
-        assert!(matches!(index.read("missing"), Err(Error::NotFound {})));
+        assert!(matches!(index.read("missing"), Err(Error::NotFound)));
 
         let (mut reader, size) = index.open_reader("abc/layer.tar").unwrap();
         assert_eq!(size, 16);

@@ -135,7 +135,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
   - `/api/file`: Download individual files from layers
   - `/api/latest-images`: Return recent analyses, the version, and `mcp: {enabled, tokenRequired}` for the web UI
   - Fallback handler serves static assets from embedded `dist/`
-- **`src/store/`**: `blob.rs` (atomic blob I/O, sha256 helpers, TTL cleanup), `analysis_cache.rs` (schema-versioned analysis-result JSON cache)
+- **`src/store/`**: `blob.rs` (atomic blob I/O, sha256 helpers, TTL cleanup), `analysis_cache.rs` (schema-versioned analysis-result JSON cache), `recent_cache.rs` (small TTL + LRU in-memory cache; time is passed in so expiry is testable)
 - **`src/config/`**: Configuration loading from `~/.diving/config.yml` + user sensitive patterns
 - **`src/util/`**: Shared `reqwest::Client` singleton, HTTP header helpers
 - **`src/error.rs`**: HTTP error types with snafu error handling
@@ -161,6 +161,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
   - Large modified files detection
   - Dark mode support
 - **Build**: `yarn install && yarn build` outputs to `dist/`, embedded in binary via `rust-embed`
+- **Fonts**: IBM Plex is bundled (`web/src/fonts.css`, latin woff2 from the `@fontsource` packages) — no external font request, so the UI works on networks that cannot reach a font CDN
 - **Internationalization**: `web/src/i18n/` (en.ts, zh.ts)
 
 ### Key Abstractions
@@ -230,6 +231,8 @@ registry_allowlist:                        # Non-empty => /api/analyze only acce
   - ghcr.io
 max_download_file_size: 104857600          # /api/file per-file cap (default 100MB)
 max_layer_cache_size: 10737418240          # Layer cache total cap; evicts oldest-accessed blobs
+analysis_memory_ttl: 1m                    # Web: keep finished analyses in memory this long (default 1m, 0s = off)
+max_concurrent_analyses: 4                 # Web: cap on different images analyzed at once (unset = unlimited)
 mcp_allowed_hosts:                         # Extra Host headers /mcp accepts (default loopback only;
   - diving.example.com                     #   "*" disables; ignored when --mcp-token is set)
 ```
@@ -259,6 +262,9 @@ All targets require `make build-web` before Rust compilation.
 - **Layer Caching**: Blobs cached locally (digest-verified, atomic writes); TTL-based cleanup cron in `src/lib.rs`
 - **Analysis Caching**: Full results cached on disk keyed by manifest digest + arch (`src/store/analysis_cache.rs`)
 - **Singleflight**: Concurrent web requests for the same image share one analysis (`src/controller.rs`)
+- **In-memory results**: the last few finished registry analyses stay in memory for `analysis_memory_ttl` (`recent_analyses` in `src/controller.rs`), so follow-up web/MCP requests skip the registry manifest HEAD and the on-disk cache re-parse (~0.65s → ~2ms per call). Local `file://` / `docker://` sources are never kept
+- **Analysis slots**: optional `max_concurrent_analyses` semaphore, taken inside the singleflight so waiters on one image share a slot
+- **Response compression**: `tower-http` gzip on the controller routes (API JSON ~10x, frontend JS ~3x); `/mcp` is mounted separately and left alone because it streams SSE
 - **LRU Cache**: Latest 5 analyzed image names cached in memory (`src/controller.rs`)
 - **Compression**: Embedded assets gzip-compressed via `rust-embed`
 - **Release Build**: Optimized with LTO, single codegen unit, stripped symbols
@@ -266,6 +272,7 @@ All targets require `make build-web` before Rust compilation.
 ## Testing & Development Patterns
 
 - Unit tests live inline (`#[cfg(test)]`) across most modules; run with `cargo test --lib`
+- CI (`.github/workflows/test.yml`) runs `make build-web`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on pushes to main and on pull requests
 - `tests/analyze_local.rs` runs the full analyze pipeline end-to-end over a generated `file://` docker-save fixture (no network); run everything with `cargo test`
 - For terminal: `make dev` (redis:alpine), `make dev-docker` (local docker)
 - For web: `make dev-web` (Vite dev server) + backend running in another terminal
@@ -276,7 +283,8 @@ All targets require `make build-web` before Rust compilation.
 - **Async Runtime**: tokio (multi-threaded with signal handling)
 - **HTTP Client**: reqwest with rustls (no OpenSSL)
 - **JSON**: serde_json
-- **Compression**: libflate (gzip), zstd
+- **Compression**: flate2 (gzip), zstd
+- **No `regex`**: the two patterns the project needed (the `WWW-Authenticate` challenge and `exec` lines in entrypoint scripts) are parsed by hand; the crate cost ~460 KiB of binary
 - **TUI**: ratatui + crossterm for terminal control
 - **Web Server**: axum with tower for middleware/timeouts
 - **Request Tracing**: tracing + tracing-subscriber

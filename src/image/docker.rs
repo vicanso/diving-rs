@@ -8,7 +8,6 @@ use futures::StreamExt;
 use http::StatusCode;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
-use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
@@ -133,19 +132,38 @@ pub struct AuthInfo {
     pub scope: String,
 }
 
+/// Parse the `key="value"` parameters of a `WWW-Authenticate: Bearer …`
+/// challenge, e.g. `Bearer realm="https://auth.docker.io/token",
+/// service="registry.docker.io",scope="repository:library/redis:pull"`.
+///
+/// A value that is empty or contains whitespace is skipped: the three we
+/// read are a URL, a host and a single repository scope, and they are
+/// pasted into the token URL as-is.
 fn parse_auth_info(auth: &str) -> Result<AuthInfo> {
-    static AUTH_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
-        Regex::new("(?P<key>\\S+?)=\"(?P<value>\\S+?)\",?").expect("auth regex is valid")
-    });
     let mut auth_info = AuthInfo::default();
-    for caps in AUTH_RE.captures_iter(auth) {
-        let value = caps["value"].to_string();
-        match &caps["key"] {
-            "realm" => auth_info.auth = value,
-            "service" => auth_info.service = value,
-            "scope" => auth_info.scope = value,
+    let mut rest = auth;
+    while let Some(eq) = rest.find("=\"") {
+        // The key is the run of non-separator characters right before `="`.
+        let key = rest[..eq]
+            .rsplit(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or_default();
+        let after = &rest[eq + 2..];
+        let Some(end) = after.find('"') else {
+            break;
+        };
+        let value = &after[..end];
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            rest = after;
+            continue;
+        }
+        match key {
+            "realm" => auth_info.auth = value.to_string(),
+            "service" => auth_info.service = value.to_string(),
+            "scope" => auth_info.scope = value.to_string(),
             _ => {}
         }
+        rest = &after[end + 1..];
     }
     Ok(auth_info)
 }
@@ -1845,6 +1863,43 @@ mod tests {
         let json = r#"{"access_token": "oci-only", "expires_in": 60}"#;
         let info: DockerTokenInfo = serde_json::from_str(json).expect("access_token only");
         assert_eq!(info.bearer(), "oci-only");
+    }
+
+    #[test]
+    fn parse_auth_info_reads_bearer_challenge_params() {
+        let info = parse_auth_info(
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/redis:pull""#,
+        )
+        .unwrap();
+        assert_eq!(info.auth, "https://auth.docker.io/token");
+        assert_eq!(info.service, "registry.docker.io");
+        assert_eq!(info.scope, "repository:library/redis:pull");
+
+        // Spaces after the commas, another parameter order, unknown keys.
+        let info = parse_auth_info(
+            r#"Bearer service="harbor-registry", realm="https://h.example.com/service/token", error="invalid_token""#,
+        )
+        .unwrap();
+        assert_eq!(info.auth, "https://h.example.com/service/token");
+        assert_eq!(info.service, "harbor-registry");
+        assert_eq!(info.scope, "");
+    }
+
+    #[test]
+    fn parse_auth_info_skips_values_it_cannot_use() {
+        // Empty and whitespace-containing values are skipped without
+        // derailing the parameters that follow them.
+        let info = parse_auth_info(
+            r#"Bearer realm="",scope="repository:a:pull repository:b:pull",service="s""#,
+        )
+        .unwrap();
+        assert_eq!((info.auth.as_str(), info.scope.as_str()), ("", ""));
+        assert_eq!(info.service, "s");
+
+        for header in ["", "Bearer", r#"Basic realm="Registry"#] {
+            let info = parse_auth_info(header).unwrap();
+            assert_eq!(info.service, "", "{header}");
+        }
     }
 
     #[test]
