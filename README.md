@@ -370,6 +370,8 @@ diving keeps two on-disk caches under `~/.diving/`, both governed by `layer_ttl`
 
 The analysis cache is **content-addressable**, so re-pushing a mutable tag like `:latest` automatically invalidates the entry. If the `HEAD` probe fails for any reason, diving silently falls back to a full analysis — caching never blocks a request.
 
+**When the registry is unavailable.** If the registry cannot be reached, is overloaded (5xx) or rate-limits the request (429), and the same image reference was analyzed before, diving shows that cached analysis instead of an error. The terminal, the Markdown report, the web UI and the JSON (`staleAsOf`) all say when it was made, because the tag may point at a different image by now. An error the registry itself returns (401, 403, 404) is never papered over this way, and neither is a CI run: with `CI=true` the gate has to judge the image as it is, so it fails with exit code `2`.
+
 > Because layer data is downloaded from the source (e.g. Docker Hub), the first run on a large image can take a while. Interrupted downloads resume automatically. For privately-deployed registries, run diving (or its web image) on a host that can reach the registry.
 
 ## License

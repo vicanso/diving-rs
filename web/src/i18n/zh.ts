@@ -46,6 +46,8 @@ export default {
   duplicateWastedLabel: "浪费",
   dockerfileTitle: "反推 Dockerfile",
   runAsUserLabel: "运行用户",
+  staleResultNotice:
+    "无法访问 registry，当前显示的是 {time} 缓存的分析结果，镜像在那之后可能已经变化。",
   mcpButton: "MCP",
   mcpTitle: "通过 MCP 接入 AI",
   mcpIntro:

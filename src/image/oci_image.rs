@@ -4,8 +4,11 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use super::layer::hash_files_from_layer;
+use crate::config::get_layer_concurrency;
 use crate::store::get_blob_path;
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
@@ -466,22 +469,36 @@ pub fn detect_cross_layer_duplicates(
             .or_default()
             .insert(leaves[i].path.clone());
     }
-    let mut hashes: HashMap<(usize, String), String> = HashMap::new();
-    for (layer_idx, paths) in by_layer {
-        let Some(layer) = layers.get(layer_idx) else {
-            continue;
-        };
-        let blob = get_blob_path(&layer.digest);
-        let Ok(file) = File::open(&blob) else {
-            continue;
-        };
-        let reader = BufReader::new(file);
-        if let Ok(map) = hash_files_from_layer(reader, &layer.media_type, &paths) {
-            for (p, h) in map {
-                hashes.insert((layer_idx, p), h);
+    // Each layer with candidates is decompressed a second time to hash
+    // them. The layers are independent, so they are hashed side by side;
+    // done one after another, this pass takes longer than the (parallel)
+    // file listing itself.
+    let jobs: Vec<(usize, HashSet<String>)> = by_layer.into_iter().collect();
+    let workers = get_layer_concurrency(jobs.len()).min(jobs.len());
+    let next_job = AtomicUsize::new(0);
+    let hash_jobs = || {
+        let mut hashed: Vec<((usize, String), String)> = Vec::new();
+        while let Some((layer_idx, paths)) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
+            let Some(layer) = layers.get(*layer_idx) else {
+                continue;
+            };
+            let Ok(file) = File::open(get_blob_path(&layer.digest)) else {
+                continue;
+            };
+            let reader = BufReader::new(file);
+            if let Ok(map) = hash_files_from_layer(reader, &layer.media_type, paths) {
+                hashed.extend(map.into_iter().map(|(p, h)| ((*layer_idx, p), h)));
             }
         }
-    }
+        hashed
+    };
+    let hashes: HashMap<(usize, String), String> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(hash_jobs)).collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
 
     // Cluster by hash; demand ≥ 2 copies AND ≥ 2 layers.
     let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();

@@ -621,6 +621,7 @@ fn findings_json(result: &DockerAnalyzeResult) -> Value {
         "bigModifiedFiles": result.big_modified_file_list,
         "duplicateGroups": result.duplicate_groups,
         "runtimeCompat": result.runtime_compat,
+        "staleAsOf": result.stale_as_of,
         "layers": layers,
     });
     renumber_layers(&mut value);

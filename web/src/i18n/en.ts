@@ -46,6 +46,8 @@ export default {
   duplicateCountLabel: "Copies",
   duplicateWastedLabel: "Wasted",
   dockerfileTitle: "Reconstructed Dockerfile",
+  staleResultNotice:
+    "The registry is unavailable. This is the analysis cached at {time}; the image may have changed since.",
   mcpButton: "MCP",
   mcpTitle: "Connect AI via MCP",
   mcpIntro:

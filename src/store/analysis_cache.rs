@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::fs;
 use tracing::warn;
 
-use super::blob::tmp_sibling_path;
+use super::blob::{sha256_hex, tmp_sibling_path};
 use crate::config::{get_analysis_path, must_load_config};
 use crate::image::DockerAnalyzeResult;
 
@@ -103,10 +103,7 @@ fn cache_file_path(digest: &str, arch: &str) -> PathBuf {
     get_analysis_path().join(format!("{}_{}.json", safe_segment(digest), arch_part))
 }
 
-/// Try to read a cached analysis result. Any failure (missing, stale
-/// schema, corrupt JSON, IO error) yields `None` so the caller falls
-/// through to a full analysis.
-pub async fn read_analysis(digest: &str, arch: &str) -> Option<DockerAnalyzeResult> {
+async fn read_entry(digest: &str, arch: &str) -> Option<AnalysisCacheEntry> {
     let path = cache_file_path(digest, arch);
     let data = fs::read(&path).await.ok()?;
     let entry: AnalysisCacheEntry = match serde_json::from_slice(&data) {
@@ -122,7 +119,59 @@ pub async fn read_analysis(digest: &str, arch: &str) -> Option<DockerAnalyzeResu
     if entry.schema_version != SCHEMA_VERSION {
         return None;
     }
-    Some(entry.result)
+    Some(entry)
+}
+
+/// Try to read a cached analysis result. Any failure (missing, stale
+/// schema, corrupt JSON, IO error) yields `None` so the caller falls
+/// through to a full analysis.
+pub async fn read_analysis(digest: &str, arch: &str) -> Option<DockerAnalyzeResult> {
+    read_entry(digest, arch).await.map(|entry| entry.result)
+}
+
+/// Where the digest an image reference last resolved to is kept. The
+/// reference is hashed: it holds `/` and `:` and can be arbitrarily long.
+/// Lives beside the analyses so the same TTL sweep reclaims it.
+fn last_known_path(image_ref: &str, arch: &str) -> PathBuf {
+    let arch_part = if arch.is_empty() {
+        "default".to_string()
+    } else {
+        safe_segment(arch)
+    };
+    get_analysis_path().join(format!(
+        "ref_{}_{}.txt",
+        sha256_hex(image_ref.as_bytes()),
+        arch_part
+    ))
+}
+
+/// Record that `image_ref` (e.g. `https://index.docker.io/v2/library/redis:alpine`)
+/// currently resolves to manifest `digest`. The analysis cache is keyed by
+/// digest, and learning a tag's digest takes a registry round trip — this
+/// is what lets [`read_last_known`] find the analysis when the registry is
+/// down. Best-effort, like every other cache write.
+pub async fn remember_digest(image_ref: &str, arch: &str, digest: &str) {
+    let path = last_known_path(image_ref, arch);
+    let tmp = tmp_sibling_path(&path);
+    if let Err(e) = fs::write(&tmp, digest).await {
+        warn!(err = e.to_string(), "failed to record last known digest");
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, &path).await {
+        let _ = fs::remove_file(&tmp).await;
+        warn!(err = e.to_string(), "failed to record last known digest");
+    }
+}
+
+/// The analysis cached for the digest `image_ref` last resolved to, with
+/// the Unix time it was made. `None` if the reference was never analyzed
+/// or its analysis has since been swept.
+pub async fn read_last_known(image_ref: &str, arch: &str) -> Option<(DockerAnalyzeResult, i64)> {
+    let digest = fs::read_to_string(last_known_path(image_ref, arch))
+        .await
+        .ok()?;
+    let entry = read_entry(digest.trim(), arch).await?;
+    Some((entry.result, entry.cached_at))
 }
 
 /// Best-effort write — any error is logged and swallowed so analysis is

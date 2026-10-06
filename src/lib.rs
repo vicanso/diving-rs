@@ -35,7 +35,10 @@ use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 use controller::new_router;
-use image::{analyze_docker_image, parse_image_info, DockerAnalyzeResult, DockerAnalyzeSummary};
+use image::{
+    analyze_docker_image, analyze_docker_image_or_last_known, parse_image_info,
+    DockerAnalyzeResult, DockerAnalyzeSummary,
+};
 use mcp::McpStatus;
 use middleware::{access_log, entry};
 use recommend::gate_violations;
@@ -306,9 +309,15 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
     }
     let image_info = parse_image_info(&image);
     eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
-    let result = analyze_docker_image(image_info, lang, false, verify_dup, credentials)
-        .await
-        .map_err(|item| item.to_string())?;
+    // A CI gate has to judge the image as it is now, so there an
+    // unavailable registry stays an error. Interactive runs fall back to the
+    // last cached analysis of the reference, flagged as possibly stale.
+    let result = if is_ci() {
+        analyze_docker_image(image_info, lang, false, verify_dup, credentials).await
+    } else {
+        analyze_docker_image_or_last_known(image_info, lang, false, verify_dup, credentials).await
+    }
+    .map_err(|item| item.to_string())?;
     // The gate is decided before anything is sent, so in CI the WeCom push
     // can carry the verdict instead of leaving readers to guess.
     let summary = result.summary();

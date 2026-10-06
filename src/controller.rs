@@ -6,8 +6,9 @@ use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
 use crate::i18n;
 use crate::image::{
-    analyze_docker_image, get_file_content_from_layer, parse_image_info, registry_host,
-    resolve_explicit, DockerAnalyzeResult, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    analyze_docker_image_or_last_known, get_file_content_from_layer, parse_image_info,
+    registry_host, resolve_explicit, DockerAnalyzeResult, ImageInfo, REGISTRY_LOCAL_DOCKER,
+    REGISTRY_LOCAL_FILE,
 };
 use crate::markdown;
 use crate::mcp::McpStatus;
@@ -224,8 +225,13 @@ pub(crate) async fn analyze_singleflight(
             let shared = async move {
                 // The slot is taken inside the flight, so every request
                 // waiting on this image shares the one slot.
-                let analysis =
-                    analyze_docker_image(image_info, lang, true, verify_dup, credentials);
+                let analysis = analyze_docker_image_or_last_known(
+                    image_info,
+                    lang,
+                    true,
+                    verify_dup,
+                    credentials,
+                );
                 let result = in_slot(analysis_slots(), analysis)
                     .await
                     .map(|r| (Arc::new(r), lang))
@@ -323,6 +329,7 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
         recommendations: src.recommendations.clone(),
         duplicate_groups: src.duplicate_groups.clone(),
         runtime_compat: src.runtime_compat.clone(),
+        stale_as_of: src.stale_as_of.clone(),
     };
     Ok(Json(slim.report(&summary)).into_response())
 }

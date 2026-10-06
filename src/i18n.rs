@@ -262,6 +262,18 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
             "{0}: recommendation severity check, {1} at {2} or above"
         }
         (Lang::Zh, "cli.check.severity") => "{0}：建议严重度检查，{1} 条达到「{2}」及以上",
+        (Lang::En, "prog.cache.stale") => {
+            "  > Registry unavailable — showing the analysis cached at {0}; the image may have changed since."
+        }
+        (Lang::Zh, "prog.cache.stale") => {
+            "  > 无法访问 registry —— 显示的是 {0} 缓存的分析结果，镜像在那之后可能已经变化。"
+        }
+        (Lang::En, "md.stale") => {
+            "Registry unavailable — this is the analysis cached at {0}; the image may have changed since."
+        }
+        (Lang::Zh, "md.stale") => {
+            "无法访问 registry —— 以下是 {0} 缓存的分析结果，镜像在那之后可能已经变化。"
+        }
         (Lang::En, "cli.gate.pass") => "CI gate: passed",
         (Lang::Zh, "cli.gate.pass") => "CI 卡口：通过",
         (Lang::En, "cli.gate.fail") => "CI gate: failed",

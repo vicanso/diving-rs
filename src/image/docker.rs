@@ -44,8 +44,8 @@ use crate::{
     error::HTTPError,
     image::convert_files_to_file_tree,
     store::{
-        get_blob_from_file, get_blob_path, read_analysis, save_blob_to_file, sha256_hex,
-        sha256_hex_of_file, tmp_sibling_path, write_analysis,
+        get_blob_from_file, get_blob_path, read_analysis, read_last_known, remember_digest,
+        save_blob_to_file, sha256_hex, sha256_hex_of_file, tmp_sibling_path, write_analysis,
     },
 };
 
@@ -392,6 +392,11 @@ pub struct DockerAnalyzeResult {
     // 退化为默认值（空 `issue`，不产生卡片）。
     #[serde(default)]
     pub runtime_compat: RuntimeCompat,
+    // 仅在 registry 不可达、退回到上一次缓存的分析时设置：该分析生成的
+    // 时间（RFC 3339）。镜像在那之后可能已经变化，各输出据此给出提示。
+    // 永远不会写入磁盘缓存。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_as_of: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
@@ -670,6 +675,28 @@ impl DockerImageParams {
     /// Full repository path for registry URLs (`user/name` or `name`).
     fn repo(&self) -> String {
         repository_path(&self.user, &self.img)
+    }
+}
+
+/// Identity of a tag for the last-known-digest index: registry, repository
+/// and tag (the architecture is keyed separately, like the analysis cache).
+fn image_ref_key(registry: &str, repo: &str, tag: &str) -> String {
+    format!("{registry}/{repo}:{tag}")
+}
+
+impl Error {
+    /// Whether the registry is unavailable right now — unreachable (DNS,
+    /// connect, TLS, timeout), overloaded (5xx) or rate limiting us (429) —
+    /// as opposed to having answered that the request itself is wrong
+    /// (401/403/404…). Only the former justifies serving a cached analysis.
+    fn is_registry_unavailable(&self) -> bool {
+        match self {
+            Error::Request { source, .. } => {
+                source.is_connect() || source.is_timeout() || source.is_request()
+            }
+            Error::Docker { status, .. } => *status == 429 || (500..600).contains(status),
+            _ => false,
+        }
     }
 }
 
@@ -1641,6 +1668,8 @@ impl DockerClient {
                 // Recommendations are language-specific and are not stored
                 // in the cache — rebuild for the current request's lang.
                 cached.recommendations = build_recommendations(&cached, params.lang);
+                let image_ref = image_ref_key(&self.registry, &params.repo(), &params.tag);
+                remember_digest(&image_ref, &params.arch, digest).await;
                 return Ok(cached);
             }
         }
@@ -1770,6 +1799,7 @@ impl DockerClient {
             recommendations: vec![],
             duplicate_groups,
             runtime_compat,
+            stale_as_of: None,
         };
         // Pure derived layer — computed from the result that is already built.
         // Localized at generation time from the resolved environment language.
@@ -1780,6 +1810,10 @@ impl DockerClient {
         // us a digest to key on.
         if let Some(digest) = cache_digest.as_deref() {
             write_analysis(digest, &params.arch, &result).await;
+            // Only now, with the analysis on disk: a digest recorded before
+            // its analysis exists would replace one that still has a result.
+            let image_ref = image_ref_key(&self.registry, &params.repo(), &params.tag);
+            remember_digest(&image_ref, &params.arch, digest).await;
         }
 
         Ok(result)
@@ -1828,6 +1862,53 @@ pub async fn analyze_docker_image(
     }
 }
 
+/// [`analyze_docker_image`], but when the registry is unavailable and this
+/// reference was analyzed before, return that cached analysis instead of
+/// the error. The result then carries `stale_as_of`: nobody could confirm
+/// the tag still points at the same image, and every output says so.
+///
+/// Meant for interactive use (TUI, web, MCP). A CI gate must judge the image
+/// as it is now, so it keeps calling [`analyze_docker_image`] and fails.
+pub async fn analyze_docker_image_or_last_known(
+    image_info: ImageInfo,
+    lang: crate::i18n::Lang,
+    quiet: bool,
+    verify_dup: bool,
+    credentials: Option<super::registry_auth::RegistryCredentials>,
+) -> Result<DockerAnalyzeResult> {
+    let image_ref = image_ref_key(
+        &image_info.registry,
+        &repository_path(&image_info.user, &image_info.name),
+        &image_info.tag,
+    );
+    let arch = image_info.arch.clone();
+    let err = match analyze_docker_image(image_info, lang, quiet, verify_dup, credentials).await {
+        Err(err) if err.is_registry_unavailable() => err,
+        other => return other,
+    };
+    let Some((mut cached, cached_at)) = read_last_known(&image_ref, &arch).await else {
+        return Err(err);
+    };
+    let as_of = DateTime::from_timestamp(cached_at, 0)
+        .unwrap_or_default()
+        .to_rfc3339();
+    tl_info!(
+        image = image_ref,
+        err = err.to_string(),
+        as_of,
+        "registry unavailable, serving last known analysis"
+    );
+    if !quiet {
+        eprintln!(
+            "{}",
+            i18n::fill(i18n::tr(lang, "prog.cache.stale"), &[&as_of])
+        );
+    }
+    cached.recommendations = build_recommendations(&cached, lang);
+    cached.stale_as_of = Some(as_of);
+    Ok(cached)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1863,6 +1944,29 @@ mod tests {
         let json = r#"{"access_token": "oci-only", "expires_in": 60}"#;
         let info: DockerTokenInfo = serde_json::from_str(json).expect("access_token only");
         assert_eq!(info.bearer(), "oci-only");
+    }
+
+    #[test]
+    fn only_registry_outages_qualify_for_the_cached_fallback() {
+        let status = |status: u16| Error::Docker {
+            message: String::new(),
+            code: String::new(),
+            url: String::new(),
+            status,
+        };
+        // Overloaded or rate limiting: the registry cannot answer right now.
+        for code in [429, 500, 502, 503, 504] {
+            assert!(status(code).is_registry_unavailable(), "{code}");
+        }
+        // It did answer: a stale result would hide a real problem (bad
+        // credentials, a deleted tag).
+        for code in [400, 401, 403, 404] {
+            assert!(!status(code).is_registry_unavailable(), "{code}");
+        }
+        let other = Error::Whatever {
+            message: "image index contains no manifests".to_string(),
+        };
+        assert!(!other.is_registry_unavailable());
     }
 
     #[test]

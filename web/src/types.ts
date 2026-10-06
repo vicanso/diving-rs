@@ -109,6 +109,9 @@ export interface ImageAnalyzeResult {
   duplicateGroups?: DuplicateGroup[];
   recommendations?: Recommendation[];
   runtimeCompat?: RuntimeCompat;
+  /** Set only when the registry was unavailable and this is the last
+   *  cached analysis: the time (RFC 3339) that analysis was made. */
+  staleAsOf?: string;
 }
 
 export interface ImageDescriptions {

@@ -7,8 +7,8 @@ mod registry_auth;
 mod sensitive;
 
 pub use docker::{
-    analyze_docker_image, AnalyzeReport, DockerAnalyzeResult, DockerAnalyzeSummary,
-    SensitiveFileInfo,
+    analyze_docker_image, analyze_docker_image_or_last_known, AnalyzeReport, DockerAnalyzeResult,
+    DockerAnalyzeSummary, SensitiveFileInfo,
 };
 pub use elf::RuntimeCompat;
 pub use image_ref::{parse_image_info, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE};

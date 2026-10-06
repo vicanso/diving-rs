@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import {
+  Alert,
   Card,
   Checkbox,
   Col,
@@ -97,6 +98,7 @@ interface ReportState {
   sensitiveFiles: SensitiveFile[];
   duplicateGroups: DuplicateGroup[];
   dockerfile: string;
+  staleAsOf: string;
 }
 
 const readQuery = () => {
@@ -158,6 +160,7 @@ const App = () => {
         sensitiveFiles: data.sensitiveFiles || [],
         duplicateGroups: data.duplicateGroups || [],
         dockerfile: data.dockerfile || "",
+        staleAsOf: data.staleAsOf || "",
       });
       setCurrentLayer(0);
     } catch (err: unknown) {
@@ -450,6 +453,16 @@ const App = () => {
         {report && (
           <Content>
             <div className="contentWrapper reportStack">
+              {report.staleAsOf && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  title={i18nGet("staleResultNotice").replace(
+                    "{time}",
+                    new Date(report.staleAsOf).toLocaleString(),
+                  )}
+                />
+              )}
               <ImageSummaryCard
                 desc={report.imageDescriptions}
                 tags={report.tags}

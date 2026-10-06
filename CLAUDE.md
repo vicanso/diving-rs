@@ -174,6 +174,8 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - `fileSummaryList`: Deleted/modified files for efficiency calculation
 - `bigModifiedFileList`: Large files added/modified in upper layers
 
+`stale_as_of` on the result is set only for a fallback result served while the registry was unavailable (serialized as `staleAsOf`, never written to the disk cache).
+
 **AnalyzeReport** (`DockerAnalyzeResult::report`): the result flattened together with `efficiencyScore` / `wastedSize` / `wastedPercent`. This is what `-o` JSON and `/api/analyze` serialize; the bare `DockerAnalyzeResult` (analysis cache) does not store those derived numbers.
 
 **FileTreeItem**: Hierarchical file representation with operation type:
@@ -261,6 +263,8 @@ All targets require `make build-web` before Rust compilation.
 
 - **Layer Caching**: Blobs cached locally (digest-verified, atomic writes); TTL-based cleanup cron in `src/lib.rs`
 - **Analysis Caching**: Full results cached on disk keyed by manifest digest + arch (`src/store/analysis_cache.rs`)
+- **Registry-unavailable fallback**: each successful analysis records the digest its reference resolved to (`ref_*.txt` beside the analyses). `analyze_docker_image_or_last_known` (TUI, web, MCP — not the CI gate) serves that cached analysis when the registry is unreachable / 5xx / 429, with `DockerAnalyzeResult::stale_as_of` set; Markdown, web UI and `get_findings` surface it. Registry-returned 401/403/404 never fall back
+- **Duplicate hashing**: the second decompression pass that hashes duplicate candidates runs one layer per worker (`detect_cross_layer_duplicates`); the OS and ELF probes cost ~0 and need no such treatment
 - **Singleflight**: Concurrent web requests for the same image share one analysis (`src/controller.rs`)
 - **In-memory results**: the last few finished registry analyses stay in memory for `analysis_memory_ttl` (`recent_analyses` in `src/controller.rs`), so follow-up web/MCP requests skip the registry manifest HEAD and the on-disk cache re-parse (~0.65s → ~2ms per call). Local `file://` / `docker://` sources are never kept
 - **Analysis slots**: optional `max_concurrent_analyses` semaphore, taken inside the singleflight so waiters on one image share a slot

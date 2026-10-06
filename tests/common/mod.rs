@@ -1,4 +1,7 @@
 //! Shared test fixtures.
+//!
+//! Each integration test is its own crate and uses only some of these.
+#![allow(dead_code)]
 
 use diving::config::set_config_file;
 

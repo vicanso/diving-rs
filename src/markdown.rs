@@ -144,6 +144,12 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
     // Title
     md.push_str(&format!("# {}: {}\n\n", t("md.title"), result.name));
 
+    // A fallback result (registry unavailable) must say so before anything
+    // else: every number below describes the image as of that time.
+    if let Some(as_of) = &result.stale_as_of {
+        md.push_str(&format!("> ⚠️ {}\n\n", f("md.stale", &[as_of])));
+    }
+
     // Risk tags
     if !result.tags.is_empty() {
         md.push_str(&format!("## {}\n\n", t("md.risktags")));
