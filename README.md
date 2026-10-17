@@ -121,6 +121,8 @@ CI=true diving diff -c .diving.yml myapp:main myapp:pr-42 --summary diff.md
 
 The web UI compares too: **Compare with…** on a report, or `/?base=myapp:1.4&target=myapp:1.5`.
 
+![](./assets/diving-diff.png)
+
 ## CI gate
 
 Run diving in CI to keep images lean. With `CI=true` it prints the efficiency score and **exits `1`** when any threshold is exceeded (see [exit codes](#exit-codes)).

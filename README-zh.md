@@ -120,6 +120,8 @@ CI=true diving diff -c .diving.yml myapp:main myapp:pr-42 --summary diff.md
 
 Web 界面同样支持对比：在报告页点 **对比…**，或直接访问 `/?base=myapp:1.4&target=myapp:1.5`。
 
+![](./assets/diving-diff.png)
+
 ## CI 卡口
 
 在 CI 中运行 diving 以保持镜像精简。设置 `CI=true` 后，它会输出效率评分，并在任一阈值超标时**以退出码 `1` 退出**（见[退出码](#退出码)）。
