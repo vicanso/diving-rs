@@ -79,7 +79,9 @@ runs:
         INPUT_ARGS: ${{ inputs.args }}
       run: |
         set -uo pipefail
-        summary="${RUNNER_TEMP}/diving-summary.md"
+        # One file per run: a job may use the action more than once, and each
+        # step's summary-file output must keep pointing at its own summary.
+        summary="$(mktemp "${RUNNER_TEMP}/diving-summary.XXXXXX")"
         args=(--summary "$summary")
         [ -n "$INPUT_CONFIG" ] && args+=(--config "$INPUT_CONFIG")
         [ -n "$INPUT_OUTPUT" ] && args+=(-o "$INPUT_OUTPUT")

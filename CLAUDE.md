@@ -286,7 +286,7 @@ All targets require `make build-web` before Rust compilation.
 ## Testing & Development Patterns
 
 - Unit tests live inline (`#[cfg(test)]`) across most modules; run with `cargo test --lib`
-- CI (`.github/workflows/test.yml`) runs `make build-web`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on pushes to main and on pull requests
+- CI (`.github/workflows/test.yml`) runs `make build-web`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on pushes to main and on pull requests. Its `action` job runs `action.yml` end to end on Linux and macOS (analyze, diff, and a gate that must fail) — against the latest *release* and Docker Hub images, so an action change that needs an unreleased flag fails there until it ships
 - `tests/analyze_local.rs` runs the full analyze pipeline end-to-end over a generated `file://` docker-save fixture (no network); run everything with `cargo test`
 - Integration tests start with `common::use_default_config()`, which points diving at the empty `tests/fixtures/config.yml` so the developer's `~/.diving/config.yml` cannot change or break a run
 - For terminal: `make dev` (redis:alpine), `make dev-docker` (local docker)

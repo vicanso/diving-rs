@@ -53,3 +53,58 @@ jobs:
         run: make build-web
       - name: release
         run: make release
+
+  # The GitHub Action (action.yml) end to end. It installs the latest
+  # *release*, so this checks the action against what users get, not this
+  # commit's code; an action change that needs an unreleased flag fails here
+  # until that release is out. Pulls small images from Docker Hub.
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        # one runner per install path in action.yml
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: analyze
+        id: analyze
+        uses: ./
+        with:
+          image: alpine:3.20
+          output: report.json
+          args: --lang en
+      - name: diff
+        id: diff
+        uses: ./
+        with:
+          base: alpine:3.20
+          image: alpine:3.21
+          args: --lang en
+      - name: strict config
+        run: |
+          printf 'highest_image_size: 1MB\n' > "$RUNNER_TEMP/strict.yml"
+      # Expected to fail: alpine is larger than 1 MB.
+      - name: gate failure
+        id: strict
+        continue-on-error: true
+        uses: ./
+        with:
+          image: alpine:3.20
+          config: ${{ runner.temp }}/strict.yml
+          args: --lang en
+      - name: check
+        env:
+          ANALYZE_SUMMARY: ${{ steps.analyze.outputs.summary-file }}
+          DIFF_SUMMARY: ${{ steps.diff.outputs.summary-file }}
+          STRICT_SUMMARY: ${{ steps.strict.outputs.summary-file }}
+          STRICT_OUTCOME: ${{ steps.strict.outcome }}
+        run: |
+          set -euo pipefail
+          grep -q '^### diving · ' "$ANALYZE_SUMMARY"
+          grep -q 'CI gate: passed' "$ANALYZE_SUMMARY"
+          grep -q '"efficiencyScore"' report.json
+          grep -q '^### diving diff · ' "$DIFF_SUMMARY"
+          grep -q 'CI gate: passed' "$DIFF_SUMMARY"
+          test "$STRICT_OUTCOME" = failure
+          grep -q 'image size check' "$STRICT_SUMMARY"
