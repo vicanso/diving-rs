@@ -177,11 +177,23 @@ The repository is also a GitHub Action: it installs the diving release binary, r
 | `base` | — | Compare `image` against this one instead (`diving diff`), e.g. the main-branch build; the gate is then `highest_size_increase` |
 | `config` | — | Config file with the thresholds |
 | `output` | — | Also write the full analysis here (`.json` or `.md`) |
+| `summary-file` | temp file | Where to write the short summary |
 | `job-summary` | `true` | Append the summary to the job summary |
 | `version` | `latest` | diving release to install, e.g. `v0.12.0` |
 | `args` | — | Extra arguments, e.g. `--lang zh` |
 
-The step fails with diving's [exit code](#exit-codes); the `summary-file` output is the summary's path, e.g. for a pull-request comment.
+The step fails with diving's [exit code](#exit-codes). Its `summary-file` output is the summary's path, but GitHub passes no outputs on from a failed step — so to post the summary as a pull-request comment even when the gate fails, give the path yourself:
+
+```yaml
+- uses: vicanso/diving-rs@main
+  with:
+    image: ghcr.io/org/app:${{ github.sha }}
+    summary-file: diving-summary.md
+- if: always() && github.event_name == 'pull_request'
+  run: gh pr comment ${{ github.event.number }} --body-file diving-summary.md
+  env:
+    GH_TOKEN: ${{ github.token }}   # needs `pull-requests: write`
+```
 
 ### Accepting known findings
 

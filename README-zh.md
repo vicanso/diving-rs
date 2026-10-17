@@ -176,11 +176,23 @@ CI=true diving --config .diving.yml myimage:latest
 | `base` | — | 改为将 `image` 与这个镜像对比（`diving diff`），如 main 分支构建的镜像；此时卡口为 `highest_size_increase` |
 | `config` | — | 含卡口阈值的配置文件 |
 | `output` | — | 同时把完整分析写到这里（`.json` 或 `.md`） |
+| `summary-file` | 临时文件 | 摘要写到哪里 |
 | `job-summary` | `true` | 把摘要追加到 job summary |
 | `version` | `latest` | 安装的 diving 版本，如 `v0.12.0` |
 | `args` | — | 额外的命令行参数，如 `--lang zh` |
 
-该步骤以 diving 的[退出码](#退出码)结束；输出 `summary-file` 是摘要文件的路径，可用来发 PR 评论。
+该步骤以 diving 的[退出码](#退出码)结束。输出 `summary-file` 是摘要文件的路径，但步骤失败时 GitHub 不会传出任何输出 —— 想在卡口失败时也把摘要发成 PR 评论，就自己指定路径：
+
+```yaml
+- uses: vicanso/diving-rs@main
+  with:
+    image: ghcr.io/org/app:${{ github.sha }}
+    summary-file: diving-summary.md
+- if: always() && github.event_name == 'pull_request'
+  run: gh pr comment ${{ github.event.number }} --body-file diving-summary.md
+  env:
+    GH_TOKEN: ${{ github.token }}   # 需要 `pull-requests: write` 权限
+```
 
 ### 接受已知问题
 

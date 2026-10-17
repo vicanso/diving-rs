@@ -212,7 +212,7 @@ When `CI=true` env var is set:
 - Optional `highest_image_size` (off by default): uncompressed image size cap
 - Optional `fail_on_severity` (off by default): fail when any recommendation is at that severity or above; ids in `ignore_recommendations` (`Recommendation::id`, e.g. `runasroot`) are excluded from it
 - `diving diff` has its own gate: `highest_size_increase` (off by default) caps target − base uncompressed growth
-- `--summary <file>` writes the short Markdown report with the verdict (PR comment / job summary); `action.yml` at the repo root is a composite GitHub Action that installs a release binary, runs the gate (or `diff` when its `base` input is set) and appends that summary to `$GITHUB_STEP_SUMMARY`
+- `--summary <file>` writes the short Markdown report with the verdict (PR comment / job summary); `action.yml` at the repo root is a composite GitHub Action that installs a release binary, runs the gate (or `diff` when its `base` input is set) and appends that summary to `$GITHUB_STEP_SUMMARY`. GitHub passes no outputs on from a failed step, so the `summary-file` input (a fixed path) is how a later `if: always()` step reads the summary after a failed gate
 - The gate is evaluated before anything is sent (`evaluate_gate` in `src/lib.rs`) and also applies after an AI report / WeCom push when `CI=true` (outside CI those paths end the run); in CI the WeCom message opens with the verdict
 - Exit codes: `1` = image failed the gate, `2` (`EXIT_ERROR`) = diving itself failed (analysis error, bad config, panic hook, failed push)
 - Can output JSON analysis to file with `-o/--output-file`

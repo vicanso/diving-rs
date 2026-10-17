@@ -84,7 +84,8 @@ jobs:
       - name: strict config
         run: |
           printf 'highest_image_size: 1MB\n' > "$RUNNER_TEMP/strict.yml"
-      # Expected to fail: alpine is larger than 1 MB.
+      # Expected to fail: alpine is larger than 1 MB. A failed step passes no
+      # outputs on, so its summary is read from the path given here.
       - name: gate failure
         id: strict
         continue-on-error: true
@@ -92,12 +93,13 @@ jobs:
         with:
           image: alpine:3.20
           config: ${{ runner.temp }}/strict.yml
+          summary-file: ${{ runner.temp }}/strict-summary.md
           args: --lang en
       - name: check
         env:
           ANALYZE_SUMMARY: ${{ steps.analyze.outputs.summary-file }}
           DIFF_SUMMARY: ${{ steps.diff.outputs.summary-file }}
-          STRICT_SUMMARY: ${{ steps.strict.outputs.summary-file }}
+          STRICT_SUMMARY: ${{ runner.temp }}/strict-summary.md
           STRICT_OUTCOME: ${{ steps.strict.outcome }}
         run: |
           set -euo pipefail
