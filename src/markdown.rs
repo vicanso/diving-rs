@@ -3,7 +3,131 @@ use chrono::DateTime;
 use std::cmp::Reverse;
 
 use crate::i18n::{self, Lang};
-use crate::image::{DockerAnalyzeResult, FileTreeItem, Op};
+use crate::image::{final_filesystem, DockerAnalyzeResult, FileTreeItem, Op};
+
+pub(crate) fn icon(severity: &str) -> &'static str {
+    match severity {
+        "high" => "🔴",
+        "medium" => "🟠",
+        "low" => "🟡",
+        _ => "ℹ️",
+    }
+}
+
+/// `s` cut to at most `max` bytes on a char boundary, marked with `…` when
+/// cut. Layer commands are arbitrary text; slicing one mid-character would
+/// panic, and a panic aborts the whole web server.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+/// Largest files in the final filesystem shown in the summary.
+const SUMMARY_TOP_FILES: usize = 5;
+/// Recommendations listed in the summary; the rest are counted.
+const SUMMARY_RECS: usize = 8;
+
+/// A short Markdown summary — headline numbers, the largest files and the
+/// recommendations — sized for a pull-request comment or a CI job summary;
+/// the full report runs to tens of KB. `verdict` is the CI gate outcome
+/// (see `gate_verdict_md`), when there is one.
+pub fn to_summary_markdown(
+    result: &DockerAnalyzeResult,
+    lang: Lang,
+    verdict: Option<&str>,
+) -> String {
+    let t = |k: &str| -> String { i18n::tr(lang, k).to_string() };
+    let f = |k: &str, args: &[&str]| -> String { i18n::fill(i18n::tr(lang, k), args) };
+    let summary = result.summary();
+    let mut md = format!("### diving · `{}`\n\n", result.name);
+    if let Some(verdict) = verdict {
+        md.push_str(&format!("{verdict}\n\n"));
+    }
+    if let Some(as_of) = &result.stale_as_of {
+        md.push_str(&format!("> ⚠️ {}\n\n", f("md.stale", &[as_of])));
+    }
+
+    let empty = result.layers.iter().filter(|l| l.empty).count();
+    let layers = if empty > 0 {
+        format!(
+            "{} ({})",
+            result.layers.len(),
+            f("sum.empty", &[&empty.to_string()])
+        )
+    } else {
+        result.layers.len().to_string()
+    };
+    md.push_str(&format!(
+        "| {} | {} | {} | {} |\n|---|---|---|---|\n| {} ({}) | {} | {} % | {} ({:.1} %) |\n\n",
+        t("sum.size"),
+        t("sum.layers"),
+        t("md.f.eff"),
+        t("md.f.wasted"),
+        ByteSize(result.total_size),
+        f("sum.compressed", &[&ByteSize(result.size).to_string()]),
+        layers,
+        summary.score,
+        ByteSize(summary.wasted_size),
+        summary.wasted_percent * 100.0,
+    ));
+
+    let mut files: Vec<(String, u64, usize)> = final_filesystem(&result.file_tree_list)
+        .into_iter()
+        .map(|(path, file)| (path, file.size, file.layer))
+        .filter(|(_, size, _)| *size > 0)
+        .collect();
+    files.sort_by_key(|(_, size, _)| Reverse(*size));
+    if !files.is_empty() {
+        md.push_str(&format!(
+            "**{}**\n\n| {} | {} | {} |\n|---:|---:|---|\n",
+            t("sum.largest"),
+            t("sum.col.size"),
+            t("sum.col.layer"),
+            t("sum.col.path"),
+        ));
+        for (path, size, layer) in files.iter().take(SUMMARY_TOP_FILES) {
+            md.push_str(&format!(
+                "| {} | {} | `{}` |\n",
+                ByteSize(*size),
+                layer + 1,
+                path
+            ));
+        }
+        md.push('\n');
+    }
+
+    if !result.recommendations.is_empty() {
+        md.push_str(&format!(
+            "**{}**\n\n",
+            f("sum.recs", &[&result.recommendations.len().to_string()])
+        ));
+        for r in result.recommendations.iter().take(SUMMARY_RECS) {
+            let saved = if r.est_saved_bytes > 0 {
+                f("cli.saved", &[&ByteSize(r.est_saved_bytes).to_string()])
+            } else {
+                String::new()
+            };
+            md.push_str(&format!(
+                "- {} **{}** · {}{}\n",
+                icon(&r.severity),
+                r.title,
+                t(&format!("cat.{}", r.category)),
+                saved
+            ));
+        }
+        let rest = result.recommendations.len().saturating_sub(SUMMARY_RECS);
+        if rest > 0 {
+            md.push_str(&format!("- {}\n", f("sum.more", &[&rest.to_string()])));
+        }
+    }
+    md
+}
 
 fn cmd_to_dockerfile_line(cmd: &str) -> Option<String> {
     if cmd.is_empty() {
@@ -366,12 +490,6 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
     // Optimization recommendations (derived from the analysis data)
     if !result.recommendations.is_empty() {
         md.push_str(&format!("## {}\n\n", t("md.recs")));
-        let icon = |sev: &str| match sev {
-            "high" => "🔴",
-            "medium" => "🟠",
-            "low" => "🟡",
-            _ => "ℹ️",
-        };
         for r in &result.recommendations {
             md.push_str(&format!(
                 "### {} {} — {} ({}){}\n\n",
@@ -435,12 +553,7 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
         if layer.empty {
             let mut line = f("md.emptyline", &[&(i + 1).to_string()]);
             if !layer.cmd.is_empty() {
-                let cmd = if layer.cmd.len() > 300 {
-                    format!("{}…", &layer.cmd[..300])
-                } else {
-                    layer.cmd.clone()
-                };
-                line.push_str(&format!(" · `{cmd}`"));
+                line.push_str(&format!(" · `{}`", clip(&layer.cmd, 300)));
             }
             md.push_str(&line);
             md.push('\n');
@@ -460,12 +573,11 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
         ));
 
         if !layer.cmd.is_empty() {
-            let cmd = if layer.cmd.len() > 300 {
-                format!("{}…", &layer.cmd[..300])
-            } else {
-                layer.cmd.clone()
-            };
-            md.push_str(&format!("**{}:** `{}`\n\n", t("md.command"), cmd));
+            md.push_str(&format!(
+                "**{}:** `{}`\n\n",
+                t("md.command"),
+                clip(&layer.cmd, 300)
+            ));
         }
 
         if let Some(tree) = result.file_tree_list.get(i) {
@@ -509,6 +621,39 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
 mod tests {
     use super::*;
     use crate::image::ImageLayer;
+    use crate::recommend::Recommendation;
+
+    #[test]
+    fn clip_never_splits_a_character() {
+        assert_eq!(clip("RUN echo hi", 300), "RUN echo hi");
+        // "中" is 3 bytes: 4 bytes in is the middle of the second one.
+        assert_eq!(clip("中文命令", 4), "中…");
+        // 10 ASCII bytes, then 3-byte characters: byte 300 falls inside one.
+        let cmd = format!("RUN echo 1{}", "中".repeat(200));
+        assert!(!cmd.is_char_boundary(300));
+        assert!(to_markdown_cmd_ok(&cmd));
+    }
+
+    /// Rendering a layer whose command crosses the 300-byte cut inside a
+    /// multi-byte character used to panic.
+    fn to_markdown_cmd_ok(cmd: &str) -> bool {
+        let result = DockerAnalyzeResult {
+            layers: vec![
+                ImageLayer {
+                    cmd: cmd.to_string(),
+                    ..Default::default()
+                },
+                ImageLayer {
+                    cmd: cmd.to_string(),
+                    empty: true,
+                    ..Default::default()
+                },
+            ],
+            file_tree_list: vec![vec![], vec![]],
+            ..Default::default()
+        };
+        to_markdown(&result, false, Lang::En).contains("中…")
+    }
 
     fn files(prefix: &str, count: u64, op: Op) -> Vec<FileTreeItem> {
         (1..=count)
@@ -543,6 +688,33 @@ mod tests {
     fn rows(md: &str, op: &str) -> usize {
         let prefix = format!("| {op} | `");
         md.lines().filter(|l| l.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn summary_is_short_and_carries_the_verdict() {
+        let mut result = one_layer_result(files("big", 8, Op::None));
+        result.total_size = 1000;
+        result.recommendations = (0..SUMMARY_RECS + 3)
+            .map(|i| Recommendation {
+                id: format!("r{i}"),
+                severity: "low".to_string(),
+                category: "size".to_string(),
+                title: format!("rec {i}"),
+                ..Default::default()
+            })
+            .collect();
+        let md = to_summary_markdown(&result, Lang::En, Some("**CI gate: failed**"));
+
+        assert!(md.starts_with("### diving · `fixture:latest`\n\n**CI gate: failed**"));
+        // Only the largest files, biggest first.
+        assert_eq!(md.matches("| `srv/big").count(), SUMMARY_TOP_FILES);
+        assert!(md.contains("| 8 B | 1 | `srv/big008` |"));
+        // The recommendations past the cap are counted, not listed.
+        assert_eq!(md.matches("- 🟡 **rec").count(), SUMMARY_RECS);
+        assert!(md.contains("- +3 more in the full report"));
+
+        let plain = to_summary_markdown(&result, Lang::En, None);
+        assert!(!plain.contains("CI gate"));
     }
 
     #[test]

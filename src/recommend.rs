@@ -13,7 +13,9 @@
 //! collection.
 
 use crate::i18n::{self, Lang};
-use crate::image::{has_path_frag, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
+use crate::image::{
+    has_path_frag, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op, MIN_PKG_CACHE_BYTES,
+};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -89,9 +91,11 @@ struct Leaf {
     path: String,
     size: u64,
     mode: String,
+    /// 0-based index of the layer that holds this copy of the file.
+    layer: usize,
 }
 
-fn collect_leaves(items: &[FileTreeItem], prefix: &str, out: &mut Vec<Leaf>) {
+fn collect_leaves(items: &[FileTreeItem], prefix: &str, layer: usize, out: &mut Vec<Leaf>) {
     for item in items {
         let path = if prefix.is_empty() {
             item.name.clone()
@@ -105,10 +109,11 @@ fn collect_leaves(items: &[FileTreeItem], prefix: &str, out: &mut Vec<Leaf>) {
                     path,
                     size: item.size,
                     mode: item.mode.clone(),
+                    layer,
                 });
             }
         } else {
-            collect_leaves(&item.children, &path, out);
+            collect_leaves(&item.children, &path, layer, out);
         }
     }
 }
@@ -579,8 +584,8 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
     let f = |k: &str, args: &[&str]| -> String { i18n::fill(i18n::tr(lang, k), args) };
 
     let mut leaves: Vec<Leaf> = Vec::new();
-    for tree in &result.file_tree_list {
-        collect_leaves(tree, "", &mut leaves);
+    for (layer, tree) in result.file_tree_list.iter().enumerate() {
+        collect_leaves(tree, "", layer, &mut leaves);
     }
 
     // ---- SIZE ---------------------------------------------------------------
@@ -622,37 +627,94 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         });
     }
 
-    // Package manager cache.
+    // Package manager cache. Below MIN_PKG_CACHE_BYTES it is noise (a lone
+    // empty lock file used to yield "0 B of package-manager cache").
     {
-        let mut size = 0u64;
-        let mut paths: Vec<String> = Vec::new();
-        for l in &leaves {
-            if is_pkg_cache(&l.path) {
-                size += l.size;
-                paths.push(l.path.clone());
+        let mut cache: Vec<&Leaf> = leaves.iter().filter(|l| is_pkg_cache(&l.path)).collect();
+        let size: u64 = cache.iter().map(|l| l.size).sum();
+        if size >= MIN_PKG_CACHE_BYTES {
+            // Name the layer holding most of it: that RUN is the one to fix.
+            let mut per_layer: HashMap<usize, u64> = HashMap::new();
+            for l in &cache {
+                *per_layer.entry(l.layer).or_default() += l.size;
             }
-        }
-        if !paths.is_empty() {
+            let (worst_layer, worst_bytes) = per_layer
+                .into_iter()
+                .max_by_key(|(layer, bytes)| (*bytes, Reverse(*layer)))
+                .unwrap_or_default();
+            cache.sort_by_key(|l| Reverse(l.size));
+            let paths = cache
+                .iter()
+                .map(|l| format!("L{} {}", l.layer + 1, l.path))
+                .collect();
             let (sample, total) = truncate_sample(paths);
+            let detail = f(
+                "rec.pkgcache.detail",
+                &[
+                    &bytesize::ByteSize(size).to_string(),
+                    &total.to_string(),
+                    &more_note(lang, sample.len(), total),
+                ],
+            ) + &f(
+                "rec.pkgcache.layer",
+                &[
+                    &bytesize::ByteSize(worst_bytes).to_string(),
+                    &(worst_layer + 1).to_string(),
+                ],
+            );
             out.push(Recommendation {
                 category: CATEGORY_SIZE.into(),
                 severity: SEVERITY_MEDIUM.into(),
                 id: "pkgcache".into(),
                 title: t("rec.pkgcache.title"),
-                detail: f(
-                    "rec.pkgcache.detail",
-                    &[
-                        &bytesize::ByteSize(size).to_string(),
-                        &total.to_string(),
-                        &more_note(lang, sample.len(), total),
-                    ],
-                ),
+                detail,
                 dockerfile_hint: t("rec.pkgcache.hint"),
                 est_saved_bytes: size,
                 heuristic: false,
                 paths: sample,
             });
         }
+    }
+
+    // Binaries that still carry debug info / symbol tables.
+    if !result.unstripped_binaries.is_empty() {
+        let binaries = &result.unstripped_binaries;
+        let savings: u64 = binaries.iter().map(|b| b.savings()).sum();
+        let severity = if savings >= 10 * 1024 * 1024 {
+            SEVERITY_MEDIUM
+        } else {
+            SEVERITY_LOW
+        };
+        let paths = binaries
+            .iter()
+            .map(|b| {
+                format!(
+                    "L{} {} ({})",
+                    b.layer_index + 1,
+                    b.path,
+                    bytesize::ByteSize(b.savings())
+                )
+            })
+            .collect();
+        let (sample, total) = truncate_sample(paths);
+        out.push(Recommendation {
+            category: CATEGORY_SIZE.into(),
+            severity: severity.into(),
+            id: "unstripped".into(),
+            title: t("rec.unstripped.title"),
+            detail: f(
+                "rec.unstripped.detail",
+                &[
+                    &total.to_string(),
+                    &bytesize::ByteSize(savings).to_string(),
+                    &more_note(lang, sample.len(), total),
+                ],
+            ),
+            dockerfile_hint: t("rec.unstripped.hint"),
+            est_saved_bytes: savings,
+            heuristic: false,
+            paths: sample,
+        });
     }
 
     // Development / build artifacts.
@@ -1334,6 +1396,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::UnstrippedBinary;
 
     #[test]
     fn severity_at_least_follows_severity_order() {
@@ -1346,6 +1409,114 @@ mod tests {
         // `info` as the threshold catches every recommendation.
         assert!(severity_at_least(SEVERITY_INFO, SEVERITY_INFO));
         assert!(severity_at_least(SEVERITY_LOW, SEVERITY_INFO));
+    }
+
+    /// A two-layer result whose second layer holds `cache_bytes` of apt
+    /// package lists (plus a lone empty lock file in the first layer).
+    fn result_with_apt_cache(cache_bytes: u64) -> DockerAnalyzeResult {
+        let file = |name: &str, size: u64| FileTreeItem {
+            name: name.to_string(),
+            size,
+            mode: "-rw-r--r--".to_string(),
+            ..Default::default()
+        };
+        let dir = |name: &str, children: Vec<FileTreeItem>| FileTreeItem {
+            name: name.to_string(),
+            size: children.iter().map(|c| c.size).sum(),
+            children,
+            ..Default::default()
+        };
+        let lock = dir(
+            "var",
+            vec![dir("cache", vec![dir("apt", vec![file("lock", 0)])])],
+        );
+        let lists = dir(
+            "var",
+            vec![dir(
+                "lib",
+                vec![dir(
+                    "apt",
+                    vec![dir(
+                        "lists",
+                        vec![
+                            file("big_Packages", cache_bytes - 100),
+                            file("small_Release", 100),
+                        ],
+                    )],
+                )],
+            )],
+        );
+        DockerAnalyzeResult {
+            user: "app".to_string(),
+            total_size: cache_bytes * 10,
+            file_tree_list: vec![vec![lock], vec![lists]],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unstripped_binaries_become_one_finding_with_the_savings() {
+        let binary = |path: &str, debug: u64, symbols: u64| UnstrippedBinary {
+            layer_index: 2,
+            path: path.to_string(),
+            size: 50 * 1024 * 1024,
+            debug_bytes: debug,
+            symbol_bytes: symbols,
+        };
+        let result = DockerAnalyzeResult {
+            user: "app".to_string(),
+            unstripped_binaries: vec![
+                binary("usr/local/bin/server", 12 * 1024 * 1024, 2 * 1024 * 1024),
+                binary("usr/lib/libbig.so", 0, 512 * 1024),
+            ],
+            ..Default::default()
+        };
+        let recs = build_recommendations(&result, Lang::En);
+        let rec = recs.iter().find(|r| r.id == "unstripped").expect("finding");
+        assert_eq!(rec.severity, SEVERITY_MEDIUM);
+        assert_eq!(rec.est_saved_bytes, 14 * 1024 * 1024 + 512 * 1024);
+        assert_eq!(
+            rec.paths,
+            [
+                "L3 usr/local/bin/server (14.0 MiB)",
+                "L3 usr/lib/libbig.so (512.0 KiB)"
+            ]
+        );
+        assert!(
+            build_recommendations(&DockerAnalyzeResult::default(), Lang::En)
+                .iter()
+                .all(|r| r.id != "unstripped")
+        );
+    }
+
+    #[test]
+    fn pkg_cache_below_the_floor_is_not_a_finding() {
+        let recs = build_recommendations(&result_with_apt_cache(512 * 1024), Lang::En);
+        assert!(!recs.iter().any(|r| r.id == "pkgcache"), "{recs:#?}");
+    }
+
+    #[test]
+    fn pkg_cache_names_the_layer_and_lists_the_largest_files_first() {
+        let recs = build_recommendations(&result_with_apt_cache(2 * 1024 * 1024), Lang::En);
+        let rec = recs
+            .iter()
+            .find(|r| r.id == "pkgcache")
+            .expect("pkgcache finding");
+        assert_eq!(rec.est_saved_bytes, 2 * 1024 * 1024);
+        assert!(
+            rec.detail
+                .ends_with("The largest share, 2.0 MiB, is in layer 2."),
+            "{}",
+            rec.detail
+        );
+        assert_eq!(
+            rec.paths,
+            [
+                "L2 var/lib/apt/lists/big_Packages",
+                "L2 var/lib/apt/lists/small_Release",
+                "L1 var/cache/apt/lock",
+            ]
+        );
     }
 
     #[test]

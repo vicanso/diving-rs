@@ -23,6 +23,11 @@ pub(crate) fn has_path_frag(path: &str, frag: &str) -> bool {
 }
 
 /// Package-manager cache paths that should not ship in production images.
+/// Package-manager cache smaller than this is not worth a finding: a lone
+/// empty `var/cache/apt/archives/lock` would otherwise produce a
+/// "0 B of package-manager cache" recommendation and a risk tag.
+pub const MIN_PKG_CACHE_BYTES: u64 = 1024 * 1024;
+
 pub fn is_pkg_cache(path: &str) -> bool {
     path.starts_with("var/cache/apt/")
         || path.starts_with("var/lib/apt/lists/")

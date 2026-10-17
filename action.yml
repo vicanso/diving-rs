@@ -1,0 +1,100 @@
+name: "diving image check"
+description: "Analyze a container image with diving (or compare it with a base image): efficiency, wasted space, size and findings, with a CI gate and a job-summary report."
+branding:
+  icon: "layers"
+  color: "blue"
+
+inputs:
+  image:
+    description: "Image to analyze, e.g. ghcr.io/org/app:1.2.0 (also file://, docker://, podman://; append ?arch=arm64 for another platform)"
+    required: true
+  base:
+    description: "Compare the image against this one instead (diving diff), e.g. the main-branch build; the gate is then highest_size_increase from the config"
+    required: false
+    default: ""
+  version:
+    description: "diving release to use, e.g. v0.12.0, or latest"
+    required: false
+    default: "latest"
+  config:
+    description: "Path to a diving config file with the gate thresholds (lowest_efficiency, highest_image_size, fail_on_severity, …)"
+    required: false
+    default: ""
+  output:
+    description: "Also write the full analysis here (.json for JSON, .md for Markdown)"
+    required: false
+    default: ""
+  job-summary:
+    description: "Append the short Markdown summary to the job summary"
+    required: false
+    default: "true"
+  args:
+    description: "Extra command-line arguments for diving, e.g. --lang zh"
+    required: false
+    default: ""
+
+outputs:
+  summary-file:
+    description: "Path of the short Markdown summary, e.g. to post as a pull-request comment"
+    value: ${{ steps.analyze.outputs.summary-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install diving
+      shell: bash
+      env:
+        DIVING_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) asset=diving-linux-x86_64 ;;
+          Linux-aarch64 | Linux-arm64) asset=diving-linux-aarch64 ;;
+          Darwin-arm64) asset=diving-darwin-aarch64 ;;
+          Darwin-x86_64) asset=diving-darwin-x86_64 ;;
+          *) echo "::error::diving action: unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
+        esac
+        if [ "$DIVING_VERSION" = "latest" ]; then
+          url="https://github.com/vicanso/diving-rs/releases/latest/download/${asset}"
+        else
+          url="https://github.com/vicanso/diving-rs/releases/download/${DIVING_VERSION}/${asset}"
+        fi
+        bin_dir="${RUNNER_TEMP}/diving-bin"
+        mkdir -p "$bin_dir"
+        curl -fsSL --retry 3 "$url" -o "${bin_dir}/diving"
+        chmod +x "${bin_dir}/diving"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        "${bin_dir}/diving" --version
+
+    - name: Analyze image
+      id: analyze
+      shell: bash
+      env:
+        CI: "true"
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_JOB_SUMMARY: ${{ inputs.job-summary }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: |
+        set -uo pipefail
+        summary="${RUNNER_TEMP}/diving-summary.md"
+        args=(--summary "$summary")
+        [ -n "$INPUT_CONFIG" ] && args+=(--config "$INPUT_CONFIG")
+        [ -n "$INPUT_OUTPUT" ] && args+=(-o "$INPUT_OUTPUT")
+        if [ -n "$INPUT_BASE" ]; then
+          target=(diff "$INPUT_BASE" "$INPUT_IMAGE")
+        else
+          target=("$INPUT_IMAGE")
+        fi
+        # Extra arguments are split on whitespace, like on a command line.
+        # shellcheck disable=SC2086
+        diving "${target[@]}" "${args[@]}" $INPUT_ARGS
+        code=$?
+        echo "summary-file=${summary}" >> "$GITHUB_OUTPUT"
+        if [ "$INPUT_JOB_SUMMARY" = "true" ] && [ -s "$summary" ]; then
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        # 0 passed, 1 the image failed the gate, 2 diving itself failed.
+        exit "$code"

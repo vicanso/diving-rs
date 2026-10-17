@@ -218,3 +218,201 @@ export const flattenFileTree = (
     }
   }
 };
+
+// ---- Treemap: the final filesystem, sized and attributed to layers ----
+
+/** A node of the filesystem a container actually sees. */
+export interface FsNode {
+  name: string;
+  /** Path from the image root, `/`-joined, no leading slash. */
+  path: string;
+  size: number;
+  /** Files only: 0-based index of the layer that wrote this copy. */
+  layer?: number;
+  children?: Map<string, FsNode>;
+}
+
+const newDir = (name: string, path: string): FsNode => ({
+  name,
+  path,
+  size: 0,
+  children: new Map(),
+});
+
+/**
+ * Merge the per-layer trees into the final filesystem: each layer's
+ * removals (whiteouts, including opaque directories) apply before its
+ * additions, and an upper copy replaces a lower one. Directory sizes are
+ * the sum of the files below them.
+ */
+export const buildFinalTree = (fileTreeList: FileTreeList[][]): FsNode => {
+  const root = newDir("/", "");
+  fileTreeList.forEach((tree, layer) => {
+    const removed: string[][] = [];
+    const added: { segments: string[]; size: number }[] = [];
+    const walk = (items: FileTreeList[], segments: string[]) => {
+      for (const item of items) {
+        // `./`-rooted tars put everything under a `.` directory.
+        const next =
+          segments.length === 0 && item.name === "."
+            ? segments
+            : [...segments, item.name];
+        // A whiteout with children is an opaque directory that this same
+        // layer fills again (the marker came first in the tar).
+        if (item.op === opRemoved && next.length > 0 && item.name) {
+          removed.push(next);
+        }
+        if (item.children && item.children.length > 0) {
+          walk(item.children, next);
+        } else if (next.length === 0 || !item.name) {
+          // nameless leaf: an opaque whiteout on the root
+        } else if (item.op !== opRemoved) {
+          added.push({ segments: next, size: item.size });
+        }
+      }
+    };
+    walk(tree, []);
+    for (const segments of removed) {
+      let dir: FsNode | undefined = root;
+      for (const name of segments.slice(0, -1)) {
+        dir = dir.children?.get(name);
+        if (!dir) break;
+      }
+      dir?.children?.delete(segments[segments.length - 1]);
+    }
+    for (const { segments, size } of added) {
+      let dir = root;
+      segments.slice(0, -1).forEach((name, i) => {
+        let child = dir.children!.get(name);
+        if (!child || !child.children) {
+          child = newDir(name, segments.slice(0, i + 1).join("/"));
+          dir.children!.set(name, child);
+        }
+        dir = child;
+      });
+      const name = segments[segments.length - 1];
+      dir.children!.set(name, {
+        name,
+        path: segments.join("/"),
+        size,
+        layer,
+      });
+    }
+  });
+  const total = (node: FsNode): number => {
+    if (!node.children) return node.size;
+    let sum = 0;
+    node.children.forEach((child) => {
+      sum += total(child);
+    });
+    node.size = sum;
+    return sum;
+  };
+  total(root);
+  return root;
+};
+
+/** Bytes per layer below `node` (a file counts for the layer that wrote it). */
+export const layerBytes = (
+  node: FsNode,
+  out: Map<number, number> = new Map(),
+): Map<number, number> => {
+  if (!node.children) {
+    if (node.layer !== undefined) {
+      out.set(node.layer, (out.get(node.layer) || 0) + node.size);
+    }
+    return out;
+  }
+  node.children.forEach((child) => layerBytes(child, out));
+  return out;
+};
+
+/** The layer that wrote most of `node`'s bytes, and its share (0–1). */
+export const dominantLayer = (
+  node: FsNode,
+): { layer: number; share: number } | null => {
+  let best: { layer: number; bytes: number } | null = null;
+  layerBytes(node).forEach((bytes, layer) => {
+    if (!best || bytes > best.bytes) best = { layer, bytes };
+  });
+  if (!best || node.size === 0) return null;
+  const { layer, bytes } = best;
+  return { layer, share: bytes / node.size };
+};
+
+export interface TreemapRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Squarified treemap layout (Bruls, Huizing, van Wijk): `values` (sorted
+ * largest first) tiled into the w×h box with tiles kept as close to square
+ * as possible. Returns one rect per value, same order.
+ */
+export const squarify = (
+  values: number[],
+  w: number,
+  h: number,
+): TreemapRect[] => {
+  const total = values.reduce((a, b) => a + b, 0);
+  const rects: TreemapRect[] = [];
+  if (total <= 0 || w <= 0 || h <= 0)
+    return values.map(() => ({ x: 0, y: 0, w: 0, h: 0 }));
+  const scale = (w * h) / total;
+  const areas = values.map((v) => v * scale);
+  let x = 0;
+  let y = 0;
+  let width = w;
+  let height = h;
+  let i = 0;
+  const worst = (row: number[], side: number) => {
+    const sum = row.reduce((a, b) => a + b, 0);
+    const max = Math.max(...row);
+    const min = Math.min(...row);
+    return Math.max(
+      (side * side * max) / (sum * sum),
+      (sum * sum) / (side * side * min),
+    );
+  };
+  while (i < areas.length) {
+    const side = Math.min(width, height);
+    const row = [areas[i]];
+    let j = i + 1;
+    while (
+      j < areas.length &&
+      worst([...row, areas[j]], side) <= worst(row, side)
+    ) {
+      row.push(areas[j]);
+      j++;
+    }
+    const sum = row.reduce((a, b) => a + b, 0);
+    if (width >= height) {
+      // lay the row out as a column on the left
+      const colW = sum / height;
+      let cy = y;
+      for (const area of row) {
+        const rh = area / colW;
+        rects.push({ x, y: cy, w: colW, h: rh });
+        cy += rh;
+      }
+      x += colW;
+      width -= colW;
+    } else {
+      // lay the row out across the top
+      const rowH = sum / width;
+      let cx = x;
+      for (const area of row) {
+        const rw = area / rowH;
+        rects.push({ x: cx, y, w: rw, h: rowH });
+        cx += rw;
+      }
+      y += rowH;
+      height -= rowH;
+    }
+    i = j;
+  }
+  return rects;
+};

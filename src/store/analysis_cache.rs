@@ -44,7 +44,11 @@ use crate::image::DockerAnalyzeResult;
 /// v5: file modes carry the file-type character (`-rw-r--r--`, not
 /// `?rw-r--r--`). v4 caches hold the old strings, with which the
 /// world-writable-file check could never match; bump forces a re-analysis.
-const SCHEMA_VERSION: u32 = 5;
+/// v6: adds `unstripped_binaries` (needs the layers re-read, so v5 caches
+/// would never show the finding), counts package caches by size (v5
+/// risk tags flagged a lone empty apt lock file) and records each layer's
+/// `diff_id`, which `diving diff` matches layers by.
+const SCHEMA_VERSION: u32 = 6;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

@@ -166,6 +166,14 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         // ---- recommendation fix hints -------------------------------------
         (Lang::En, "rec.wasted.hint") => "Create and clean up the data in the *same* RUN instruction so the bytes never enter a layer.",
         (Lang::Zh, "rec.wasted.hint") => "在*同一条* RUN 指令内创建并清理数据，使这些字节根本不进入任何层。",
+        (Lang::En, "rec.unstripped.title") => "Strip debug info from binaries",
+        (Lang::Zh, "rec.unstripped.title") => "去掉二进制中的调试信息",
+        (Lang::En, "rec.unstripped.detail") => "{0} binary file(s) still carry debug sections or a symbol table; stripping them would save about {1}{2}.",
+        (Lang::Zh, "rec.unstripped.detail") => "{0} 个二进制文件仍带有调试段或符号表，strip 之后约可节省 {1}{2}。",
+        (Lang::En, "rec.unstripped.hint") => "Strip in the build stage before copying into the runtime image: `strip --strip-unneeded <file>`; Rust: `strip = true` under `[profile.release]`; Go: `go build -ldflags=\"-s -w\"`; C/C++: build without `-g`, or keep the symbols in a separate debug package.",
+        (Lang::Zh, "rec.unstripped.hint") => "在构建阶段 strip 后再拷进运行镜像：`strip --strip-unneeded <文件>`；Rust 在 `[profile.release]` 下设 `strip = true`；Go 用 `go build -ldflags=\"-s -w\"`；C/C++ 去掉 `-g`，或把符号放到单独的调试包里。",
+        (Lang::En, "rec.pkgcache.layer") => " The largest share, {0}, is in layer {1}.",
+        (Lang::Zh, "rec.pkgcache.layer") => "其中最多的 {0} 在第 {1} 层。",
         (Lang::En, "rec.pkgcache.hint") => "apt: `rm -rf /var/lib/apt/lists/*` in the same RUN; apk: `apk add --no-cache`; yum/dnf: `yum clean all`. For language tools: `pip install --no-cache-dir`, `npm ci && npm cache clean --force`, `go clean -cache -modcache`, `cargo --locked` + clean target; or use BuildKit `--mount=type=cache` for transient caches.",
         (Lang::Zh, "rec.pkgcache.hint") => "apt：同一 RUN 内 `rm -rf /var/lib/apt/lists/*`；apk：`apk add --no-cache`；yum/dnf：`yum clean all`。语言生态用 `pip install --no-cache-dir`、`npm ci && npm cache clean --force`、`go clean -cache -modcache`，或在 BuildKit 中用 `--mount=type=cache` 挂载临时缓存。",
         (Lang::En, "rec.devart.hint") => "Add a .dockerignore and/or use a multi-stage build so these never reach the final stage.",
@@ -256,12 +264,20 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "cli.check.eff") => "{0}：效率下限检查，下限：{1}",
         (Lang::En, "cli.check.bytes") => "{0}: highest wasted bytes check, highest: {1}",
         (Lang::Zh, "cli.check.bytes") => "{0}：浪费字节上限检查，上限：{1}",
+        (Lang::En, "cli.check.size") => "{0}: image size check, {1} uncompressed, highest: {2}",
+        (Lang::Zh, "cli.check.size") => "{0}：镜像大小上限检查，解压后 {1}，上限：{2}",
         (Lang::En, "cli.check.pct") => "{0}: highest user wasted percent check, highest: {1}",
         (Lang::Zh, "cli.check.pct") => "{0}：浪费比例上限检查，上限：{1}",
         (Lang::En, "cli.check.severity") => {
             "{0}: recommendation severity check, {1} at {2} or above"
         }
         (Lang::Zh, "cli.check.severity") => "{0}：建议严重度检查，{1} 条达到「{2}」及以上",
+        (Lang::En, "cli.check.growth") => {
+            "{0}: image growth check, {1} larger uncompressed, highest: {2}"
+        }
+        (Lang::Zh, "cli.check.growth") => "{0}：镜像增长上限检查，解压后增大 {1}，上限：{2}",
+        (Lang::En, "cli.diff.size") => "  image size: {0} -> {1} ({2})",
+        (Lang::Zh, "cli.diff.size") => "  镜像大小：{0} -> {1}（{2}）",
         (Lang::En, "prog.cache.stale") => {
             "  > Registry unavailable — showing the analysis cached at {0}; the image may have changed since."
         }
@@ -314,6 +330,66 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "prog.cache.hit") => "  > 命中分析缓存（{0}）",
 
         // ---- Markdown report skeleton (markdown.rs) -----------------------
+        (Lang::En, "sum.size") => "Image size",
+        (Lang::Zh, "sum.size") => "镜像大小",
+        (Lang::En, "sum.layers") => "Layers",
+        (Lang::Zh, "sum.layers") => "层数",
+        (Lang::En, "sum.compressed") => "{0} compressed",
+        (Lang::Zh, "sum.compressed") => "压缩后 {0}",
+        (Lang::En, "sum.empty") => "{0} empty",
+        (Lang::Zh, "sum.empty") => "其中 {0} 个空层",
+        (Lang::En, "sum.largest") => "Largest files",
+        (Lang::Zh, "sum.largest") => "最大的文件",
+        (Lang::En, "sum.col.size") => "Size",
+        (Lang::Zh, "sum.col.size") => "大小",
+        (Lang::En, "sum.col.layer") => "Layer",
+        (Lang::Zh, "sum.col.layer") => "层",
+        (Lang::En, "sum.col.path") => "Path",
+        (Lang::Zh, "sum.col.path") => "路径",
+        (Lang::En, "sum.recs") => "Recommendations ({0})",
+        (Lang::Zh, "sum.recs") => "优化建议（{0} 条）",
+        (Lang::En, "sum.more") => "+{0} more in the full report",
+        (Lang::Zh, "sum.more") => "另有 {0} 条，见完整报告",
+        (Lang::En, "diff.col.base") => "Base",
+        (Lang::Zh, "diff.col.base") => "基准",
+        (Lang::En, "diff.col.target") => "Target",
+        (Lang::Zh, "diff.col.target") => "目标",
+        (Lang::En, "diff.col.change") => "Change",
+        (Lang::Zh, "diff.col.change") => "变化",
+        (Lang::En, "diff.col.dir") => "Directory",
+        (Lang::Zh, "diff.col.dir") => "目录",
+        (Lang::En, "diff.compressed") => "Compressed",
+        (Lang::Zh, "diff.compressed") => "压缩后",
+        (Lang::En, "diff.files") => "Files",
+        (Lang::Zh, "diff.files") => "文件数",
+        (Lang::En, "diff.shared") => {
+            "**Shared layers:** the first {0} ({1}) are identical in both images."
+        }
+        (Lang::Zh, "diff.shared") => "**共同层：** 开头 {0} 层（{1}）两个镜像完全相同。",
+        (Lang::En, "diff.noshared") => {
+            "**Shared layers:** none — the images do not start with the same layers (a different or rebuilt base)."
+        }
+        (Lang::Zh, "diff.noshared") => {
+            "**共同层：** 无 —— 两个镜像开头的层不同（基础镜像不同或被重新构建）。"
+        }
+        (Lang::En, "diff.layers.base") => "Layers only in the base ({0})",
+        (Lang::Zh, "diff.layers.base") => "仅基准镜像有的层（{0}）",
+        (Lang::En, "diff.layers.target") => "Layers only in the target ({0})",
+        (Lang::Zh, "diff.layers.target") => "仅目标镜像有的层（{0}）",
+        (Lang::En, "diff.dirs") => "Where the size changed",
+        (Lang::Zh, "diff.dirs") => "体积变化所在目录",
+        (Lang::En, "diff.added") => "Added files ({0}, {1})",
+        (Lang::Zh, "diff.added") => "新增文件（{0} 个，{1}）",
+        (Lang::En, "diff.removed") => "Removed files ({0}, {1})",
+        (Lang::Zh, "diff.removed") => "删除的文件（{0} 个，{1}）",
+        (Lang::En, "diff.changed") => "Files that changed size ({0}, {1})",
+        (Lang::Zh, "diff.changed") => "大小变化的文件（{0} 个，{1}）",
+        (Lang::En, "diff.recs.new") => "New recommendations ({0})",
+        (Lang::Zh, "diff.recs.new") => "新出现的建议（{0} 条）",
+        (Lang::En, "diff.recs.resolved") => "Resolved recommendations ({0})",
+        (Lang::Zh, "diff.recs.resolved") => "已解决的建议（{0} 条）",
+        (Lang::En, "diff.more") => "{0} more not shown",
+        (Lang::Zh, "diff.more") => "另有 {0} 项未列出",
         (Lang::En, "md.title") => "Image Analysis",
         (Lang::Zh, "md.title") => "镜像分析",
         (Lang::En, "md.risktags") => "Risk Tags",

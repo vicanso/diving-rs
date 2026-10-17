@@ -40,6 +40,12 @@ pub struct DivingConfig {
     pub lowest_efficiency: Option<f64>,
     pub highest_wasted_bytes: Option<ByteSize>,
     pub highest_user_wasted_percent: Option<f64>,
+    /// CI 镜像大小上限（解压后的大小，即 `docker images` 显示的 SIZE）。
+    /// 未配置（默认）则不检查。
+    pub highest_image_size: Option<ByteSize>,
+    /// `diving diff` 的 CI 卡口：目标镜像比基准镜像（解压后）最多大多少。
+    /// 未配置（默认）则 diff 只输出对比、不判定。
+    pub highest_size_increase: Option<ByteSize>,
     /// CI 严重度卡口：存在该级别及以上的优化建议时 CI 失败（如 `high`
     /// 拦截镜像内的密钥文件）。未配置（默认）则建议只打印、不影响结果。
     pub fail_on_severity: Option<SeverityThreshold>,
@@ -284,6 +290,16 @@ pub fn get_highest_user_wasted_percent() -> f64 {
     }
     // Matches README default (10%).
     0.1
+}
+
+/// CI 镜像大小上限（字节，解压后）；`None` 表示不检查。
+pub fn get_highest_image_size() -> Option<u64> {
+    must_load_config().highest_image_size.map(|v| v.0)
+}
+
+/// `diving diff` 允许的镜像增长上限（字节，解压后）；`None` 表示不检查。
+pub fn get_highest_size_increase() -> Option<u64> {
+    must_load_config().highest_size_increase.map(|v| v.0)
 }
 
 /// CI 严重度卡口的阈值（`recommend::SEVERITY_*` 之一）；`None` 表示不检查。

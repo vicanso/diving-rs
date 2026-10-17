@@ -79,6 +79,28 @@ export const getGithubIcon = (isDarkMode: boolean) => {
   );
 };
 
+export const getPreviewIcon = () => {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ verticalAlign: "middle", color: "var(--accent)" }}
+      aria-hidden="true"
+    >
+      <path
+        d="M2 12C3.8 7.6 7.6 5 12 5C16.4 5 20.2 7.6 22 12C20.2 16.4 16.4 19 12 19C7.6 19 3.8 16.4 2 12Z"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2.2" />
+    </svg>
+  );
+};
+
 export const getDownloadIcon = () => {
   return (
     <svg

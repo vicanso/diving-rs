@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,6 +56,11 @@ pub struct ImageLayer {
     pub unpack_size: u64,
     // 该层是否为空（无文件操作）
     pub empty: bool,
+    // 解压后 tar 的内容摘要（config 的 `rootfs.diff_ids`）。`digest` 对
+    // registry 镜像是压缩包的摘要，对 docker save 的 tar 却可能只是包内
+    // 路径；判断两个镜像是否共用同一层要看它。空层为空字符串。
+    #[serde(default)]
+    pub diff_id: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,6 +291,88 @@ fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeIte
         }
     };
     add_file(&mut items[index].children, &name_list[1..], item);
+}
+
+/// One file as it ends up in the running container: the topmost copy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinalFile {
+    pub size: u64,
+    /// 0-based index of the layer that wrote this copy.
+    pub layer: usize,
+    pub mode: String,
+    pub link: String,
+}
+
+/// The filesystem a container sees, from the per-layer file trees: each
+/// layer's removals (whiteouts, including opaque directories) apply before
+/// its additions, and an upper copy replaces a lower one. Keyed by path.
+pub fn final_filesystem(file_tree_list: &[Vec<FileTreeItem>]) -> BTreeMap<String, FinalFile> {
+    let mut files: BTreeMap<String, FinalFile> = BTreeMap::new();
+    for (layer, tree) in file_tree_list.iter().enumerate() {
+        let mut removed: Vec<String> = Vec::new();
+        let mut added: Vec<(String, &FileTreeItem)> = Vec::new();
+        collect_layer_entries(tree, "", &mut removed, &mut added);
+        for path in removed {
+            remove_subtree(&mut files, &path);
+        }
+        for (path, item) in added {
+            files.insert(
+                path,
+                FinalFile {
+                    size: item.size,
+                    layer,
+                    mode: item.mode.clone(),
+                    link: item.link.clone(),
+                },
+            );
+        }
+    }
+    files
+}
+
+/// Drop `path` and everything below it. A directory's entries sit next to
+/// each other in key order, so this is a range scan rather than a pass over
+/// the whole map per whiteout.
+fn remove_subtree(files: &mut BTreeMap<String, FinalFile>, path: &str) {
+    files.remove(path);
+    let below = format!("{path}/");
+    let doomed: Vec<String> = files
+        .range(below.clone()..)
+        .take_while(|(p, _)| p.starts_with(&below))
+        .map(|(p, _)| p.clone())
+        .collect();
+    for p in doomed {
+        files.remove(&p);
+    }
+}
+
+fn collect_layer_entries<'a>(
+    items: &'a [FileTreeItem],
+    parent: &str,
+    removed: &mut Vec<String>,
+    added: &mut Vec<(String, &'a FileTreeItem)>,
+) {
+    for item in items {
+        // `./`-rooted tars put everything under a `.` directory.
+        let path = match (parent, item.name.as_str()) {
+            ("", ".") => String::new(),
+            ("", name) => name.to_string(),
+            (parent, name) => format!("{parent}/{name}"),
+        };
+        // A whiteout with children is an opaque directory (or a whited-out
+        // path) that this same layer fills again: the tar listed the marker
+        // first, so the new entries were filed under it.
+        if item.op == Op::Removed && !path.is_empty() {
+            removed.push(path.clone());
+        }
+        if !item.children.is_empty() {
+            collect_layer_entries(&item.children, &path, removed, added);
+        } else if path.is_empty() {
+            // nameless leaf: an opaque whiteout on the root, nothing to show
+        } else if item.op != Op::Removed {
+            added.push((path, item));
+        }
+    }
 }
 
 pub fn convert_files_to_file_tree(
@@ -552,6 +639,99 @@ pub fn detect_cross_layer_duplicates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn leaf(name: &str, size: u64, op: Op) -> FileTreeItem {
+        FileTreeItem {
+            name: name.to_string(),
+            size,
+            op,
+            ..Default::default()
+        }
+    }
+
+    fn node(name: &str, children: Vec<FileTreeItem>) -> FileTreeItem {
+        FileTreeItem {
+            name: name.to_string(),
+            children,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn final_filesystem_applies_layers_in_order() {
+        let layers = vec![
+            vec![
+                node(
+                    "app",
+                    vec![leaf("old.bin", 10, Op::None), leaf("keep.txt", 1, Op::None)],
+                ),
+                node(
+                    "cache",
+                    vec![leaf("a", 5, Op::None), leaf("b", 5, Op::None)],
+                ),
+                leaf("config.yml", 4, Op::None),
+            ],
+            // empty (ENV) layer
+            vec![],
+            vec![
+                // whiteout of a file, an opaque directory replaced by new
+                // contents, and an upper copy of a file
+                node("app", vec![leaf("old.bin", 0, Op::Removed)]),
+                leaf("cache", 0, Op::Removed),
+                node("cache", vec![leaf("c", 7, Op::None)]),
+                leaf("config.yml", 9, Op::Modified),
+            ],
+        ];
+        let fs = final_filesystem(&layers);
+        let view: Vec<(&str, u64, usize)> = fs
+            .iter()
+            .map(|(p, f)| (p.as_str(), f.size, f.layer))
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("app/keep.txt", 1, 0),
+                ("cache/c", 7, 2),
+                ("config.yml", 9, 2),
+            ]
+        );
+    }
+
+    /// The usual tar order puts `.wh..wh..opq` before the directory's new
+    /// files, which then land under the whiteout item itself.
+    #[test]
+    fn final_filesystem_opaque_marker_before_new_files() {
+        let entry = |path: &str, size: u64, whiteout: bool| ImageFileInfo {
+            path: path.to_string(),
+            size,
+            is_whiteout: whiteout.then_some(true),
+            is_opaque: whiteout.then_some(true),
+            ..Default::default()
+        };
+        let lower = convert_files_to_file_tree(
+            &[entry("cache/a", 5, false), entry("cache/b", 5, false)],
+            &HashSet::new(),
+        );
+        let upper = convert_files_to_file_tree(
+            &[entry("cache", 0, true), entry("cache/c", 7, false)],
+            &HashSet::new(),
+        );
+        assert_eq!(upper.len(), 1, "files are filed under the marker");
+        let fs = final_filesystem(&[lower, upper]);
+        assert_eq!(fs.keys().collect::<Vec<_>>(), ["cache/c"]);
+    }
+
+    #[test]
+    fn final_filesystem_strips_a_dot_root() {
+        let layers = vec![vec![node(
+            ".",
+            vec![node("etc", vec![leaf("hosts", 3, Op::None)])],
+        )]];
+        assert_eq!(
+            final_filesystem(&layers).keys().collect::<Vec<_>>(),
+            ["etc/hosts"]
+        );
+    }
 
     #[test]
     fn test_convert_files_to_file_tree_empty() {

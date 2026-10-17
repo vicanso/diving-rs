@@ -37,19 +37,39 @@ pub fn tar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
 ///                        adds a 1.5MB model file
 pub fn build_fixture_tar() -> Vec<u8> {
     let big = vec![0u8; 1_500_000];
-    let layer1 = tar_bytes(&[
-        ("usr/bin/app", &[0x7f; 2048]),
-        ("usr/bin/old", b"legacy-binary"),
-        ("etc/config.yml", b"a: 1"),
-        ("var/cache/apt/archives/x.deb", &[1u8; 2048]),
-        ("app/secret.pem", b"-----BEGIN PRIVATE KEY-----"),
-    ]);
     let layer2 = tar_bytes(&[
         ("etc/config.yml", b"a: 22"),
         ("usr/bin/.wh.old", b""),
         ("data/model.bin", &big),
     ]);
-    let config = br#"{
+    fixture_tar(&layer2, "sha256:bbb")
+}
+
+/// The next release of [`build_fixture_tar`]: the same first layer, a
+/// rebuilt second one — a bigger model, a new file, a longer config, and
+/// `usr/bin/old` left in place.
+pub fn build_fixture_v2_tar() -> Vec<u8> {
+    let big = vec![0u8; 2_500_000];
+    let extra = vec![2u8; 300_000];
+    let layer2 = tar_bytes(&[
+        ("etc/config.yml", b"a: 333"),
+        ("data/model.bin", &big),
+        ("data/extra.bin", &extra),
+    ]);
+    fixture_tar(&layer2, "sha256:ccc")
+}
+
+fn fixture_tar(layer2: &[u8], layer2_diff_id: &str) -> Vec<u8> {
+    // Above MIN_PKG_CACHE_BYTES, so it counts as a real package cache.
+    let apt_cache = vec![1u8; 1_200_000];
+    let layer1 = tar_bytes(&[
+        ("usr/bin/app", &[0x7f; 2048]),
+        ("usr/bin/old", b"legacy-binary"),
+        ("etc/config.yml", b"a: 1"),
+        ("var/cache/apt/archives/x.deb", &apt_cache),
+        ("app/secret.pem", b"-----BEGIN PRIVATE KEY-----"),
+    ]);
+    let config = r#"{
         "architecture": "amd64",
         "created": "2024-06-01T00:00:00Z",
         "history": [
@@ -58,14 +78,15 @@ pub fn build_fixture_tar() -> Vec<u8> {
             {"created": "2024-06-01T00:00:00Z", "created_by": "/bin/sh -c #(nop) COPY dir:abc in /data"}
         ],
         "os": "linux",
-        "rootfs": {"type": "layers", "diff_ids": ["sha256:aaa", "sha256:bbb"]},
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:aaa", "LAYER2_DIFF_ID"]},
         "config": {
             "User": "",
             "Env": ["PATH=/usr/local/bin:/usr/bin", "APP_MODE=prod"],
             "Entrypoint": ["/usr/bin/app"],
             "Cmd": []
         }
-    }"#;
+    }"#
+    .replace("LAYER2_DIFF_ID", layer2_diff_id);
     let manifest = br#"[{
         "Config": "config.json",
         "RepoTags": ["fixture:latest"],
@@ -73,8 +94,8 @@ pub fn build_fixture_tar() -> Vec<u8> {
     }]"#;
     tar_bytes(&[
         ("manifest.json", manifest),
-        ("config.json", config),
+        ("config.json", config.as_bytes()),
         ("layer1/layer.tar", &layer1),
-        ("layer2/layer.tar", &layer2),
+        ("layer2/layer.tar", layer2),
     ])
 }

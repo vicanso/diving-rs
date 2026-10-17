@@ -172,20 +172,61 @@ pub fn path_under_dir(path: &str, dir: &str) -> bool {
     path == dir || path.starts_with(&format!("{dir}/"))
 }
 
-/// One-pass index of a plain (uncompressed) image tar: file path →
-/// (data offset, size). `docker save` / `file://` analysis used to rescan
-/// the whole tar once per lookup — O(layers × tar size); building this
-/// index once turns every later read into an open + seek + bounded read.
+/// One-pass index of a local image archive: entry path → (data offset,
+/// size). The archive is a plain (uncompressed) tar — `docker save`
+/// output or an OCI image tar — or a directory holding an OCI image layout,
+/// whose entries are its files (offset 0). `docker save` / `file://`
+/// analysis used to rescan the whole tar once per lookup — O(layers × tar
+/// size); building this index once turns every later read into an open +
+/// seek + bounded read.
 #[derive(Debug)]
 pub struct TarIndex {
     tar_path: String,
+    /// `tar_path` is a directory: entries are files below it.
+    is_dir: bool,
     entries: HashMap<String, (u64, u64)>,
 }
 
+/// Every file below `dir`, as `/`-separated paths relative to `root`.
+fn index_directory(
+    root: &Path,
+    dir: &Path,
+    entries: &mut HashMap<String, (u64, u64)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).context(ReadSnafu {})? {
+        let entry = entry.context(ReadSnafu {})?;
+        let path = entry.path();
+        let meta = entry.metadata().context(ReadSnafu {})?;
+        if meta.is_dir() {
+            index_directory(root, &path, entries)?;
+        } else if meta.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            entries.insert(rel, (0, meta.len()));
+        }
+    }
+    Ok(())
+}
+
 impl TarIndex {
-    /// Scan the tar once and record every entry's data offset + size.
+    /// Scan the archive once and record every entry's data offset + size.
     /// 同步阻塞 I/O；调用方负责在 spawn_blocking 中运行。
     pub fn build(tar: &str) -> Result<TarIndex> {
+        let root = Path::new(tar);
+        if root.is_dir() {
+            let mut entries = HashMap::new();
+            index_directory(root, root, &mut entries)?;
+            return Ok(TarIndex {
+                tar_path: tar.to_string(),
+                is_dir: true,
+                entries,
+            });
+        }
         let file = File::open(tar).context(TarSnafu {})?;
         let mut archive = Archive::new(BufReader::new(file));
         let mut entries = HashMap::new();
@@ -200,6 +241,7 @@ impl TarIndex {
         }
         Ok(TarIndex {
             tar_path: tar.to_string(),
+            is_dir: false,
             entries,
         })
     }
@@ -214,7 +256,12 @@ impl TarIndex {
     /// 同步阻塞 I/O；调用方负责在 spawn_blocking 中运行。
     pub fn open_reader(&self, filename: &str) -> Result<(Take<File>, u64)> {
         let &(offset, size) = self.entries.get(filename).ok_or(Error::NotFound {})?;
-        let mut file = File::open(&self.tar_path).context(TarSnafu {})?;
+        let path = if self.is_dir {
+            Path::new(&self.tar_path).join(filename)
+        } else {
+            Path::new(&self.tar_path).to_path_buf()
+        };
+        let mut file = File::open(path).context(TarSnafu {})?;
         file.seek(SeekFrom::Start(offset)).context(ReadSnafu {})?;
         Ok((file.take(size), size))
     }
@@ -276,48 +323,118 @@ pub fn get_os_release_from_layer<R: Read>(
 // 调用方无需为另一种拼写把整层再解压一遍。
 // `max_bytes`：目标文件超过上限直接报 `TooLarge`，在读之前拒绝，
 // 避免把超大文件整个缓冲进内存。
+/// The layer's tar stream, decompressed according to its media type.
+fn decode_layer<'a, R: Read + 'a>(reader: R, media_type: &str) -> Result<Box<dyn Read + 'a>> {
+    Ok(if media_type.contains("gzip") {
+        Box::new(GzipDecoder::new(reader))
+    } else if media_type.contains("zstd") {
+        Box::new(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
+    } else {
+        Box::new(reader)
+    })
+}
+
+/// One pass over a layer, handing each file in `targets` (spelled without
+/// `./`) to `on_file` with its full content. Files larger than `max_bytes`
+/// are skipped rather than buffered. Stops once every target was seen.
+pub fn read_files_from_layer<R: Read>(
+    reader: R,
+    media_type: &str,
+    targets: &HashSet<String>,
+    max_bytes: u64,
+    mut on_file: impl FnMut(&str, &[u8]),
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut archive = Archive::new(decode_layer(reader, media_type)?);
+    let mut seen = 0;
+    for entry in archive.entries().context(TarSnafu {})? {
+        let mut entry = entry.context(TarSnafu {})?;
+        let raw = entry
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .into_owned();
+        let path = raw.trim_start_matches("./");
+        if !targets.contains(path) {
+            continue;
+        }
+        seen += 1;
+        if entry.size() <= max_bytes {
+            let mut content = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut content).context(ReadSnafu {})?;
+            on_file(path, &content);
+        }
+        if seen >= targets.len() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Walk the (decompressed) layer to the entry `filename` — with or without
+/// a leading `./`, however the tar spells it — and hand it and its size to
+/// `on_match`. `NotFound` when the layer has no such entry.
+fn with_layer_entry<'a, R: Read + 'a, T>(
+    reader: R,
+    media_type: &str,
+    filename: &str,
+    on_match: impl FnOnce(&mut dyn Read, u64) -> Result<T>,
+) -> Result<T> {
+    let want = filename.trim_start_matches("./");
+    let mut archive = Archive::new(decode_layer(reader, media_type)?);
+    for entry in archive.entries().context(TarSnafu {})? {
+        let mut entry = entry.context(TarSnafu {})?;
+        let name = entry
+            .path()
+            .context(TarSnafu {})?
+            .to_string_lossy()
+            .to_string();
+        if name.trim_start_matches("./") == want {
+            let size = entry.size();
+            return on_match(&mut entry, size);
+        }
+    }
+    Err(Error::NotFound {})
+}
+
 pub fn get_file_content_from_layer<R: Read>(
     reader: R,
     media_type: &str,
     filename: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>> {
-    let want = filename.trim_start_matches("./");
-    macro_rules! find_file {
-        ($reader:expr) => {{
-            let mut archive = Archive::new($reader);
-            for entry in archive.entries().context(TarSnafu {})? {
-                let mut entry = entry.context(TarSnafu {})?;
-                let name = entry
-                    .path()
-                    .context(TarSnafu {})?
-                    .to_string_lossy()
-                    .to_string();
-                if name.trim_start_matches("./") == want {
-                    let size = entry.size();
-                    if size > max_bytes {
-                        return Err(Error::TooLarge {
-                            file: want.to_string(),
-                            size,
-                            limit: max_bytes,
-                        });
-                    }
-                    let mut content = Vec::with_capacity(size as usize);
-                    entry.read_to_end(&mut content).context(ReadSnafu {})?;
-                    return Ok(content);
-                }
-            }
-            Err(Error::NotFound {})
-        }};
-    }
+    with_layer_entry(reader, media_type, filename, |entry, size| {
+        if size > max_bytes {
+            return Err(Error::TooLarge {
+                file: filename.trim_start_matches("./").to_string(),
+                size,
+                limit: max_bytes,
+            });
+        }
+        let mut content = Vec::with_capacity(size as usize);
+        entry.read_to_end(&mut content).context(ReadSnafu {})?;
+        Ok(content)
+    })
+}
 
-    if media_type.contains("gzip") {
-        find_file!(GzipDecoder::new(reader))
-    } else if media_type.contains("zstd") {
-        find_file!(zstd::Decoder::new(reader).context(ZstdDecodeSnafu {})?)
-    } else {
-        find_file!(reader)
-    }
+/// The first `limit` bytes of a file in a layer, plus its full size —
+/// enough to preview it without reading a large file into memory.
+pub fn get_file_head_from_layer<R: Read>(
+    reader: R,
+    media_type: &str,
+    filename: &str,
+    limit: u64,
+) -> Result<(Vec<u8>, u64)> {
+    with_layer_entry(reader, media_type, filename, |entry, size| {
+        let mut head = Vec::with_capacity(size.min(limit) as usize);
+        entry
+            .take(limit)
+            .read_to_end(&mut head)
+            .context(ReadSnafu {})?;
+        Ok((head, size))
+    })
 }
 
 /// Hash a known set of files from a layer in a single tar pass.
@@ -555,6 +672,10 @@ mod tests {
         assert!(
             get_file_content_from_layer(Cursor::new(&data), "tar", "missing", u64::MAX).is_err()
         );
+        // A head read stops at the limit but still reports the full size.
+        let (head, size) =
+            get_file_head_from_layer(Cursor::new(&data), "tar", "etc/hostname", 3).unwrap();
+        assert_eq!((head.as_slice(), size), (&b"web"[..], 5));
         // 超过大小上限的文件在读之前就被拒绝
         assert!(matches!(
             get_file_content_from_layer(Cursor::new(&data), "tar", "etc/hostname", 3),

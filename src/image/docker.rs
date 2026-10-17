@@ -21,16 +21,19 @@ use std::{
     process::Stdio,
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OnceCell as TokioOnceCell;
 
-use super::image_ref::{repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE};
+use super::image_ref::{
+    repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+};
 use super::layer::{path_under_dir, TarIndex};
-use super::sensitive::{is_dev_artifact, is_pkg_cache, is_sensitive_file};
+use super::sensitive::{is_dev_artifact, is_pkg_cache, is_sensitive_file, MIN_PKG_CACHE_BYTES};
 use super::{
-    elf::{analyze_runtime_compat, RuntimeCompat},
+    elf::{analyze_runtime_compat, find_unstripped_binaries, RuntimeCompat, UnstrippedBinary},
     layer::ImageLayerInfo,
     oci_image::{
         detect_cross_layer_duplicates, DuplicateGroup, ImageFileSummary, ImageHistory,
@@ -392,6 +395,10 @@ pub struct DockerAnalyzeResult {
     // 退化为默认值（空 `issue`，不产生卡片）。
     #[serde(default)]
     pub runtime_compat: RuntimeCompat,
+    // 最终镜像中带调试信息或符号表、strip 后能明显变小的二进制（ELF
+    // 段表统计），按可节省大小降序。旧 cache 无此字段时为空 vec。
+    #[serde(default)]
+    pub unstripped_binaries: Vec<UnstrippedBinary>,
     // 仅在 registry 不可达、退回到上一次缓存的分析时设置：该分析生成的
     // 时间（RFC 3339）。镜像在那之后可能已经变化，各输出据此给出提示。
     // 永远不会写入磁盘缓存。
@@ -619,17 +626,18 @@ pub struct LocalManifest {
     pub layers: Vec<String>,
 }
 
-impl From<LocalManifest> for ImageManifest {
-    fn from(value: LocalManifest) -> Self {
-        let layers = value
-            .layers
-            .iter()
-            .map(|layer| ImageManifestLayer {
-                media_type: "application/vnd.docker.image.rootfs.diff.tar".to_string(),
-                digest: layer.to_string(),
-                ..Default::default()
-            })
-            .collect();
+/// A local image (`file://`, `docker://`, `podman://`) as either archive
+/// format describes it, normalized: the config and each layer are named by
+/// their entry path in the archive, and layers keep their media type (OCI
+/// layouts usually hold gzip or zstd layers; `docker save` plain tars).
+#[derive(Debug, Clone, Default)]
+struct LocalImage {
+    config: String,
+    layers: Vec<ImageManifestLayer>,
+}
+
+impl From<LocalImage> for ImageManifest {
+    fn from(value: LocalImage) -> Self {
         ImageManifest {
             media_type: MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST.to_string(),
             schema_version: 2,
@@ -637,9 +645,135 @@ impl From<LocalManifest> for ImageManifest {
                 digest: value.config,
                 ..Default::default()
             },
-            layers,
+            layers: value.layers,
         }
     }
+}
+
+/// Descriptor in an OCI `index.json`, image index or manifest. Lenient on
+/// purpose: tools differ in which optional fields they write.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OciDescriptor {
+    #[serde(default)]
+    media_type: String,
+    digest: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    platform: Option<OciPlatform>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct OciPlatform {
+    #[serde(default)]
+    architecture: String,
+    #[serde(default)]
+    os: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OciIndex {
+    #[serde(default)]
+    manifests: Vec<OciDescriptor>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OciManifest {
+    config: OciDescriptor,
+    #[serde(default)]
+    layers: Vec<OciDescriptor>,
+}
+
+/// `sha256:abc…` → `blobs/sha256/abc…`, where an OCI layout keeps it.
+fn oci_blob_path(digest: &str) -> String {
+    format!("blobs/{}", digest.replacen(':', "/", 1))
+}
+
+fn is_index_media_type(media_type: &str) -> bool {
+    media_type == MEDIA_TYPE_IMAGE_INDEX || media_type == MEDIA_TYPE_MANIFEST_LIST
+}
+
+/// The descriptor to analyze among `manifests`: the requested architecture
+/// (the host's when none is given) on linux, else any linux image. Entries
+/// with an `unknown` platform — buildkit's attestation manifests — are
+/// never an image. An entry without a platform is taken as a fallback,
+/// since single-image layouts often omit it.
+fn pick_oci_descriptor<'a>(
+    manifests: &'a [OciDescriptor],
+    arch: &str,
+) -> Option<&'a OciDescriptor> {
+    let wanted = if arch.is_empty() {
+        if std::env::consts::ARCH.contains("aarch64") || std::env::consts::ARCH.contains("arm") {
+            "arm64"
+        } else {
+            "amd64"
+        }
+    } else {
+        arch
+    };
+    let linux = |d: &&OciDescriptor| {
+        d.platform
+            .as_ref()
+            .is_some_and(|p| p.os == "linux" && p.architecture != "unknown")
+    };
+    manifests
+        .iter()
+        .filter(linux)
+        .find(|d| {
+            d.platform
+                .as_ref()
+                .is_some_and(|p| p.architecture == wanted)
+        })
+        .or_else(|| manifests.iter().find(linux))
+        .or_else(|| manifests.iter().find(|d| d.platform.is_none()))
+}
+
+/// Read an OCI image layout (from `index.json` down to one manifest) out of
+/// a local archive or directory.
+fn read_oci_layout(index: &TarIndex, arch: &str) -> Result<LocalImage> {
+    let read_json = |path: &str| -> Result<Vec<u8>> { index.read(path).context(LayerSnafu {}) };
+    let root: OciIndex =
+        serde_json::from_slice(&read_json("index.json")?).context(SerdeJsonSnafu {
+            category: "oci_index",
+        })?;
+    let mut descriptor = pick_oci_descriptor(&root.manifests, arch)
+        .cloned()
+        .ok_or_else(|| Error::Whatever {
+            message: "index.json lists no image manifest".to_string(),
+        })?;
+    // A multi-platform image: index.json points at an image index first.
+    if is_index_media_type(&descriptor.media_type) {
+        let nested: OciIndex = serde_json::from_slice(&read_json(&oci_blob_path(
+            &descriptor.digest,
+        ))?)
+        .context(SerdeJsonSnafu {
+            category: "oci_nested_index",
+        })?;
+        descriptor = pick_oci_descriptor(&nested.manifests, arch)
+            .cloned()
+            .ok_or_else(|| Error::Whatever {
+                message: format!("image index {} lists no image manifest", descriptor.digest),
+            })?;
+    }
+    let manifest: OciManifest = serde_json::from_slice(&read_json(&oci_blob_path(
+        &descriptor.digest,
+    ))?)
+    .context(SerdeJsonSnafu {
+        category: "oci_manifest",
+    })?;
+    Ok(LocalImage {
+        config: oci_blob_path(&manifest.config.digest),
+        layers: manifest
+            .layers
+            .into_iter()
+            .map(|layer| ImageManifestLayer {
+                media_type: layer.media_type,
+                digest: oci_blob_path(&layer.digest),
+                size: layer.size,
+            })
+            .collect(),
+    })
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -702,20 +836,25 @@ impl Error {
 
 // 将 `docker save` 的 stdout 直接重定向到临时文件（由内核完成写入），
 // 不再把整个镜像 tar 缓冲进进程内存。stderr 与旧行为一致丢弃。
-async fn save_local_docker_to_file(image: &str, path: &Path) -> Result<()> {
-    tl_info!(image = image, "saving image");
+/// `<cli> save <image>` into `path`. Both `docker save` and `podman save`
+/// (whose default format is `docker-archive`) write the docker-save layout
+/// the `file://` reader understands.
+async fn save_local_image_to_file(cli: &str, image: &str, path: &Path) -> Result<()> {
+    tl_info!(image = image, cli = cli, "saving image");
     let file = File::create(path).map_err(|err| Error::IO { source: err })?;
-    let status = tokio::process::Command::new("docker")
+    let status = tokio::process::Command::new(cli)
         .arg("save")
         .arg(image)
         .stdout(Stdio::from(file))
         .stderr(Stdio::null())
         .status()
         .await
-        .map_err(|err| Error::IO { source: err })?;
+        .map_err(|err| Error::Whatever {
+            message: format!("failed to run `{cli} save`: {err}"),
+        })?;
     if !status.success() {
         return Err(Error::Whatever {
-            message: "docker save fail".to_string(),
+            message: format!("{cli} save {image} failed ({status})"),
         });
     }
     tl_info!(image = image, "save image done");
@@ -779,7 +918,7 @@ fn scan_layers(
     let mut sensitive_files: Vec<SensitiveFileInfo> = vec![];
     // dedup key: for .git/ files the key is the git-root prefix, otherwise the full path
     let mut sensitive_seen: HashSet<String> = HashSet::new();
-    let mut has_pkg_cache = false;
+    let mut pkg_cache_bytes = 0u64;
     let mut has_dev_artifacts = false;
     for (layer_index, history) in config.history.iter().enumerate() {
         let is_new = if let Ok(value) = DateTime::parse_from_rfc3339(&history.created) {
@@ -794,6 +933,7 @@ fn scan_layers(
             ..Default::default()
         };
         let mut media_type = "".to_string();
+        let mut diff_id = "".to_string();
         let mut size = 0;
         let mut file_tree = vec![];
         // 只有非空的layer需要获取files
@@ -804,6 +944,12 @@ fn scan_layers(
                 size = value.size;
                 digest = value.digest.clone();
                 media_type = value.media_type.clone();
+                diff_id = config
+                    .rootfs
+                    .diff_ids
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
                 // single pass: detect modifications, update seen-files, collect big files
                 for file in &info.files {
                     // OCI opaque whiteout: wipe every previously-seen path
@@ -868,8 +1014,8 @@ fn scan_layers(
                         });
                     }
                     // Heuristic tag detection
-                    if !has_pkg_cache && is_pkg_cache(&file.path) {
-                        has_pkg_cache = true;
+                    if is_pkg_cache(&file.path) {
+                        pkg_cache_bytes += file.size;
                     }
                     if !has_dev_artifacts && is_dev_artifact(&file.path) {
                         has_dev_artifacts = true;
@@ -934,6 +1080,7 @@ fn scan_layers(
             media_type,
             unpack_size: info.unpack_size,
             size,
+            diff_id,
         });
         file_tree_list.push(file_tree);
     }
@@ -945,7 +1092,7 @@ fn scan_layers(
         sensitive_files,
         image_size,
         image_total_size,
-        has_pkg_cache,
+        has_pkg_cache: pkg_cache_bytes >= MIN_PKG_CACHE_BYTES,
         has_dev_artifacts,
     }
 }
@@ -1021,8 +1168,15 @@ impl DockerClient {
             .await?;
         Ok(index.clone())
     }
-    async fn get_local_manifest(&self, image: &str) -> Result<LocalManifest> {
+    /// The image in a local archive: `docker save` output (`manifest.json`,
+    /// also written by newer Docker next to an OCI layout) or an OCI image
+    /// layout (`index.json`) — a tar such as `skopeo copy oci-archive:`,
+    /// buildkit's `type=oci` export or `ctr image export`, or a directory.
+    async fn get_local_manifest(&self, image: &str, arch: &str) -> Result<LocalImage> {
         let index = self.local_tar_index(image).await?;
+        if index.size_of("manifest.json").is_none() && index.size_of("index.json").is_some() {
+            return read_oci_layout(&index, arch);
+        }
         // manifest.json 只有几 KB：seek + 一次小读，无需再进 blocking pool
         let data = index.read("manifest.json").context(LayerSnafu {})?;
 
@@ -1030,12 +1184,23 @@ impl DockerClient {
             serde_json::from_slice::<Vec<LocalManifest>>(&data).context(SerdeJsonSnafu {
                 category: "get_local_manifest",
             })?;
-        if manifest_list.is_empty() {
+        let Some(manifest) = manifest_list.into_iter().next() else {
             return Err(Error::Whatever {
                 message: "Local Manifest Not Found".to_string(),
             });
-        }
-        Ok(manifest_list[0].clone())
+        };
+        Ok(LocalImage {
+            config: manifest.config,
+            layers: manifest
+                .layers
+                .into_iter()
+                .map(|layer| ImageManifestLayer {
+                    media_type: "application/vnd.docker.image.rootfs.diff.tar".to_string(),
+                    digest: layer,
+                    ..Default::default()
+                })
+                .collect(),
+        })
     }
     async fn send_request(
         &self,
@@ -1251,8 +1416,8 @@ impl DockerClient {
         let tag = &params.tag;
         let token = &params.token;
         if self.is_local() {
-            let local_manifest = self.get_local_manifest(img).await?;
-            let mut image_manifest: ImageManifest = local_manifest.into();
+            let local_image = self.get_local_manifest(img, &params.arch).await?;
+            let mut image_manifest: ImageManifest = local_image.into();
             let index = self.local_tar_index(img).await?;
             for layer in image_manifest.layers.iter_mut() {
                 // 与旧 tar_size 语义一致：条目缺失按 0 处理
@@ -1335,9 +1500,9 @@ impl DockerClient {
     pub async fn get_image_config(&self, params: &DockerImageParams) -> Result<ImageConfig> {
         let img = &params.img;
         let data = if self.is_local() {
-            let local_manifest = self.get_local_manifest(img).await?;
+            let local_image = self.get_local_manifest(img, &params.arch).await?;
             let index = self.local_tar_index(img).await?;
-            index.read(&local_manifest.config).context(LayerSnafu {})?
+            index.read(&local_image.config).context(LayerSnafu {})?
         } else {
             let (manifest, _) = self.get_manifest(params).await?;
             self.get_blob(params, &manifest.config.digest).await?
@@ -1757,13 +1922,34 @@ impl DockerClient {
         let verify_dup = params.verify_dup;
         let config_for_probe = config.clone();
         let base_os_for_probe = base_os.clone();
-        let (layers, file_tree_list, duplicate_groups, runtime_compat) =
+        let (layers, file_tree_list, duplicate_groups, runtime_compat, unstripped_binaries) =
             tokio::task::spawn_blocking(move || {
-                let dup = if verify_dup {
-                    detect_cross_layer_duplicates(&layers, &file_tree_list)
-                } else {
-                    vec![]
-                };
+                // The duplicate and unstripped-binary scans each re-read
+                // layers and are independent, so they run side by side.
+                let (dup, unstripped) = thread::scope(|scope| {
+                    let strip = scope.spawn(|| {
+                        let started = Instant::now();
+                        let found = find_unstripped_binaries(&layers, &file_tree_list);
+                        tl_info!(
+                            found = found.len(),
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "unstripped binary scan done"
+                        );
+                        found
+                    });
+                    let started = Instant::now();
+                    let dup = if verify_dup {
+                        detect_cross_layer_duplicates(&layers, &file_tree_list)
+                    } else {
+                        vec![]
+                    };
+                    tl_info!(
+                        groups = dup.len(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "duplicate scan done"
+                    );
+                    (dup, strip.join().unwrap_or_default())
+                });
                 let rc = analyze_runtime_compat(
                     &config_for_probe,
                     &layers,
@@ -1771,7 +1957,7 @@ impl DockerClient {
                     &base_os_for_probe,
                 )
                 .unwrap_or_default();
-                (layers, file_tree_list, dup, rc)
+                (layers, file_tree_list, dup, rc, unstripped)
             })
             .await
             .map_err(|e| Error::Whatever {
@@ -1799,6 +1985,7 @@ impl DockerClient {
             recommendations: vec![],
             duplicate_groups,
             runtime_compat,
+            unstripped_binaries,
             stale_as_of: None,
         };
         // Pure derived layer — computed from the result that is already built.
@@ -1827,13 +2014,18 @@ pub async fn analyze_docker_image(
     verify_dup: bool,
     credentials: Option<super::registry_auth::RegistryCredentials>,
 ) -> Result<DockerAnalyzeResult> {
-    if image_info.registry == REGISTRY_LOCAL_DOCKER {
+    let save_cli = match image_info.registry.as_str() {
+        REGISTRY_LOCAL_DOCKER => Some("docker"),
+        REGISTRY_LOCAL_PODMAN => Some("podman"),
+        _ => None,
+    };
+    if let Some(cli) = save_cli {
         // 临时文件在 analyze 完成前保持存活（NamedTempFile drop 时自动删除）
         let tmpfile = tempfile::Builder::new()
             .tempfile()
             .map_err(|err| Error::IO { source: err })?;
         let filename = tmpfile.path().to_string_lossy().to_string();
-        save_local_docker_to_file(&image_info.name, tmpfile.path()).await?;
+        save_local_image_to_file(cli, &image_info.name, tmpfile.path()).await?;
 
         let c = DockerClient::new(REGISTRY_LOCAL_FILE);
         c.analyze(&mut DockerImageParams {

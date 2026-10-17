@@ -8,13 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Terminal mode** (default): TUI built with ratatui for interactive layer exploration
 - **Web mode**: HTTP server with React frontend for remote analysis
 
-The tool fetches image metadata from registries (Docker Hub, private registries with credentials) or local docker/tar files, decompresses layers, and provides detailed file-level visibility into what's consuming space.
+The tool fetches image metadata from registries (Docker Hub, private registries with credentials), a local docker/podman client, or saved images (`docker save` tar, OCI archive tar, OCI layout directory), decompresses layers, and provides detailed file-level visibility into what's consuming space.
 
 On top of the raw layer/file data, the analysis derives:
 - **Recommendations** (`src/recommend.rs`): size / necessity / security cards (pkg caches, dev artifacts, Dockerfile lint, secrets in ENV/labels, setuid files, …), localized via `src/i18n.rs`
 - **Sensitive-file detection** (`src/image/sensitive.rs` + user patterns from `~/.diving/sensitive-files`)
 - **Cross-layer duplicate detection** (blake3 content hashing; `--no-verify-dup` skips it)
-- **ELF runtime-compat probe** (`src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS
+- **ELF runtime-compat probe** (`src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS; also finds unstripped binaries (debug sections / symbol tables) in the final filesystem
+- **Image diff** (`src/diff.rs`, `diving diff <base> <target>`, `/api/diff`, MCP `diff_images`): layers aligned by `diff_id`, final-filesystem added / removed / resized files, per-directory deltas, new / resolved recommendations
 - **AI report** (`src/ai.rs`, enabled by `--ai-api-key` / `$OPENAI_API_KEY`): sends the Markdown analysis (plus the previous snapshot under `~/.diving/ai_history/` for regression comparison) to an OpenAI-compatible endpoint
 - **WeCom push** (`src/wecom.rs`, `--wecom-webhook`): sends the AI report or a concise summary to a WeCom group bot
 - **MCP endpoint** (`src/mcp.rs`, web mode `/mcp`): exposes the analysis as MCP tools to AI agents
@@ -80,8 +81,8 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 ### Data Flow: Image Analysis
 
 1. **Image Source Parsing** (`src/image/image_ref.rs`)
-   - Parse image references: `redis:alpine`, `docker://`, `file://`, registry URLs, `?arch=` query
-   - Determine source type: registry (default), docker client, or local tar file
+   - Parse image references: `redis:alpine`, `docker://`, `podman://`, `file://`, registry URLs, `?arch=` query (also on `file://`, for multi-platform OCI archives / layouts)
+   - Determine source type: registry (default), docker / podman client (`docker save` / `podman save`), or a local `docker save` tar / OCI archive / OCI layout directory (`manifest.json` first, else `index.json`)
 
 2. **Auth & Manifest Resolution** (`src/image/registry_auth.rs` + `src/image/docker.rs` + `src/image/oci_image.rs`)
    - Resolve credentials: CLI/env → `~/.docker/config.json` → docker credential helpers
@@ -112,27 +113,30 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 ### Module Structure
 
 - **`src/main.rs`**: Thin binary entry: mimalloc, rustls `ring` provider install, tokio runtime construction
-- **`src/lib.rs`**: `Args` (clap CLI), `run()` mode selection (terminal/web), CI gate output, cleanup cron; all modules live here so `cargo test --lib` works
+- **`src/lib.rs`**: `Args` (clap CLI; the `diff` subcommand, with the output/config/lang/credential flags `global` so they work on either side of it), `run()` mode selection (terminal/web/diff), CI gate output, cleanup cron; all modules live here so `cargo test --lib` works
 - **`src/image/`**: Core image analysis logic
   - `docker.rs`: Registry API client, blob download (streaming + digest verify + 401 token refresh), the `analyze` pipeline
   - `image_ref.rs`: Image reference parsing (`ImageInfo`)
   - `registry_auth.rs`: Credential resolution (CLI/env, docker config.json, credential helpers)
   - `layer.rs`: Tar extraction, streaming decompress, per-file blake3 hashing, whiteout parsing
-  - `oci_image.rs`: OCI spec types, file tree building, cross-layer duplicate detection
+  - `oci_image.rs`: OCI spec types, file tree building, `final_filesystem` (what a container sees, whiteout / opaque-dir aware), cross-layer duplicate detection
   - `sensitive.rs`: Path-based secret / cache / dev-artifact heuristics (plus `has_path_frag` segment matcher)
-  - `elf.rs`: Entrypoint ELF probe (goblin): libc family, min glibc vs. base OS
+  - `elf.rs`: Entrypoint ELF probe (goblin): libc family, min glibc vs. base OS; `find_unstripped_binaries` (section-header scan, runs concurrently with the duplicate pass)
 - **`src/recommend.rs`**: Rule engine deriving localized recommendation cards from the analysis result (pure function of `DockerAnalyzeResult`)
+- **`src/diff.rs`**: `diff_images(base, target) -> ImageDiff` (pure, like `recommend`) and `to_diff_markdown`; layers match by `ImageLayer::diff_id` (config `rootfs.diff_ids`) because a `docker save` tar names layers by path
 - **`src/ai.rs`**: OpenAI-compatible AI report + `~/.diving/ai_history/` snapshots for regression comparison
 - **`src/wecom.rs`**: WeCom group-bot markdown push
-- **`src/markdown.rs`**: Markdown rendering of the analysis result
-- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report; `read_file` on a symlink/hard link answers with the link target instead of empty content. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
+- **`src/markdown.rs`**: Markdown rendering of the analysis result; `to_summary_markdown` is the short PR-comment / job-summary form (`--summary`, `format=summary`)
+- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `diff_images` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report; `read_file` on a symlink/hard link answers with the link target instead of empty content. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
 - **`src/i18n.rs`**: Rust-side en/zh string catalog (`tr` / `fill`); web has its own catalog in `web/src/i18n/`
 - **`src/ui/`**: Terminal UI (ratatui-based)
   - `mod.rs`: Main app event loop, state management
   - `layers.rs`, `files.rs`, `layer_detail.rs`, `image_detail.rs`, `util.rs`: Widget definitions
 - **`src/controller.rs`: Web API endpoints**
-  - `/api/analyze`: Initiate image analysis (singleflight-deduplicated; `format=markdown`, `includeTree=false`, `noVerifyDup` variants)
+  - `/api/analyze`: Initiate image analysis (singleflight-deduplicated; `format=markdown` / `format=summary`, `includeTree=false`, `noVerifyDup` variants)
+  - `/api/diff`: Compare two images (`base`, `target`, `format=markdown`); both go through the same singleflight, one after the other so shared layers download once
   - `/api/file`: Download individual files from layers
+  - `/api/file-preview`: First bytes of a file for the web preview (text, or a hex dump for binaries)
   - `/api/latest-images`: Return recent analyses, the version, and `mcp: {enabled, tokenRequired}` for the web UI
   - Fallback handler serves static assets from embedded `dist/`
 - **`src/store/`**: `blob.rs` (atomic blob I/O, sha256 helpers, TTL cleanup), `analysis_cache.rs` (schema-versioned analysis-result JSON cache), `recent_cache.rs` (small TTL + LRU in-memory cache; time is passed in so expiry is testable)
@@ -150,8 +154,9 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **Source layout**:
   - `App.tsx`: state + layout wiring (search flow, layer filter, dark-mode hook)
   - `types.ts`: API/view-model interfaces
-  - `analysis.ts`: pure computation — summary derivation, file-tree flattening for the virtualized list
-  - `components.tsx`: memoized report cards + `VirtualFileTree` + `SearchBar` + `McpGuide` (header MCP button and setup dialog; shown when `/api/latest-images` reports `mcp.enabled`)
+  - `analysis.ts`: pure computation — summary derivation, file-tree flattening for the virtualized list, final-filesystem tree + squarified layout for the treemap
+  - `components.tsx`: memoized report cards + `VirtualFileTree` (with file preview) + `ImageTreemap` (two directory levels, colored by the top three layers) + `SearchBar` + `McpGuide` (header MCP button and setup dialog; shown when `/api/latest-images` reports `mcp.enabled`)
+  - `diff.tsx`: `?base=…&target=…` view (`/api/diff`) and the report's **Compare with…** button
   - `icons.tsx`: inline SVG icons
 - **Perf notes**: file-tree rows are `useMemo`-cached and filter changes go through `useDeferredValue`, so keyword typing stays responsive on huge trees; report cards are `memo`-ized
 - **Key Components**:
@@ -204,7 +209,10 @@ When `CI=true` env var is set:
   1. Minimum efficiency threshold (default 95%)
   2. Maximum wasted bytes (default 20MB)
   3. Maximum wasted percent (default 10%)
-- Optional fourth check, `fail_on_severity` (off by default): fail when any recommendation is at that severity or above; ids in `ignore_recommendations` (`Recommendation::id`, e.g. `runasroot`) are excluded from it
+- Optional `highest_image_size` (off by default): uncompressed image size cap
+- Optional `fail_on_severity` (off by default): fail when any recommendation is at that severity or above; ids in `ignore_recommendations` (`Recommendation::id`, e.g. `runasroot`) are excluded from it
+- `diving diff` has its own gate: `highest_size_increase` (off by default) caps target − base uncompressed growth
+- `--summary <file>` writes the short Markdown report with the verdict (PR comment / job summary); `action.yml` at the repo root is a composite GitHub Action that installs a release binary, runs the gate (or `diff` when its `base` input is set) and appends that summary to `$GITHUB_STEP_SUMMARY`
 - The gate is evaluated before anything is sent (`evaluate_gate` in `src/lib.rs`) and also applies after an AI report / WeCom push when `CI=true` (outside CI those paths end the run); in CI the WeCom message opens with the verdict
 - Exit codes: `1` = image failed the gate, `2` (`EXIT_ERROR`) = diving itself failed (analysis error, bad config, panic hook, failed push)
 - Can output JSON analysis to file with `-o/--output-file`
@@ -222,14 +230,16 @@ cleanup_interval_hours: 1                  # Cache sweep interval (web mode)
 lowest_efficiency: 0.95                    # CI efficiency threshold (0-1)
 highest_wasted_bytes: 20971520             # 20MB, CI wasted bytes limit
 highest_user_wasted_percent: 0.1           # 10%, CI wasted percent limit
+highest_image_size: 500MB                  # CI: uncompressed image size cap (unset = off)
+highest_size_increase: 50MB                # CI, `diving diff` only: max target − base growth (unset = report only)
 fail_on_severity: high                     # CI: also fail on recommendations at/above this severity (unset = off)
 ignore_recommendations: [runasroot]        # CI: recommendation ids that don't count toward fail_on_severity
 worker_threads: 4                          # Tokio runtime worker count
 layer_concurrency: 8                       # Concurrent layer download/decompress per image
 threads: 4                                 # Legacy single knob (fallback for the two above)
 # Web-mode hardening (all optional; defaults keep prior behavior):
-registry_allowlist:                        # Non-empty => /api/analyze only accepts these hosts
-  - index.docker.io                        #   (use `local-file` / `local-docker` to allow file:// and docker://)
+registry_allowlist:                        # Non-empty => /api/analyze, /api/diff and MCP only accept these hosts
+  - index.docker.io                        #   (`local-file` / `local-docker` / `local-podman` allow file:// / docker:// / podman://)
   - ghcr.io
 max_download_file_size: 104857600          # /api/file per-file cap (default 100MB)
 max_layer_cache_size: 10737418240          # Layer cache total cap; evicts oldest-accessed blobs

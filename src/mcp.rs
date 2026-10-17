@@ -15,10 +15,11 @@ use crate::config::{get_max_download_file_size, get_mcp_allowed_hosts};
 use crate::controller::{
     add_to_latest_image_cache, analyze_singleflight, ensure_registry_allowed, latest_images,
 };
+use crate::diff;
 use crate::i18n::Lang;
 use crate::image::{
-    get_file_content_from_layer, parse_image_info, DockerAnalyzeResult, FileTreeItem, Op,
-    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    get_file_content_from_layer, is_local_registry, parse_image_info, DockerAnalyzeResult,
+    FileTreeItem, Op,
 };
 use crate::markdown::to_markdown;
 use crate::store::{get_blob_path, is_safe_blob_id};
@@ -59,7 +60,8 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 const INSTRUCTIONS: &str = "diving analyzes Docker/OCI image layers: wasted space, \
 leaked secrets, bloat and runtime compatibility. Start with `analyze_image` for a \
 Markdown report, or `get_findings` for the same conclusions as JSON. Drill down with \
-`list_files` and `read_file`. Layer numbers are 1-based and match the report. The first \
+`list_files` and `read_file`; compare two images (say two releases) with `diff_images`. \
+Layer numbers are 1-based and match the report. The first \
 analysis of an image downloads every layer and can take minutes; repeat calls hit the \
 cache and return quickly.";
 
@@ -114,6 +116,20 @@ pub struct ReadFileParams {
     pub layer: usize,
     /// Path of the file inside the layer, e.g. `etc/nginx/nginx.conf`.
     pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DiffImagesParams {
+    /// The image to compare against, e.g. `app:1.0` or `app:main`.
+    pub base: String,
+    /// The image to check, e.g. `app:1.1` or `app:pr-42`.
+    pub target: String,
+    /// Platform architecture for both images: `amd64`, `arm64`, …
+    /// Defaults to the server's architecture.
+    pub arch: Option<String>,
+    /// Language of the recommendations text: `en` or `zh`. Defaults to the
+    /// server's locale.
+    pub lang: Option<String>,
 }
 
 /// One row of `list_files` output.
@@ -235,7 +251,7 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
         ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
         let registry = parse_image_info(&params.target.image).registry;
-        if registry == REGISTRY_LOCAL_FILE || registry == REGISTRY_LOCAL_DOCKER {
+        if is_local_registry(&registry) {
             return Err("read_file only supports registry images".to_string());
         }
         let lang = Lang::resolve(params.target.lang.as_deref());
@@ -278,6 +294,33 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
         .await
         .map_err(|e| e.to_string())??;
         Ok(render_file_text(&file_path, &content))
+    }
+
+    #[tool(
+        description = "Compare two container images, typically two releases or builds of \
+one app, and return a Markdown diff: size change, shared and new layers, the directories \
+where the size changed, the largest added / removed / resized files, and recommendations \
+that appeared or were resolved.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn diff_images(
+        &self,
+        Parameters(params): Parameters<DiffImagesParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let lang = Lang::resolve(params.lang.as_deref());
+        let side = |image: String| ImageParams {
+            image,
+            arch: params.arch.clone(),
+            lang: params.lang.clone(),
+        };
+        // One after the other, so the layers they share download once.
+        let base = run_analysis(&side(params.base.clone()), lang, &ctx).await?;
+        let target = run_analysis(&side(params.target.clone()), lang, &ctx).await?;
+        let diff = tokio::task::spawn_blocking(move || diff::diff_images(&base, &target))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(diff::to_diff_markdown(&diff, lang, None))
     }
 
     #[tool(
@@ -379,7 +422,7 @@ async fn run_analysis(
 fn with_arch(image: &str, arch: Option<&str>) -> String {
     let image = image.trim();
     let arch = arch.map(str::trim).unwrap_or_default();
-    let is_local = image.starts_with("file://") || image.starts_with("docker://");
+    let is_local = is_local_registry(&parse_image_info(image).registry);
     if arch.is_empty() || is_local || image.contains("?arch=") {
         return image.to_string();
     }
@@ -621,6 +664,7 @@ fn findings_json(result: &DockerAnalyzeResult) -> Value {
         "bigModifiedFiles": result.big_modified_file_list,
         "duplicateGroups": result.duplicate_groups,
         "runtimeCompat": result.runtime_compat,
+        "unstrippedBinaries": result.unstripped_binaries,
         "staleAsOf": result.stale_as_of,
         "layers": layers,
     });
@@ -726,6 +770,10 @@ mod tests {
         assert_eq!(
             with_arch("docker://app:dev", Some("arm64")),
             "docker://app:dev"
+        );
+        assert_eq!(
+            with_arch("podman://app:dev", Some("arm64")),
+            "podman://app:dev"
         );
     }
 

@@ -14,12 +14,13 @@
 
 ## 为什么选 diving？
 
-- ⚡ **快且独立** —— 单个静态二进制。可从 Docker Hub / 任意 V2 registry、本地 docker 客户端或 `.tar` 文件读取镜像。分层自动缓存，下载中断自动续传。
+- ⚡ **快且独立** —— 单个静态二进制。可从 Docker Hub / 任意 V2 registry、本地 docker / podman 客户端、`docker save` 的 tar 包或 OCI archive / layout 读取镜像。分层自动缓存，下载中断自动续传。
 - 🔍 **逐层文件浏览** —— 交互式 TUI 遍历每一层的文件系统，新增 / 修改 / 删除的文件以颜色区分。
-- 📉 **浪费与膨胀检测** —— 效率评分、浪费字节、跨层重复文件、超大层、包管理器缓存、开发/构建产物，并反推 Dockerfile 做反模式 lint。
+- 📉 **浪费与膨胀检测** —— 效率评分、浪费字节、跨层重复文件、超大层、包管理器缓存、开发/构建产物、带调试信息的二进制，并反推 Dockerfile 做反模式 lint。
 - 🛡️ **安全卫生检查** —— 标记泄漏的密钥文件（`.env`、SSH / 云厂商密钥、证书）、`ENV`/label/Dockerfile 中的硬编码凭证（仅报字段名，绝不回显值）、setuid 与全局可写文件，以及以 root 运行的容器。
 - 🤖 **AI 优化报告** —— 把完整分析交给任意 OpenAI 兼容模型，得到按优先级排序的修复清单，并支持版本间的劣化对比。
-- 🚦 **CI 卡口** —— 镜像效率 / 浪费字节低于阈值时让流水线失败。
+- 🔀 **镜像对比** —— 对比两个版本：哪里变大了、哪些层变了、哪些文件新增 / 删除 / 变大。
+- 🚦 **CI 卡口** —— 镜像效率 / 浪费字节不达标、超过体积上限，或比上个版本增长过多时让流水线失败。提供 GitHub Action，并把摘要写进 job summary。
 - 🌐 **终端 · Web · MCP · JSON / Markdown · 企微** —— 交互浏览、暴露 HTTP API 或供 AI agent 调用的 MCP 端点、导出报告，或推送到群聊。
 
 > **能力边界说明：** diving 聚焦于体积、结构与基础安全检查（密钥泄漏、文件权限、是否以 root 运行等）。它扫描文件**路径**与镜像元数据 —— **不做** CVE/漏洞扫描，也**不扫描文件内容**。漏洞覆盖请配合 Trivy / grype / docker scout 使用。
@@ -47,8 +48,6 @@ TUI 内快捷键：
 
 ## 分析任意镜像
 
-diving 支持三种数据源：
-
 ```bash
 # 来自 registry（默认）—— Docker Hub、quay.io、私有 registry…
 diving redis:alpine
@@ -57,11 +56,18 @@ diving quay.io/prometheus/node-exporter
 # 为多架构镜像指定架构
 diving redis:alpine?arch=arm64
 
-# 来自本地 docker 客户端
+# 来自本地 docker 或 podman 客户端（执行 `docker save` / `podman save`）
 diving docker://redis:alpine
+diving podman://localhost/myapp:dev
 
-# 来自导出的 tar 包
+# 来自导出的镜像：`docker save` 的 tar 包、OCI archive tar 包
+# （`podman save --format oci-archive`、buildx `--output type=oci`、skopeo `oci-archive:`）
+# 或 OCI layout 目录
 diving file:///tmp/redis.tar
+diving file:///tmp/myapp-oci.tar
+
+# 多平台的 OCI archive / layout：指定平台
+diving file:///tmp/myapp-layout?arch=arm64
 ```
 
 ## 导出报告
@@ -78,7 +84,37 @@ diving myimage:latest --output-file -
 
 # 包含基础镜像层
 diving myimage:latest --output-file - --no-skip-base
+
+# 简短的 Markdown 摘要 —— 关键数字、最大的文件、优化建议，以及
+# CI=true 时的卡口结论 —— 篇幅适合 PR 评论或 CI 的 job summary
+diving myimage:latest --summary summary.md
 ```
+
+## 镜像对比
+
+`diving diff <基准> <目标>` 会分析两个镜像并给出变化：体积变化、两者共同的层和不同的层、体积变化落在哪些目录、新增 / 删除 / 大小变化最大的文件，以及新出现或已解决的优化建议。
+
+```bash
+# Markdown 输出到控制台
+diving diff myapp:1.4 myapp:1.5
+
+# JSON（路径为 .md 时输出 Markdown）写入文件
+diving diff myapp:main myapp:pr-42 -o diff.json
+
+# 两边都可以是任意数据源
+diving diff myapp:latest docker://myapp:dev
+```
+
+层按内容（镜像 config 里的 `diff_ids`）对齐，所以本地构建的镜像也能和它所基于的已发布镜像对上。两个镜像依次分析，共同的层只下载一次。
+
+在 CI 中可以配置 `highest_size_increase`，限制目标镜像（解压后）最多比基准大多少；`CI=true` 时超出则以退出码 `1` 退出。不配置时 `diff` 只输出对比结果。
+
+```bash
+# .diving.yml: highest_size_increase: 50MB
+CI=true diving diff -c .diving.yml myapp:main myapp:pr-42 --summary diff.md
+```
+
+Web 界面同样支持对比：在报告页点 **对比…**，或直接访问 `/?base=myapp:1.4&target=myapp:1.5`。
 
 ## CI 卡口
 
@@ -99,7 +135,9 @@ CI=true diving --config .diving.yml myimage:latest
 | `lowest_efficiency` | `0.95` | 最低可接受的效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520`（20 MB） | 最大允许浪费字节数 |
 | `highest_user_wasted_percent` | `0.1` | 最大允许浪费比例（0–1） |
+| `highest_image_size` | —（关闭） | 镜像解压后大小上限（即 `docker images` 显示的 SIZE），如 `500MB` |
 | `fail_on_severity` | —（关闭） | 存在该严重度及以上的优化建议时同样判定失败：`high`、`medium`、`low` 或 `info` |
+| `highest_size_increase` | —（关闭） | 仅用于 [`diving diff`](#镜像对比)：目标镜像比基准镜像最多大多少，如 `50MB` |
 
 默认情况下，优化建议（泄漏的密钥文件、以 root 运行等）只打印，不影响退出码。设置 `fail_on_severity: high` 后，镜像里打包了私钥这类问题会让流水线失败。`medium` 及以下还会把启发式建议（Dockerfile lint、文档/locale 文件等）算进去，噪音会更多。值写错时 diving 会在启动时直接报错退出，而不是悄悄关掉这项检查。
 
@@ -112,6 +150,31 @@ CI=true diving --config .diving.yml myimage:latest
 | `2` | diving 自身失败：镜像拉取或分析失败、配置有误、AI 或企微调用失败等 |
 
 设置 `CI=true` 时，即使配置了 [AI 分析](#ai-分析) 或 [企微推送](#企微推送)，卡口同样生效：diving 先发送报告，再执行检查。
+
+`--summary <文件>` 会写出一份简短的 Markdown 报告，开头就是卡口结论和未通过的检查项 —— 可以发成 PR 评论，或追加到 job summary。
+
+### GitHub Action
+
+本仓库同时也是一个 GitHub Action：安装 diving 的 release 二进制、执行卡口，并把摘要追加到 job summary。
+
+```yaml
+- uses: vicanso/diving-rs@main
+  with:
+    image: ghcr.io/org/app:${{ github.sha }}
+    config: .diving.yml          # 卡口阈值（可选）
+```
+
+| 输入 | 默认值 | 说明 |
+|------|--------|------|
+| `image` | — | 要分析的镜像（支持所有[数据源](#分析任意镜像)） |
+| `base` | — | 改为将 `image` 与这个镜像对比（`diving diff`），如 main 分支构建的镜像；此时卡口为 `highest_size_increase` |
+| `config` | — | 含卡口阈值的配置文件 |
+| `output` | — | 同时把完整分析写到这里（`.json` 或 `.md`） |
+| `job-summary` | `true` | 把摘要追加到 job summary |
+| `version` | `latest` | 安装的 diving 版本，如 `v0.12.0` |
+| `args` | — | 额外的命令行参数，如 `--lang zh` |
+
+该步骤以 diving 的[退出码](#退出码)结束；输出 `summary-file` 是摘要文件的路径，可用来发 PR 评论。
 
 ### 接受已知问题
 
@@ -145,6 +208,7 @@ ignore_recommendations:
 | `doclocale` | 文档 / man / locale 数据 | 低 |
 | `logtemp` | 打进镜像的日志 / 临时文件 | 低 |
 | `toolchain` | 最终镜像中存在构建工具链 | 低 |
+| `unstripped` | 带调试信息或符号表的二进制（`strip` 后能变小） | 低（达到 10 MB 为中） |
 | `bigfiles` | 近期层中新增的大文件 | 提示 |
 | `netreclaim` | 净可回收空间估算 | 提示 |
 
@@ -233,6 +297,8 @@ docker run -d --restart=always \
 
 ![](./assets/diving-web.png)
 
+除了逐层浏览和各项发现，报告页还有最终文件系统的 Treemap（面积表示大小，颜色表示写入这些字节的层；点击目录可进入）、文本文件预览（二进制文件显示十六进制），以及 **对比…** 按钮，用来与另一个镜像[对比](#镜像对比)。
+
 容器以非 root 身份（UID `1000:1000`）运行；上方的 `chown` 让它能写入 layer 缓存（省略会导致启动失败）。镜像基于 `debian:trixie-slim`，另带 CA 证书包；不含 `tzdata`，时间一律按 UTC 显示。由于默认不含 `wget`/`curl`，未设置 in-image `HEALTHCHECK` —— 请改用编排层探针访问 `GET /ping`（Kubernetes `livenessProbe`、sidecar 等）。
 
 通过 `--listen` 修改监听地址：
@@ -250,7 +316,7 @@ diving --mode web --listen 0.0.0.0:8080
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `image` | string | 是 | 镜像引用（格式与命令行模式相同） |
-| `format` | string | 否 | 设为 `markdown` 时返回 Markdown 报告，默认返回 JSON |
+| `format` | string | 否 | `markdown` 返回 Markdown 报告，`summary` 返回简短摘要（同 `--summary`），默认返回 JSON |
 | `skipBase` | bool | 否 | 当 `format=markdown` 时，自动识别并隐藏基础镜像层（默认 `true`）；设为 `false` 则包含 |
 
 ```bash
@@ -265,6 +331,20 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 
 # Markdown 报告并包含基础镜像层（默认隐藏）
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
+```
+
+#### `GET /api/diff`
+
+对比两个镜像（见[镜像对比](#镜像对比)）。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `base` | string | 是 | 作为基准的镜像 |
+| `target` | string | 是 | 要检查的镜像 |
+| `format` | string | 否 | `markdown` 返回 Markdown，默认返回 JSON |
+
+```bash
+curl "http://127.0.0.1:7001/api/diff?base=myapp:1.4&target=myapp:1.5"
 ```
 
 ### MCP
@@ -283,6 +363,7 @@ Web 界面页头的 **MCP** 按钮会给出同样的接入说明，并按你当�
 | `get_findings` | JSON 格式的结论：效率分、浪费空间、优化建议、敏感文件、重复文件、运行时兼容性、各层概要 |
 | `list_files` | 分页的文件列表，可按层、目录、关键字、大小过滤 |
 | `read_file` | 读取某一层中的文本文件（最多 256 KiB，仅支持 registry 镜像） |
+| `diff_images` | 两个镜像的 Markdown 对比（同 `diving diff`） |
 | `latest_images` | 最近分析过的镜像 |
 
 层号从 1 开始，与报告中的编号一致。MCP 调用与 `/api/analyze` 共用分析缓存、并发请求去重和 `registry_allowlist`。首次分析大镜像可能需要几分钟；如果客户端带了 progress token，diving 会每 10 秒发一次进度通知。
@@ -343,9 +424,11 @@ Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以�
 | `lowest_efficiency` | `0.95` | CI 检查 —— 最低效率评分（0–1） |
 | `highest_wasted_bytes` | `20971520` | CI 检查 —— 最大浪费字节数（20 MB） |
 | `highest_user_wasted_percent` | `0.1` | CI 检查 —— 最大浪费比例（0–1） |
+| `highest_image_size` | — | CI 检查 —— 镜像解压后大小上限，如 `500MB`；不配置则不限制 |
+| `highest_size_increase` | — | `diving diff` 的 CI 检查 —— 目标镜像比基准镜像最多大多少，如 `50MB`；不配置则只输出对比 |
 | `fail_on_severity` | — | CI 检查 —— 存在该严重度及以上的优化建议时失败（`high` / `medium` / `low` / `info`）；不配置则建议不影响结果 |
 | `ignore_recommendations` | — | CI 检查 —— 不参与 `fail_on_severity` 判定的建议 id（见[接受已知问题](#接受已知问题)） |
-| `registry_allowlist` | — | Web 模式：非空时，`/api/analyze` 和 MCP 只接受这些 registry 的镜像（如 `index.docker.io`、`ghcr.io`）；要允许 `file://` / `docker://` 需加入 `local-file` / `local-docker` |
+| `registry_allowlist` | — | Web 模式：非空时，`/api/analyze`、`/api/diff` 和 MCP 只接受这些 registry 的镜像（如 `index.docker.io`、`ghcr.io`）；要允许 `file://` / `docker://` / `podman://` 需加入 `local-file` / `local-docker` / `local-podman` |
 | `max_download_file_size` | `104857600` | Web 模式：`/api/file` 单个文件的大小上限（100 MB） |
 | `analysis_memory_ttl` | `1m` | Web 模式：分析结果在内存中保留的时长。这段时间内对同一镜像的请求不再访问 registry，直接返回；代价是同一个 tag 被重新推送后，最多要等这么久才能看到新结果。设为 `0s` 关闭 |
 | `max_concurrent_analyses` | — | Web 模式：最多同时分析多少个不同的镜像，超出的请求排队等待。不配置则不限制 |

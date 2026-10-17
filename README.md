@@ -14,12 +14,13 @@ A single, fast Rust binary that pulls images straight from any registry and show
 
 ## Why diving?
 
-- ⚡ **Fast & standalone** — one static binary. Pulls layers directly from Docker Hub / any V2 registry, a local docker client, or a `.tar` file. Layers are cached and downloads resume automatically.
+- ⚡ **Fast & standalone** — one static binary. Pulls layers directly from Docker Hub / any V2 registry, a local docker / podman client, a `docker save` tar or an OCI archive / layout. Layers are cached and downloads resume automatically.
 - 🔍 **Layer-by-layer explorer** — an interactive TUI to walk the filesystem of every layer, with added / modified / removed files colorized.
-- 📉 **Waste & bloat detection** — efficiency score, wasted bytes, cross-layer duplicate files, oversized layers, package-manager caches, dev/build artifacts, and a reconstructed Dockerfile with anti-pattern linting.
+- 📉 **Waste & bloat detection** — efficiency score, wasted bytes, cross-layer duplicate files, oversized layers, package-manager caches, dev/build artifacts, binaries shipped with debug info, and a reconstructed Dockerfile with anti-pattern linting.
 - 🛡️ **Security hygiene checks** — flags leaked secret files (`.env`, SSH / cloud keys, certs), hardcoded credentials in `ENV`/labels/Dockerfile (key names only, never the value), setuid & world-writable files, and containers that run as root.
 - 🤖 **AI optimization report** — hand the full analysis to any OpenAI-compatible model and get a prioritized fix list, plus version-over-version regression detection.
-- 🚦 **CI gate** — fail the pipeline when an image drops below your efficiency / wasted-bytes thresholds.
+- 🔀 **Image diff** — compare two releases: what grew, which layers changed, which files were added, removed or resized.
+- 🚦 **CI gate** — fail the pipeline when an image drops below your efficiency / wasted-bytes thresholds, outgrows a size cap, or grows too much since the last release. Ships as a GitHub Action with a job-summary report.
 - 🌐 **Terminal · Web · MCP · JSON / Markdown · WeCom** — explore interactively, expose an HTTP API or an MCP endpoint for AI agents, export a report, or push results to a chat.
 
 > **Scope note:** diving focuses on size, structure, and basic security checks (leaked secret files, file permissions, runs-as-root, etc.). It scans file **paths** and image metadata — it does **not** do CVE/vulnerability scanning or file-content scanning. Pair it with Trivy/grype/docker scout for vulnerability coverage.
@@ -47,8 +48,6 @@ Inside the TUI:
 
 ## Analyze any image
 
-diving accepts three source types:
-
 ```bash
 # from a registry (default) — Docker Hub, quay.io, private registries…
 diving redis:alpine
@@ -57,11 +56,18 @@ diving quay.io/prometheus/node-exporter
 # pick an architecture for multi-arch images
 diving redis:alpine?arch=arm64
 
-# from the local docker client
+# from the local docker or podman client (runs `docker save` / `podman save`)
 diving docker://redis:alpine
+diving podman://localhost/myapp:dev
 
-# from a saved tar file
+# from a saved image: a `docker save` tar, an OCI archive tar
+# (`podman save --format oci-archive`, buildx `--output type=oci`, skopeo `oci-archive:`)
+# or an OCI layout directory
 diving file:///tmp/redis.tar
+diving file:///tmp/myapp-oci.tar
+
+# a multi-platform OCI archive / layout: pick the platform
+diving file:///tmp/myapp-layout?arch=arm64
 ```
 
 ## Export a report
@@ -78,7 +84,38 @@ diving myimage:latest --output-file -
 
 # include the base image layers
 diving myimage:latest --output-file - --no-skip-base
+
+# a short Markdown summary — headline numbers, the largest files, the
+# recommendations and, under CI=true, the gate verdict — sized for a
+# pull-request comment or a CI job summary
+diving myimage:latest --summary summary.md
 ```
+
+## Compare two images
+
+`diving diff <base> <target>` analyzes both images and shows what changed: the size change, the layers they share and the ones that differ, the directories where the size went, the largest added / removed / resized files, and the recommendations that appeared or were resolved.
+
+```bash
+# Markdown to stdout
+diving diff myapp:1.4 myapp:1.5
+
+# JSON (or Markdown, for a .md path) to a file
+diving diff myapp:main myapp:pr-42 -o diff.json
+
+# either side can be any source
+diving diff myapp:latest docker://myapp:dev
+```
+
+Layers are matched by content (the image config's `diff_ids`), so a local build lines up with the published image it was built from. The two images are analyzed one after the other, so the layers they share are downloaded once.
+
+In CI, set `highest_size_increase` to cap how much bigger (uncompressed) the target may be than the base; with `CI=true` diving exits `1` when it grew more. Without the option, `diff` only reports.
+
+```bash
+# .diving.yml: highest_size_increase: 50MB
+CI=true diving diff -c .diving.yml myapp:main myapp:pr-42 --summary diff.md
+```
+
+The web UI compares too: **Compare with…** on a report, or `/?base=myapp:1.4&target=myapp:1.5`.
 
 ## CI gate
 
@@ -99,7 +136,9 @@ CI=true diving --config .diving.yml myimage:latest
 | `lowest_efficiency` | `0.95` | Minimum acceptable efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` (20 MB) | Maximum wasted bytes |
 | `highest_user_wasted_percent` | `0.1` | Maximum wasted percentage (0–1) |
+| `highest_image_size` | — (off) | Maximum uncompressed image size (the SIZE `docker images` shows), e.g. `500MB` |
 | `fail_on_severity` | — (off) | Also fail when any recommendation is at this severity or above: `high`, `medium`, `low` or `info` |
+| `highest_size_increase` | — (off) | [`diving diff`](#compare-two-images) only: maximum growth of the target over the base, e.g. `50MB` |
 
 By default the recommendations (leaked secret files, runs-as-root, …) are only printed and do not affect the exit code. Set `fail_on_severity: high` to make findings such as a private key baked into the image fail the pipeline. `medium` and below also count heuristic suggestions (Dockerfile lint, docs/locale files, …), so expect more noise. A misspelled value stops diving at startup instead of silently disabling the check.
 
@@ -112,6 +151,31 @@ By default the recommendations (leaked secret files, runs-as-root, …) are only
 | `2` | diving itself failed: the image could not be pulled or analyzed, the config is invalid, an AI or WeCom call failed, … |
 
 With `CI=true` the gate also applies when an [AI report](#ai-analysis) or [WeCom push](#wecom-push) is configured: diving sends the report first, then runs the checks.
+
+`--summary <file>` writes a short Markdown report that opens with the verdict and the failed checks — post it as a pull-request comment or append it to the job summary.
+
+### GitHub Action
+
+The repository is also a GitHub Action: it installs the diving release binary, runs the gate and appends the summary to the job summary.
+
+```yaml
+- uses: vicanso/diving-rs@main
+  with:
+    image: ghcr.io/org/app:${{ github.sha }}
+    config: .diving.yml          # gate thresholds (optional)
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `image` | — | Image to analyze (any [source](#analyze-any-image)) |
+| `base` | — | Compare `image` against this one instead (`diving diff`), e.g. the main-branch build; the gate is then `highest_size_increase` |
+| `config` | — | Config file with the thresholds |
+| `output` | — | Also write the full analysis here (`.json` or `.md`) |
+| `job-summary` | `true` | Append the summary to the job summary |
+| `version` | `latest` | diving release to install, e.g. `v0.12.0` |
+| `args` | — | Extra arguments, e.g. `--lang zh` |
+
+The step fails with diving's [exit code](#exit-codes); the `summary-file` output is the summary's path, e.g. for a pull-request comment.
 
 ### Accepting known findings
 
@@ -145,6 +209,7 @@ ignore_recommendations:
 | `doclocale` | Documentation / man / locale data | low |
 | `logtemp` | Log / temp files baked into image | low |
 | `toolchain` | Build toolchain present in final image | low |
+| `unstripped` | Binaries with debug info or symbol tables (`strip` would shrink them) | low (medium from 10 MB) |
 | `bigfiles` | Large files added in recent layers | info |
 | `netreclaim` | Net reclaimable estimate | info |
 
@@ -233,6 +298,8 @@ Open `http://127.0.0.1:7001/` in the browser.
 
 ![](./assets/diving-web.png)
 
+Besides the layer explorer and the findings, a report has a treemap of the final filesystem (area is size, color is the layer that wrote the bytes; click a directory to drill in), a preview for text files (binary ones show a hex dump), and **Compare with…** to [diff](#compare-two-images) the image against another one.
+
 The container runs as a non-root UID (`1000:1000`); the `chown` above lets it write the layer cache (without it the container fails to start). The image is based on `debian:trixie-slim` plus a CA certificate bundle. It has no `tzdata`, so timestamps are in UTC, and it ships no `wget`/`curl`, so there is no in-image `HEALTHCHECK` — probe `GET /ping` from your orchestrator (Kubernetes `livenessProbe`, a sidecar, etc.) instead.
 
 Change the listen address with `--listen`:
@@ -250,7 +317,7 @@ Analyze a Docker image and return the result.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `image` | string | yes | Image reference (same formats as terminal mode) |
-| `format` | string | no | Set to `markdown` to return a Markdown report instead of JSON |
+| `format` | string | no | `markdown` for the Markdown report instead of JSON, `summary` for the short summary (as `--summary`) |
 | `skipBase` | bool | no | When `format=markdown`, auto-detect and hide base image layers (default `true`); set `false` to include them |
 
 ```bash
@@ -265,6 +332,20 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 
 # Markdown report including base layers (hidden by default)
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
+```
+
+#### `GET /api/diff`
+
+Compare two images (see [Compare two images](#compare-two-images)).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `base` | string | yes | The image compared against |
+| `target` | string | yes | The image checked |
+| `format` | string | no | `markdown` for the Markdown diff instead of JSON |
+
+```bash
+curl "http://127.0.0.1:7001/api/diff?base=myapp:1.4&target=myapp:1.5"
 ```
 
 ### MCP
@@ -283,6 +364,7 @@ The **MCP** button in the web UI's header shows the same setup, filled in with t
 | `get_findings` | Findings as JSON: efficiency, wasted bytes, recommendations, sensitive files, duplicates, runtime compatibility, per-layer summary |
 | `list_files` | A page of files, filterable by layer, directory, keyword and size |
 | `read_file` | One text file from a layer (up to 256 KiB; registry images only) |
+| `diff_images` | A Markdown diff of two images (same as `diving diff`) |
 | `latest_images` | Recently analyzed images |
 
 Layer numbers are 1-based and match the report. MCP calls share the analysis cache, request deduplication and `registry_allowlist` with `/api/analyze`. A cold analysis can take minutes; when the client sends a progress token, diving emits a progress notification every 10 seconds.
@@ -343,9 +425,11 @@ Config file: `~/.diving/config.yml`. Use `--config <file>` (`-c`) or `$DIVING_CO
 | `lowest_efficiency` | `0.95` | CI check — minimum efficiency score (0–1) |
 | `highest_wasted_bytes` | `20971520` | CI check — maximum wasted bytes (20 MB) |
 | `highest_user_wasted_percent` | `0.1` | CI check — maximum wasted percentage (0–1) |
+| `highest_image_size` | — | CI check — maximum uncompressed image size, e.g. `500MB`; unset = no limit |
+| `highest_size_increase` | — | CI check for `diving diff` — maximum growth of the target over the base, e.g. `50MB`; unset = report only |
 | `fail_on_severity` | — | CI check — fail when any recommendation is at this severity or above (`high` / `medium` / `low` / `info`); unset = recommendations never fail the run |
 | `ignore_recommendations` | — | CI check — recommendation ids excluded from `fail_on_severity` (see [Accepting known findings](#accepting-known-findings)) |
-| `registry_allowlist` | — | Web mode: when non-empty, `/api/analyze` and MCP only accept images from these registry hosts (e.g. `index.docker.io`, `ghcr.io`); add `local-file` / `local-docker` to allow `file://` / `docker://` |
+| `registry_allowlist` | — | Web mode: when non-empty, `/api/analyze`, `/api/diff` and MCP only accept images from these registry hosts (e.g. `index.docker.io`, `ghcr.io`); add `local-file` / `local-docker` / `local-podman` to allow `file://` / `docker://` / `podman://` |
 | `max_download_file_size` | `104857600` | Web mode: largest single file `/api/file` will serve (100 MB) |
 | `analysis_memory_ttl` | `1m` | Web mode: how long a finished analysis is kept in memory. Requests for the same image within this window are answered without contacting the registry; the price is that a re-pushed tag can take this long to show up. `0s` turns it off |
 | `max_concurrent_analyses` | — | Web mode: how many different images may be analyzed at once; further requests wait their turn. Unset = no limit |

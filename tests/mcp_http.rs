@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{build_fixture_tar, use_default_config};
+use common::{build_fixture_tar, build_fixture_v2_tar, use_default_config};
 use diving::controller;
 use diving::mcp::{new_router, McpStatus};
 use reqwest::{Client, RequestBuilder, StatusCode};
@@ -86,8 +86,12 @@ fn tool_text(result: &Value) -> &str {
 }
 
 fn fixture_image() -> (NamedTempFile, String) {
+    tar_image(build_fixture_tar())
+}
+
+fn tar_image(data: Vec<u8>) -> (NamedTempFile, String) {
     let tmp = tempfile::Builder::new().suffix(".tar").tempfile().unwrap();
-    std::fs::write(tmp.path(), build_fixture_tar()).unwrap();
+    std::fs::write(tmp.path(), data).unwrap();
     let image = format!("file://{}", tmp.path().display());
     (tmp, image)
 }
@@ -126,6 +130,7 @@ async fn mcp_tools_analyze_local_image() {
         names,
         [
             "analyze_image",
+            "diff_images",
             "get_findings",
             "latest_images",
             "list_files",
@@ -283,4 +288,47 @@ async fn api_responses_are_gzipped_on_request() {
     assert_eq!(resp.headers()["content-encoding"], "gzip");
     let body = resp.bytes().await.unwrap();
     assert_eq!(&body[..2], [0x1f, 0x8b], "gzip magic bytes");
+}
+
+/// The same comparison over MCP (Markdown) and `/api/diff` (JSON).
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_images_over_mcp_and_api() {
+    use_default_config();
+    let (_v1, base) = fixture_image();
+    let (_v2, target) = tar_image(build_fixture_v2_tar());
+    let client = client();
+
+    let url = spawn(None).await;
+    let md = call_tool(
+        &client,
+        &url,
+        1,
+        "diff_images",
+        json!({"base": base, "target": target, "lang": "en"}),
+    )
+    .await;
+    assert_ne!(md["isError"], true, "{md}");
+    assert!(tool_text(&md).contains("`data/extra.bin`"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, controller::new_router(McpStatus::default()))
+            .await
+            .unwrap();
+    });
+    let diff: Value = client
+        // temp-file paths need no escaping in a query string
+        .get(format!(
+            "http://{addr}/api/diff?base={base}&target={target}"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(diff["sharedLayers"], 1);
+    assert_eq!(diff["added"]["count"], 2);
+    assert_eq!(diff["changed"]["files"][0]["path"], "data/model.bin");
 }

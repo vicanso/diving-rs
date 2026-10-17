@@ -2,13 +2,14 @@ use crate::config::{
     get_analysis_memory_ttl, get_max_concurrent_analyses, get_max_download_file_size,
     get_registry_allowlist,
 };
+use crate::diff::{diff_images, to_diff_markdown};
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
 use crate::i18n;
 use crate::image::{
-    analyze_docker_image_or_last_known, get_file_content_from_layer, parse_image_info,
-    registry_host, resolve_explicit, DockerAnalyzeResult, ImageInfo, REGISTRY_LOCAL_DOCKER,
-    REGISTRY_LOCAL_FILE,
+    analyze_docker_image_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
+    is_local_registry, parse_image_info, registry_host, resolve_explicit, DockerAnalyzeResult,
+    ImageInfo,
 };
 use crate::markdown;
 use crate::mcp::McpStatus;
@@ -130,7 +131,9 @@ pub fn new_router(mcp: McpStatus) -> Router {
     Router::new()
         .route("/ping", get(ping))
         .route("/api/analyze", get(analyze))
+        .route("/api/diff", get(diff))
         .route("/api/file", get(get_file))
+        .route("/api/file-preview", get(preview_file))
         .route("/api/latest-images", get(get_latest_images))
         .fallback(get(serve))
         // gzip when the client accepts it. Only these routes: `/mcp` is
@@ -156,6 +159,18 @@ struct AnalyzeParams {
     include_tree: Option<bool>,
     /// When `true`, skip cross-layer duplicate detection (faster cold path).
     no_verify_dup: Option<bool>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DiffParams {
+    /// The image compared against (with `?arch=` like `image` above).
+    base: String,
+    /// The image checked.
+    target: String,
+    /// `markdown` for the Markdown diff instead of JSON.
+    format: Option<String>,
+    lang: Option<String>,
 }
 
 fn get_latest_image_cache() -> &'static std::sync::Mutex<LruCache<String, ()>> {
@@ -197,10 +212,7 @@ pub(crate) async fn analyze_singleflight(
 
     // Local sources are never remembered: a tar or a local docker image can
     // be rebuilt under the same name, and nothing cheap tells us it was.
-    let is_local = matches!(
-        image_info.registry.as_str(),
-        REGISTRY_LOCAL_FILE | REGISTRY_LOCAL_DOCKER
-    );
+    let is_local = is_local_registry(&image_info.registry);
     let recent = recent_analyses().filter(|_| !is_local);
     if let Some(recent) = recent {
         let hit = recent
@@ -265,9 +277,10 @@ pub(crate) fn ensure_registry_allowed(image_info: &ImageInfo) -> HTTPResult<()> 
     if allowlist.is_empty() {
         return Ok(());
     }
-    let id = match image_info.registry.as_str() {
-        REGISTRY_LOCAL_FILE | REGISTRY_LOCAL_DOCKER => image_info.registry.clone(),
-        registry => registry_host(registry).unwrap_or_default(),
+    let id = if is_local_registry(&image_info.registry) {
+        image_info.registry.clone()
+    } else {
+        registry_host(&image_info.registry).unwrap_or_default()
     }
     .to_lowercase();
     if allowlist.iter().any(|allowed| allowed == &id) {
@@ -289,6 +302,10 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
     let result = analyze_singleflight(params.image.clone(), lang, verify_dup).await?;
     add_to_latest_image_cache(&params.image);
 
+    if params.format.as_deref() == Some("summary") {
+        let md = markdown::to_summary_markdown(result.as_ref(), lang, None);
+        return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
+    }
     if params.format.as_deref() == Some("markdown") {
         // Base layers are hidden by default (matches the CLI); pass
         // `skipBase=false` to include them.
@@ -329,9 +346,33 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
         recommendations: src.recommendations.clone(),
         duplicate_groups: src.duplicate_groups.clone(),
         runtime_compat: src.runtime_compat.clone(),
+        unstripped_binaries: src.unstripped_binaries.clone(),
         stale_as_of: src.stale_as_of.clone(),
     };
     Ok(Json(slim.report(&summary)).into_response())
+}
+
+/// Compare two images. Both go through the same singleflight and caches as
+/// `/api/analyze`, one after the other so the layers they share download
+/// once.
+async fn diff(Query(params): Query<DiffParams>) -> HTTPResult<Response> {
+    let lang = i18n::Lang::resolve(params.lang.as_deref());
+    ensure_registry_allowed(&parse_image_info(&params.base))?;
+    ensure_registry_allowed(&parse_image_info(&params.target))?;
+    let base = analyze_singleflight(params.base.clone(), lang, true).await?;
+    add_to_latest_image_cache(&params.base);
+    let target = analyze_singleflight(params.target.clone(), lang, true).await?;
+    add_to_latest_image_cache(&params.target);
+    // Two final filesystems of tens of thousands of paths each: off the
+    // async workers.
+    let diff = tokio::task::spawn_blocking(move || diff_images(&base, &target))
+        .await
+        .map_err(|e| HTTPError::new_with_category(&e.to_string(), "diff"))?;
+    if params.format.as_deref() == Some("markdown") {
+        let md = to_diff_markdown(&diff, lang, None);
+        return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response());
+    }
+    Ok(Json(diff).into_response())
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +428,98 @@ impl IntoResponse for DownloadFile {
         )
             .into_response()
     }
+}
+
+/// Text shown by the web preview; longer files are cut, not refused.
+const PREVIEW_TEXT_BYTES: u64 = 256 * 1024;
+/// A NUL byte in this prefix marks the file as binary.
+const PREVIEW_SNIFF_BYTES: usize = 8 * 1024;
+/// How much of a binary file the hex view shows.
+const PREVIEW_HEX_BYTES: usize = 512;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilePreview {
+    size: u64,
+    binary: bool,
+    /// Whether `content` covers less than the whole file.
+    truncated: bool,
+    /// The text, or a hex dump of the first bytes of a binary file.
+    content: String,
+}
+
+/// Classic `hexdump -C` layout: offset, 16 bytes in two groups, ASCII.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (row, chunk) in bytes.chunks(16).enumerate() {
+        out.push_str(&format!("{:08x} ", row * 16));
+        for i in 0..16 {
+            if i == 8 {
+                out.push(' ');
+            }
+            match chunk.get(i) {
+                Some(b) => out.push_str(&format!(" {b:02x}")),
+                None => out.push_str("   "),
+            }
+        }
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("  |{ascii}|\n"));
+    }
+    out
+}
+
+fn build_preview(head: &[u8], size: u64) -> FilePreview {
+    let sniff = &head[..head.len().min(PREVIEW_SNIFF_BYTES)];
+    if sniff.contains(&0) {
+        let shown = &head[..head.len().min(PREVIEW_HEX_BYTES)];
+        return FilePreview {
+            size,
+            binary: true,
+            truncated: (shown.len() as u64) < size,
+            content: hex_dump(shown),
+        };
+    }
+    FilePreview {
+        size,
+        binary: false,
+        truncated: (head.len() as u64) < size,
+        content: String::from_utf8_lossy(head).into_owned(),
+    }
+}
+
+/// The first part of a file in a cached layer, for the web UI to show
+/// inline: text up to [`PREVIEW_TEXT_BYTES`], or a hex dump for a binary.
+/// Reads only that much, whatever the file's size.
+async fn preview_file(Query(params): Query<GetFileParams>) -> JSONResult<FilePreview> {
+    if !is_safe_blob_id(&params.digest) {
+        return Err(HTTPError::new_with_category("invalid layer digest", "blob"));
+    }
+    let path = get_blob_path(&params.digest);
+    let media_type = params.media_type;
+    let file_path = params.file;
+    let preview = tokio::task::spawn_blocking(move || -> HTTPResult<FilePreview> {
+        let file =
+            File::open(&path).map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))?;
+        let (head, size) = get_file_head_from_layer(
+            BufReader::new(file),
+            &media_type,
+            &file_path,
+            PREVIEW_TEXT_BYTES,
+        )?;
+        Ok(build_preview(&head, size))
+    })
+    .await
+    .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))??;
+    Ok(Json(preview))
 }
 
 async fn get_file(Query(params): Query<GetFileParams>) -> HTTPResult<DownloadFile> {
@@ -459,6 +592,24 @@ mod tests {
             task.await.unwrap();
         }
         peak.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn preview_shows_text_and_hex_dumps_binaries() {
+        let text = build_preview(b"user nginx;\nworker_processes auto;\n", 34);
+        assert!(!text.binary && !text.truncated);
+        assert!(text.content.starts_with("user nginx;"));
+
+        // A head shorter than the file is marked truncated.
+        assert!(build_preview(b"abc", 10).truncated);
+
+        let elf = build_preview(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0\x03\0>\0", 20);
+        assert!(elf.binary);
+        assert_eq!(
+            elf.content,
+            "00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|\n\
+             00000010  03 00 3e 00                                       |..>.|\n"
+        );
     }
 
     #[tokio::test]

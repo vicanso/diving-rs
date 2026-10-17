@@ -36,6 +36,7 @@ import {
   DuplicateGroupsCard,
   EXAMPLE_IMAGES,
   ImageSummaryCard,
+  ImageTreemap,
   LatestImagesList,
   McpGuide,
   RecommendationsCard,
@@ -44,6 +45,7 @@ import {
   VirtualFileTree,
   WastedSummaryCard,
 } from "./components";
+import { CompareButton, DiffRefs, DiffView } from "./diff";
 import { getGithubIcon, getLogoIcon } from "./icons";
 import {
   DuplicateGroup,
@@ -51,6 +53,7 @@ import {
   FileWastedSummary,
   ImageAnalyzeResult,
   ImageDescriptions,
+  ImageDiff,
   LatestImages,
   Layer,
   McpStatus,
@@ -104,11 +107,25 @@ interface ReportState {
 const readQuery = () => {
   const urlInfo = new URL(window.location.href);
   const image = urlInfo.searchParams.get("image") || "";
+  const base = urlInfo.searchParams.get("base") || "";
+  const target = urlInfo.searchParams.get("target") || "";
   let arch = urlInfo.searchParams.get("arch") || amd64Arch;
   if ([amd64Arch, arm64Arch].indexOf(arch) === -1) {
     arch = amd64Arch;
   }
-  return { image, arch };
+  return { image, arch, base, target };
+};
+
+const showRequestError = (err: unknown, fallback: string) => {
+  let msg = (err as Error)?.message as string;
+  const axiosErr = err as AxiosError;
+  if (axiosErr?.response?.data) {
+    const data = axiosErr.response.data as {
+      message: string;
+    };
+    msg = data.message || "";
+  }
+  message.error(msg || fallback, 10);
 };
 
 const App = () => {
@@ -125,6 +142,15 @@ const App = () => {
   const [latestImages, setLatestImages] = useState<string[]>([]);
   const [version, setVersion] = useState("");
   const [mcp, setMcp] = useState<McpStatus | null>(null);
+  const [diff, setDiff] = useState<{ refs: DiffRefs; data: ImageDiff } | null>(
+    null,
+  );
+
+  // Local sources carry their own platform.
+  const withArch = (image: string) =>
+    /^(file|docker|podman):\/\//.test(image) || !arch
+      ? image
+      : `${image}?arch=${arch}`;
 
   const onSearch = async (value: string) => {
     const image = value.trim();
@@ -138,10 +164,7 @@ const App = () => {
     setImageName(image);
     setLoading(true);
     try {
-      let reqUrl = `/analyze?image=${encodeURIComponent(image)}`;
-      if (!/^(file|docker):\/\//.test(image) && arch) {
-        reqUrl = `/analyze?image=${encodeURIComponent(`${image}?arch=${arch}`)}`;
-      }
+      const reqUrl = `/analyze?image=${encodeURIComponent(withArch(image))}`;
       const { data } = await request.get<ImageAnalyzeResult>(reqUrl, {
         timeout: 10 * 60 * 1000,
       });
@@ -163,16 +186,29 @@ const App = () => {
         staleAsOf: data.staleAsOf || "",
       });
       setCurrentLayer(0);
+      setDiff(null);
     } catch (err: unknown) {
-      let msg = (err as Error)?.message as string;
-      const axiosErr = err as AxiosError;
-      if (axiosErr?.response?.data) {
-        const data = axiosErr.response.data as {
-          message: string;
-        };
-        msg = data.message || "";
-      }
-      message.error(msg || "analyze image fail", 10);
+      showRequestError(err, "analyze image fail");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onCompare = async (base: string, target: string) => {
+    const search = `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${arch}`;
+    if (window.location.search !== search) {
+      window.history.pushState(null, "", `./${search}`);
+    }
+    setLoading(true);
+    try {
+      const { data } = await request.get<ImageDiff>(
+        `/diff?base=${encodeURIComponent(withArch(base))}&target=${encodeURIComponent(withArch(target))}`,
+        { timeout: 20 * 60 * 1000 },
+      );
+      setDiff({ refs: { base, target }, data });
+      setReport(null);
+    } catch (err: unknown) {
+      showRequestError(err, "compare images fail");
     } finally {
       setLoading(false);
     }
@@ -184,7 +220,9 @@ const App = () => {
       return;
     }
     mounted.current = true;
-    if (initial.image) {
+    if (initial.base && initial.target) {
+      onCompare(initial.base, initial.target);
+    } else if (initial.image) {
       onSearch(initial.image);
     }
     request
@@ -407,7 +445,7 @@ const App = () => {
     >
       <Layout className="appLayout">
         {githubIcon}
-        <Header className={report ? "header hasSearch" : "header"}>
+        <Header className={report || diff ? "header hasSearch" : "header"}>
           <div
             className={githubIcon ? "headerInner withCorner" : "headerInner"}
           >
@@ -421,12 +459,14 @@ const App = () => {
               <span>Diving</span>
               {version && <span className="version">v{version}</span>}
             </div>
-            {report && <div className="headerSearch">{searchBar}</div>}
+            {(report || diff) && (
+              <div className="headerSearch">{searchBar}</div>
+            )}
             {mcp?.enabled && <McpGuide status={mcp} />}
           </div>
         </Header>
 
-        {!report && (
+        {!report && !diff && (
           <div className="landing">
             <div className="landingInner">
               <div className="landingEyebrow">Docker · OCI · layers</div>
@@ -453,6 +493,10 @@ const App = () => {
         {report && (
           <Content>
             <div className="contentWrapper reportStack">
+              <div className="reportToolbar">
+                <code>{imageName}</code>
+                <CompareButton target={imageName} onCompare={onCompare} />
+              </div>
               {report.staleAsOf && (
                 <Alert
                   type="warning"
@@ -467,6 +511,10 @@ const App = () => {
                 desc={report.imageDescriptions}
                 tags={report.tags}
               />
+              <ImageTreemap
+                fileTreeList={report.fileTreeList}
+                layers={report.layers}
+              />
               {getLayerContentView()}
               <div className="findingsGrid">
                 <WastedSummaryCard wastedList={report.wastedList} />
@@ -476,6 +524,18 @@ const App = () => {
                 <RecommendationsCard recommendations={report.recommendations} />
                 <DockerfileCard dockerfile={report.dockerfile} />
               </div>
+            </div>
+          </Content>
+        )}
+        {diff && (
+          <Content>
+            <div className="contentWrapper reportStack">
+              <DiffView
+                diff={diff.data}
+                refs={diff.refs}
+                onSwap={() => onCompare(diff.refs.target, diff.refs.base)}
+                onOpen={onSearch}
+              />
             </div>
           </Content>
         )}

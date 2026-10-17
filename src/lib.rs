@@ -6,6 +6,7 @@
 pub mod ai;
 pub mod config;
 pub mod controller;
+pub mod diff;
 pub mod dist;
 pub mod error;
 pub mod i18n;
@@ -22,7 +23,7 @@ pub mod wecom;
 
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
 use bytesize::ByteSize;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use colored::*;
 use std::fs;
 use std::net::SocketAddr;
@@ -35,6 +36,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 use controller::new_router;
+use diff::{diff_images, to_diff_markdown, ImageDiff};
 use image::{
     analyze_docker_image, analyze_docker_image_or_last_known, parse_image_info,
     DockerAnalyzeResult, DockerAnalyzeSummary,
@@ -50,6 +52,8 @@ use task_local::{generate_trace_id, TRACE_ID};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Running mode of diving, terminal or web
     #[arg(short, long, default_value = "terminal")]
     mode: String,
@@ -58,17 +62,22 @@ pub struct Args {
     #[arg(short, long, default_value = "127.0.0.1:7001")]
     listen: String,
     /// Config file path (or $DIVING_CONFIG). Defaults to ~/.diving/config.yml
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<String>,
     /// The result output file
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     output_file: Option<String>,
+    /// Also write a short Markdown summary (headline numbers, largest files,
+    /// recommendations, and the CI verdict under CI=true), e.g. for a
+    /// pull-request comment. `-` prints it to stdout
+    #[arg(long, global = true)]
+    summary: Option<String>,
     /// Include base image layers in the analysis (auto-detected and hidden by default)
     #[arg(long)]
     no_skip_base: bool,
     /// Skip cross-layer duplicate file detection (and its analysis cache),
     /// trading the dup card for a faster cold analysis. Useful in CI.
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_verify_dup: bool,
     /// Skip reading the previous AI-history snapshot — the AI report does no
     /// regression comparison this run (the current analysis is still recorded
@@ -76,7 +85,7 @@ pub struct Args {
     #[arg(long)]
     no_ai_history: bool,
     /// Recommendation output language: en or zh (overrides $DIVING_LANG/$LANG)
-    #[arg(long)]
+    #[arg(long, global = true)]
     lang: Option<String>,
     /// OpenAI-compatible API key; enables AI analysis (or $OPENAI_API_KEY)
     #[arg(long)]
@@ -95,15 +104,15 @@ pub struct Args {
     wecom_webhook: Option<String>,
     /// Registry username for private pulls (or $REGISTRY_USERNAME). Also
     /// falls back to `~/.docker/config.json` / credential helpers when unset.
-    #[arg(long, short = 'u')]
+    #[arg(long, short = 'u', global = true)]
     username: Option<String>,
     /// Registry password / PAT (or $REGISTRY_PASSWORD). Prefer
     /// `--password-stdin` in scripts so the secret is not in argv.
-    #[arg(long)]
+    #[arg(long, global = true)]
     password: Option<String>,
     /// Read the registry password from stdin (one line). Mutually useful with
     /// `--username` / `$REGISTRY_USERNAME`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     password_stdin: bool,
     /// Web mode: bearer token required on the `/mcp` endpoint (or
     /// $DIVING_MCP_TOKEN). Without it `/mcp` only accepts loopback `Host`
@@ -113,6 +122,20 @@ pub struct Args {
     /// Web mode: don't serve the MCP endpoint at `/mcp`
     #[arg(long)]
     no_mcp: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Compare two images: size change, shared and new layers, added /
+    /// removed / resized files and recommendation changes. Prints Markdown;
+    /// `-o` writes JSON (or Markdown for `.md`). Under CI=true it fails when
+    /// the target grew more than `highest_size_increase` in config.yml
+    Diff {
+        /// The image to compare against, e.g. `app:1.0` or `app:main`
+        base: String,
+        /// The image to check, e.g. `app:1.1` or `app:pr-42`
+        target: String,
+    },
 }
 
 impl Args {
@@ -200,6 +223,7 @@ pub const EXIT_ERROR: i32 = 2;
 struct AnalyzeOptions {
     image: String,
     output_file: String,
+    summary_file: Option<String>,
     skip_base: bool,
     verify_dup: bool,
     no_ai_history: bool,
@@ -224,16 +248,51 @@ impl GateFailure {
     }
 }
 
-/// Run the CI checks: the three efficiency thresholds plus the optional
-/// `fail_on_severity` gate. Empty means the image passes.
+/// The CI gate's thresholds, as configured.
+struct GateLimits<'a> {
+    /// Minimum efficiency score, 0–100.
+    lowest_efficiency: u64,
+    highest_wasted_bytes: u64,
+    highest_user_wasted_percent: f64,
+    /// Uncompressed image size cap, the SIZE `docker images` shows.
+    highest_image_size: Option<u64>,
+    fail_on_severity: Option<&'a str>,
+    ignored: &'a [String],
+}
+
+impl GateLimits<'static> {
+    fn from_config() -> Self {
+        GateLimits {
+            lowest_efficiency: (config::get_lowest_efficiency() * 100.0) as u64,
+            highest_wasted_bytes: config::get_highest_wasted_bytes(),
+            highest_user_wasted_percent: config::get_highest_user_wasted_percent(),
+            highest_image_size: config::get_highest_image_size(),
+            fail_on_severity: config::get_fail_on_severity(),
+            ignored: config::get_ignore_recommendations(),
+        }
+    }
+}
+
+/// Run the CI checks as configured. Empty means the image passes.
 fn evaluate_gate(
     result: &DockerAnalyzeResult,
     summary: &DockerAnalyzeSummary,
     lang: i18n::Lang,
 ) -> Vec<GateFailure> {
-    let lowest_efficiency = (config::get_lowest_efficiency() * 100.0) as u64;
-    let highest_wasted_bytes = config::get_highest_wasted_bytes();
-    let highest_user_wasted_percent = config::get_highest_user_wasted_percent();
+    evaluate_gate_with(result, summary, lang, &GateLimits::from_config())
+}
+
+/// The efficiency thresholds, the optional image-size cap and the optional
+/// `fail_on_severity` gate, against explicit `limits`.
+fn evaluate_gate_with(
+    result: &DockerAnalyzeResult,
+    summary: &DockerAnalyzeSummary,
+    lang: i18n::Lang,
+    limits: &GateLimits,
+) -> Vec<GateFailure> {
+    let lowest_efficiency = limits.lowest_efficiency;
+    let highest_wasted_bytes = limits.highest_wasted_bytes;
+    let highest_user_wasted_percent = limits.highest_user_wasted_percent;
     let mut failures = vec![];
     if summary.score < lowest_efficiency {
         failures.push(GateFailure {
@@ -253,9 +312,19 @@ fn evaluate_gate(
             args: vec![format!("{highest_user_wasted_percent:.2}")],
         });
     }
-    if let Some(threshold) = config::get_fail_on_severity() {
-        let ignored = config::get_ignore_recommendations();
-        let count = gate_violations(&result.recommendations, threshold, ignored).len();
+    if let Some(limit) = limits.highest_image_size {
+        if result.total_size > limit {
+            failures.push(GateFailure {
+                key: "cli.check.size",
+                args: vec![
+                    ByteSize(result.total_size).to_string(),
+                    ByteSize(limit).to_string(),
+                ],
+            });
+        }
+    }
+    if let Some(threshold) = limits.fail_on_severity {
+        let count = gate_violations(&result.recommendations, threshold, limits.ignored).len();
         if count > 0 {
             failures.push(GateFailure {
                 key: "cli.check.severity",
@@ -289,6 +358,7 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
     let AnalyzeOptions {
         image,
         output_file,
+        summary_file,
         skip_base,
         verify_dup,
         no_ai_history,
@@ -297,27 +367,8 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
         wecom_cfg,
         credentials,
     } = opts;
-    // 命令行模式下清除过期数据
-    clear_blob_files().await.map_err(|item| item.to_string())?;
-    // Analysis-cache sweep is best-effort — never fail the CLI on cleanup.
-    if let Err(err) = clear_analysis_files().await {
-        tracing::warn!(err = err.to_string(), "clear analysis cache fail");
-    }
-    // 容量上限淘汰同样 best-effort（未配置 max_layer_cache_size 时为 no-op）。
-    if let Err(err) = enforce_layer_cache_limit().await {
-        tracing::warn!(err = err.to_string(), "enforce cache size limit fail");
-    }
-    let image_info = parse_image_info(&image);
-    eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[&image]));
-    // A CI gate has to judge the image as it is now, so there an
-    // unavailable registry stays an error. Interactive runs fall back to the
-    // last cached analysis of the reference, flagged as possibly stale.
-    let result = if is_ci() {
-        analyze_docker_image(image_info, lang, false, verify_dup, credentials).await
-    } else {
-        analyze_docker_image_or_last_known(image_info, lang, false, verify_dup, credentials).await
-    }
-    .map_err(|item| item.to_string())?;
+    sweep_caches().await?;
+    let result = analyze_for_cli(&image, lang, verify_dup, credentials).await?;
     // The gate is decided before anything is sent, so in CI the WeCom push
     // can carry the verdict instead of leaving readers to guess.
     let summary = result.summary();
@@ -351,10 +402,11 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
     }
     // Outside CI the AI report / WeCom push is the whole run. In CI the gate
     // below still applies: sending a report must not switch the checks off.
-    if reported && !is_ci() {
+    let wants_output = !output_file.is_empty() || summary_file.is_some();
+    if reported && !is_ci() && !wants_output {
         return Ok(true);
     }
-    if is_ci() || !output_file.is_empty() {
+    if is_ci() || wants_output {
         println!("{}", i18n::tr(lang, "cli.result").bold().green());
         println!(
             "{}",
@@ -425,6 +477,14 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
                 fs::write(output_file, content).map_err(|err| err.to_string())?;
             }
         }
+        if let Some(target) = &summary_file {
+            let md = markdown::to_summary_markdown(&result, lang, verdict.as_deref());
+            if target == "-" {
+                print!("{md}");
+            } else {
+                fs::write(target, md).map_err(|err| err.to_string())?;
+            }
+        }
         // CI gate always applies when CI=true — including runs that also
         // write `-o/--output-file`. Previously a non-empty output path
         // swallowed threshold failures (exit 0), which broke pipelines that
@@ -436,6 +496,140 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
         ui::run_app(result, lang).map_err(|item| item.to_string())?;
     }
     Ok(true)
+}
+
+// 命令行模式下清除过期数据
+async fn sweep_caches() -> Result<(), String> {
+    clear_blob_files().await.map_err(|item| item.to_string())?;
+    // Analysis-cache sweep is best-effort — never fail the CLI on cleanup.
+    if let Err(err) = clear_analysis_files().await {
+        tracing::warn!(err = err.to_string(), "clear analysis cache fail");
+    }
+    // 容量上限淘汰同样 best-effort（未配置 max_layer_cache_size 时为 no-op）。
+    if let Err(err) = enforce_layer_cache_limit().await {
+        tracing::warn!(err = err.to_string(), "enforce cache size limit fail");
+    }
+    Ok(())
+}
+
+async fn analyze_for_cli(
+    image: &str,
+    lang: i18n::Lang,
+    verify_dup: bool,
+    credentials: Option<image::RegistryCredentials>,
+) -> Result<DockerAnalyzeResult, String> {
+    let image_info = parse_image_info(image);
+    eprintln!("{}", i18n::fill(i18n::tr(lang, "cli.analyzing"), &[image]));
+    // A CI gate has to judge the image as it is now, so there an
+    // unavailable registry stays an error. Interactive runs fall back to the
+    // last cached analysis of the reference, flagged as possibly stale.
+    if is_ci() {
+        analyze_docker_image(image_info, lang, false, verify_dup, credentials).await
+    } else {
+        analyze_docker_image_or_last_known(image_info, lang, false, verify_dup, credentials).await
+    }
+    .map_err(|item| item.to_string())
+}
+
+// `diving diff` 的入参集合。
+struct DiffOptions {
+    base: String,
+    target: String,
+    output_file: String,
+    summary_file: Option<String>,
+    verify_dup: bool,
+    lang: i18n::Lang,
+    credentials: Option<image::RegistryCredentials>,
+}
+
+/// The diff's CI check: how much larger the target may be than the base.
+fn evaluate_diff_gate(diff: &ImageDiff, highest_size_increase: Option<u64>) -> Vec<GateFailure> {
+    match highest_size_increase {
+        Some(limit) if diff.size_delta > limit as i64 => vec![GateFailure {
+            key: "cli.check.growth",
+            args: vec![
+                ByteSize(diff.size_delta.unsigned_abs()).to_string(),
+                ByteSize(limit).to_string(),
+            ],
+        }],
+        _ => vec![],
+    }
+}
+
+// 对比两个镜像。返回值含义同 `analyze`。
+async fn diff(opts: DiffOptions) -> Result<bool, String> {
+    let DiffOptions {
+        base,
+        target,
+        output_file,
+        summary_file,
+        verify_dup,
+        lang,
+        credentials,
+    } = opts;
+    sweep_caches().await?;
+    // One after the other: the layers the two images share are downloaded
+    // once, by the first analysis, and are cache hits for the second.
+    let base = analyze_for_cli(&base, lang, verify_dup, credentials.clone()).await?;
+    let target = analyze_for_cli(&target, lang, verify_dup, credentials).await?;
+    let diff = diff_images(&base, &target);
+    let failures = evaluate_diff_gate(&diff, config::get_highest_size_increase());
+    let verdict = is_ci().then(|| gate_verdict_md(&failures, lang));
+    let md = to_diff_markdown(&diff, lang, verdict.as_deref());
+
+    if output_file.is_empty() || output_file == "-" {
+        print!("{md}");
+    } else {
+        println!("{}", i18n::tr(lang, "cli.result").bold().green());
+        println!(
+            "{}",
+            i18n::fill(
+                i18n::tr(lang, "cli.diff.size"),
+                &[
+                    &ByteSize(diff.base.total_size).to_string(),
+                    &ByteSize(diff.target.total_size).to_string(),
+                    &format!(
+                        "{}{}",
+                        if diff.size_delta < 0 { "-" } else { "+" },
+                        ByteSize(diff.size_delta.unsigned_abs())
+                    ),
+                ]
+            )
+        );
+        let content = if output_file.ends_with(".md") || output_file.ends_with(".markdown") {
+            md.clone()
+        } else {
+            serde_json::to_string(&diff).map_err(|err| err.to_string())?
+        };
+        fs::write(output_file, content).map_err(|err| err.to_string())?;
+    }
+    if let Some(target) = &summary_file {
+        if target == "-" {
+            print!("{md}");
+        } else {
+            fs::write(target, &md).map_err(|err| err.to_string())?;
+        }
+    }
+    let fail = i18n::tr(lang, "cli.fail").red().to_string();
+    for failure in &failures {
+        println!("{}", failure.render(lang, &fail));
+    }
+    Ok(!(is_ci() && !failures.is_empty()))
+}
+
+/// Exit for a finished CLI run: `Ok(false)` means the gate failed.
+fn exit_on(outcome: Result<bool, String>, lang: i18n::Lang) {
+    match outcome {
+        Ok(true) => {}
+        Ok(false) => {
+            error!("{}", i18n::tr(lang, "cli.cifail"));
+            std::process::exit(EXIT_GATE_FAILED)
+        }
+        Err(err) => {
+            error!(err, "analyze image fail");
+            std::process::exit(EXIT_ERROR)
+        }
+    }
 }
 
 // 将分析结果（AI 报告或精简摘要）推送到企微机器人
@@ -529,12 +723,29 @@ pub async fn run(args: Args) {
             args.password.as_deref(),
             args.password_stdin,
         );
-        if let Some(value) = args.image {
+        if let Some(Command::Diff { base, target }) = args.command {
+            TRACE_ID
+                .scope(generate_trace_id(), async {
+                    let outcome = diff(DiffOptions {
+                        base,
+                        target,
+                        output_file: args.output_file.unwrap_or_default(),
+                        summary_file: args.summary,
+                        verify_dup,
+                        lang,
+                        credentials,
+                    })
+                    .await;
+                    exit_on(outcome, lang);
+                })
+                .await;
+        } else if let Some(value) = args.image {
             TRACE_ID
                 .scope(generate_trace_id(), async {
                     let outcome = analyze(AnalyzeOptions {
                         image: value,
                         output_file: args.output_file.unwrap_or_default(),
+                        summary_file: args.summary,
                         skip_base,
                         verify_dup,
                         no_ai_history: args.no_ai_history,
@@ -544,17 +755,7 @@ pub async fn run(args: Args) {
                         credentials,
                     })
                     .await;
-                    match outcome {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            error!("{}", i18n::tr(lang, "cli.cifail"));
-                            std::process::exit(EXIT_GATE_FAILED)
-                        }
-                        Err(err) => {
-                            error!(err, "analyze image fail");
-                            std::process::exit(EXIT_ERROR)
-                        }
-                    }
+                    exit_on(outcome, lang);
                 })
                 .await;
         } else {
@@ -663,6 +864,89 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use i18n::Lang;
+
+    fn limits() -> GateLimits<'static> {
+        GateLimits {
+            lowest_efficiency: 95,
+            highest_wasted_bytes: 20 * 1024 * 1024,
+            highest_user_wasted_percent: 0.1,
+            highest_image_size: None,
+            fail_on_severity: None,
+            ignored: &[],
+        }
+    }
+
+    fn failed_keys(result: &DockerAnalyzeResult, limits: &GateLimits) -> Vec<&'static str> {
+        let summary = result.summary();
+        evaluate_gate_with(result, &summary, Lang::En, limits)
+            .iter()
+            .map(|f| f.key)
+            .collect()
+    }
+
+    #[test]
+    fn diff_gate_fails_only_on_growth_past_the_limit() {
+        let grew = |size_delta| ImageDiff {
+            size_delta,
+            ..Default::default()
+        };
+        let mib = 1024 * 1024;
+        assert!(evaluate_diff_gate(&grew(30 * mib), None).is_empty());
+        assert!(evaluate_diff_gate(&grew(-30 * mib), Some(0)).is_empty());
+        assert!(evaluate_diff_gate(&grew(20 * mib), Some(20 * mib as u64)).is_empty());
+        let failures = evaluate_diff_gate(&grew(30 * mib), Some(20 * mib as u64));
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].render(Lang::En, "FAIL"),
+            "FAIL: image growth check, 30.0 MiB larger uncompressed, highest: 20.0 MiB"
+        );
+    }
+
+    #[test]
+    fn diff_subcommand_takes_the_shared_flags_anywhere() {
+        let args =
+            Args::try_parse_from(["diving", "diff", "app:1", "app:2", "-o", "d.json"]).unwrap();
+        assert!(matches!(
+            &args.command,
+            Some(Command::Diff { base, target }) if base == "app:1" && target == "app:2"
+        ));
+        assert_eq!(args.output_file.as_deref(), Some("d.json"));
+        let args =
+            Args::try_parse_from(["diving", "--lang", "zh", "diff", "a", "b", "-c", "x.yml"])
+                .unwrap();
+        assert_eq!(args.lang.as_deref(), Some("zh"));
+        assert_eq!(args.config_file(), Some("x.yml"));
+        // A plain image reference still means "analyze this image".
+        let args = Args::try_parse_from(["diving", "redis:alpine", "-o", "-"]).unwrap();
+        assert!(args.command.is_none());
+        assert_eq!(args.image.as_deref(), Some("redis:alpine"));
+    }
+
+    #[test]
+    fn image_size_cap_compares_the_uncompressed_size() {
+        let result = DockerAnalyzeResult {
+            size: 200 * 1024 * 1024,
+            total_size: 600 * 1024 * 1024,
+            ..Default::default()
+        };
+        // Off unless configured.
+        assert!(failed_keys(&result, &limits()).is_empty());
+        let cap = |mib: u64| GateLimits {
+            highest_image_size: Some(mib * 1024 * 1024),
+            ..limits()
+        };
+        // 600 MiB uncompressed fails a 500 MiB cap even though only 200 MiB
+        // is pulled over the wire.
+        assert_eq!(failed_keys(&result, &cap(500)), ["cli.check.size"]);
+        assert!(failed_keys(&result, &cap(600)).is_empty());
+
+        let summary = result.summary();
+        let failure = &evaluate_gate_with(&result, &summary, Lang::En, &cap(500))[0];
+        assert_eq!(
+            failure.render(Lang::En, "FAIL"),
+            "FAIL: image size check, 600.0 MiB uncompressed, highest: 500.0 MiB"
+        );
+    }
 
     #[test]
     fn wecom_summary_flags_a_stale_result_first() {

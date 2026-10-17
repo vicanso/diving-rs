@@ -19,6 +19,16 @@
   --ok-soft: rgba(5, 150, 105, 0.12);
   --info: #0284c7;
   --info-soft: rgba(2, 132, 199, 0.12);
+  /* treemap layer colors (validated vs. the card surface; all pairs) */
+  --treemap-1: #2a78d6;
+  --treemap-2: #eb6834;
+  --treemap-3: #1baf7a;
+  --treemap-other: #c3c2b7;
+  --treemap-ink: #0b0b0b;
+  --treemap-ink-other: #0b0b0b;
+  /* diff: a diverging pair (grew / shrank) around a neutral axis */
+  --diverge-up: #eb6834;
+  --diverge-down: #2a78d6;
   --shadow: 0 1px 2px rgba(15, 28, 36, 0.04), 0 8px 24px rgba(15, 28, 36, 0.06);
   --shadow-lg:
     0 4px 12px rgba(15, 28, 36, 0.06), 0 20px 48px rgba(15, 28, 36, 0.08);
@@ -51,6 +61,14 @@ html.dark {
   --ok-soft: rgba(52, 211, 153, 0.12);
   --info: #38bdf8;
   --info-soft: rgba(56, 189, 248, 0.12);
+  --treemap-1: #3987e5;
+  --treemap-2: #d95926;
+  --treemap-3: #199e70;
+  --treemap-other: #4a4a46;
+  --treemap-ink: #0b0b0b;
+  --treemap-ink-other: #ffffff;
+  --diverge-up: #d95926;
+  --diverge-down: #3987e5;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 48px rgba(0, 0, 0, 0.45);
   color-scheme: dark;

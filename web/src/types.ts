@@ -37,6 +37,8 @@ export interface RuntimeCompat {
 }
 
 export interface Recommendation {
+  /** Stable rule id (`runasroot`, `pkgcache`, …). */
+  id: string;
   category: string;
   severity: string;
   title: string;
@@ -127,6 +129,15 @@ export interface ImageDescriptions {
   runUser: string;
 }
 
+export interface FilePreview {
+  size: number;
+  binary: boolean;
+  /** Whether `content` covers less than the whole file. */
+  truncated: boolean;
+  /** The text, or a hex dump of the first bytes of a binary file. */
+  content: string;
+}
+
 export interface McpStatus {
   enabled: boolean;
   tokenRequired: boolean;
@@ -136,4 +147,61 @@ export interface LatestImages {
   images: string[];
   version: string;
   mcp?: McpStatus;
+}
+
+/** `/api/diff`: one side's headline numbers. */
+export interface DiffSide {
+  name: string;
+  arch: string;
+  size: number;
+  totalSize: number;
+  layerCount: number;
+  efficiencyScore: number;
+  wastedSize: number;
+  fileCount: number;
+  staleAsOf?: string;
+}
+
+export interface DiffLayer {
+  /** 1-based, as numbered in that image's own report. */
+  layer: number;
+  digest: string;
+  cmd: string;
+  size: number;
+  unpackSize: number;
+}
+
+export interface FileChange {
+  path: string;
+  baseSize: number;
+  targetSize: number;
+  layer: number;
+}
+
+export interface ChangeSet {
+  count: number;
+  bytes: number;
+  files: FileChange[];
+}
+
+export interface DirChange {
+  path: string;
+  baseSize: number;
+  targetSize: number;
+}
+
+export interface ImageDiff {
+  base: DiffSide;
+  target: DiffSide;
+  sizeDelta: number;
+  sharedLayers: number;
+  sharedSize: number;
+  baseLayers: DiffLayer[];
+  targetLayers: DiffLayer[];
+  added: ChangeSet;
+  removed: ChangeSet;
+  changed: ChangeSet;
+  dirs: DirChange[];
+  newRecommendations: Recommendation[];
+  resolvedRecommendations: Recommendation[];
 }

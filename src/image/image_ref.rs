@@ -2,15 +2,26 @@
 //!
 //! Accepts the same forms as the CLI: `name:tag`, `user/name:tag`,
 //! `registry:port/user/name:tag`, nested namespaces (`ghcr.io/a/b/c:tag`),
-//! `file://` / `docker://` protocols, and `?arch=` query params.
+//! `file://` / `docker://` / `podman://` protocols, and `?arch=` query params.
 
 /// Default Docker Hub registry (v2 API base).
 pub const REGISTRY_DOCKER_HUB: &str = "https://index.docker.io/v2";
 pub const REGISTRY_LOCAL_FILE: &str = "local-file";
 pub const REGISTRY_LOCAL_DOCKER: &str = "local-docker";
+pub const REGISTRY_LOCAL_PODMAN: &str = "local-podman";
 
 static FILE_PROTOCOL: &str = "file://";
 static LOCAL_DOCKER_PROTOCOL: &str = "docker://";
+static LOCAL_PODMAN_PROTOCOL: &str = "podman://";
+
+/// Whether `registry` is one of the local-source markers (`file://`,
+/// `docker://`, `podman://`) rather than a registry URL.
+pub fn is_local_registry(registry: &str) -> bool {
+    matches!(
+        registry,
+        REGISTRY_LOCAL_FILE | REGISTRY_LOCAL_DOCKER | REGISTRY_LOCAL_PODMAN
+    )
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ImageInfo {
@@ -61,19 +72,30 @@ pub fn repository_path(user: &str, name: &str) -> String {
 
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
-    if value.starts_with(FILE_PROTOCOL) {
+    if let Some(path) = value.strip_prefix(FILE_PROTOCOL) {
+        // `?arch=` picks a platform out of a multi-arch OCI archive.
+        let (path, arch) = match path.rsplit_once("?arch=") {
+            Some((path, arch)) => (path, arch),
+            None => (path, ""),
+        };
         return ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
-            name: value.replace(FILE_PROTOCOL, ""),
+            name: path.to_string(),
+            arch: arch.to_string(),
             ..Default::default()
         };
     }
-    if value.starts_with(LOCAL_DOCKER_PROTOCOL) {
-        return ImageInfo {
-            registry: REGISTRY_LOCAL_DOCKER.to_string(),
-            name: value.replace(LOCAL_DOCKER_PROTOCOL, ""),
-            ..Default::default()
-        };
+    for (protocol, registry) in [
+        (LOCAL_DOCKER_PROTOCOL, REGISTRY_LOCAL_DOCKER),
+        (LOCAL_PODMAN_PROTOCOL, REGISTRY_LOCAL_PODMAN),
+    ] {
+        if let Some(name) = value.strip_prefix(protocol) {
+            return ImageInfo {
+                registry: registry.to_string(),
+                name: name.to_string(),
+                ..Default::default()
+            };
+        }
     }
     let mut arch = "".to_string();
     if let Some(index) = value.find('?') {
@@ -214,6 +236,22 @@ mod tests {
 
     #[test]
     fn test_parse_image_info_docker_protocol() {
+        let info = parse_image_info("file:///tmp/app-oci.tar?arch=arm64");
+        assert_eq!(info.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(
+            (info.name.as_str(), info.arch.as_str()),
+            ("/tmp/app-oci.tar", "arm64")
+        );
+        let info = parse_image_info("file:///tmp/app.tar");
+        assert_eq!(
+            (info.name.as_str(), info.arch.as_str()),
+            ("/tmp/app.tar", "")
+        );
+        let info = parse_image_info("podman://localhost/app:dev");
+        assert_eq!(info.registry, REGISTRY_LOCAL_PODMAN);
+        assert_eq!(info.name, "localhost/app:dev");
+        assert!(is_local_registry(&info.registry));
+        assert!(!is_local_registry(REGISTRY_DOCKER_HUB));
         let info = parse_image_info("docker://redis:alpine");
         assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
         assert_eq!(info.name, "redis:alpine");

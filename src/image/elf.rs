@@ -23,14 +23,160 @@
 //! best-effort static table covering mainstream distros, not an
 //! exhaustive registry.
 
+use goblin::container::Ctx;
+use goblin::elf::section_header::{SectionHeader, SHT_NOBITS};
+use goblin::elf::Elf;
+use goblin::strtab::Strtab;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
+use crate::config::get_layer_concurrency;
 use crate::store::get_blob_path;
 
-use super::layer::get_file_content_from_layer;
+use super::layer::{get_file_content_from_layer, read_files_from_layer};
+use super::oci_image::{final_filesystem, FinalFile};
 use super::{FileTreeItem, ImageConfig, ImageLayer, Op};
+
+/// Executables and shared objects this large or larger are checked for
+/// leftover debug info and symbol tables.
+const MIN_STRIP_CANDIDATE_BYTES: u64 = 1024 * 1024;
+/// At most this many, largest first: each one is read in full.
+const MAX_STRIP_CANDIDATES: usize = 40;
+/// Larger files are not read into memory for the check.
+const MAX_STRIP_CANDIDATE_BYTES: u64 = 512 * 1024 * 1024;
+/// A binary is reported only when stripping it would save this much.
+const MIN_STRIP_SAVINGS: u64 = 256 * 1024;
+
+/// A binary in the final image that `strip` would make smaller.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnstrippedBinary {
+    pub layer_index: usize,
+    pub path: String,
+    pub size: u64,
+    /// `.debug_*` / `.zdebug_*` sections: what `strip --strip-debug` drops.
+    pub debug_bytes: u64,
+    /// `.symtab` + `.strtab`: what a full `strip` drops on top of that.
+    pub symbol_bytes: u64,
+}
+
+impl UnstrippedBinary {
+    pub fn savings(&self) -> u64 {
+        self.debug_bytes + self.symbol_bytes
+    }
+}
+
+fn is_executable(mode: &str) -> bool {
+    let c: Vec<char> = mode.chars().collect();
+    c.len() >= 10 && [3, 6, 9].iter().any(|&i| matches!(c[i], 'x' | 's' | 't'))
+}
+
+fn is_shared_object(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.ends_with(".so") || name.contains(".so.")
+}
+
+/// Bytes of debug sections and of the symbol table in an ELF file, read
+/// from the section headers alone (the symbol table itself is not parsed).
+/// `None` for anything that is not ELF.
+fn strip_savings(bytes: &[u8]) -> Option<(u64, u64)> {
+    let header = Elf::parse_header(bytes).ok()?;
+    let ctx = Ctx {
+        container: header.container().ok()?,
+        le: header.endianness().ok()?,
+    };
+    let sections =
+        SectionHeader::parse(bytes, header.e_shoff as usize, header.e_shnum as usize, ctx).ok()?;
+    let names = sections.get(header.e_shstrndx as usize)?;
+    let names = Strtab::parse(bytes, names.sh_offset as usize, names.sh_size as usize, 0).ok()?;
+    let mut debug = 0;
+    let mut symbols = 0;
+    for section in sections.iter().filter(|s| s.sh_type != SHT_NOBITS) {
+        let name = names.get_at(section.sh_name).unwrap_or_default();
+        if name.starts_with(".debug_") || name.starts_with(".zdebug_") {
+            debug += section.sh_size;
+        } else if name == ".symtab" || name == ".strtab" {
+            symbols += section.sh_size;
+        }
+    }
+    Some((debug, symbols))
+}
+
+/// ELF executables and shared objects in the final image that still carry
+/// debug info or a symbol table worth stripping, largest saving first.
+/// Reads each candidate's layer once, layers side by side. Layers whose
+/// blob is not cached (local `file://` sources) are skipped.
+pub fn find_unstripped_binaries(
+    layers: &[ImageLayer],
+    file_tree_list: &[Vec<FileTreeItem>],
+) -> Vec<UnstrippedBinary> {
+    let mut candidates: Vec<(String, FinalFile)> = final_filesystem(file_tree_list)
+        .into_iter()
+        .filter(|(path, file)| {
+            (MIN_STRIP_CANDIDATE_BYTES..=MAX_STRIP_CANDIDATE_BYTES).contains(&file.size)
+                && file.link.is_empty()
+                && file.mode.starts_with('-')
+                && (is_executable(&file.mode) || is_shared_object(path))
+        })
+        .collect();
+    candidates.sort_by_key(|(_, file)| Reverse(file.size));
+    candidates.truncate(MAX_STRIP_CANDIDATES);
+
+    let mut by_layer: HashMap<usize, HashSet<String>> = HashMap::new();
+    for (path, file) in &candidates {
+        by_layer.entry(file.layer).or_default().insert(path.clone());
+    }
+    let jobs: Vec<(usize, HashSet<String>)> = by_layer.into_iter().collect();
+    let found = Mutex::new(Vec::new());
+    let next_job = AtomicUsize::new(0);
+    let scan_jobs = || {
+        while let Some((layer_index, paths)) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
+            let Some(layer) = layers.get(*layer_index) else {
+                continue;
+            };
+            let Ok(file) = File::open(get_blob_path(&layer.digest)) else {
+                continue;
+            };
+            let _ = read_files_from_layer(
+                BufReader::new(file),
+                &layer.media_type,
+                paths,
+                MAX_STRIP_CANDIDATE_BYTES,
+                |path, bytes| {
+                    let Some((debug_bytes, symbol_bytes)) = strip_savings(bytes) else {
+                        return;
+                    };
+                    if debug_bytes + symbol_bytes >= MIN_STRIP_SAVINGS {
+                        if let Ok(mut found) = found.lock() {
+                            found.push(UnstrippedBinary {
+                                layer_index: *layer_index,
+                                path: path.to_string(),
+                                size: bytes.len() as u64,
+                                debug_bytes,
+                                symbol_bytes,
+                            });
+                        }
+                    }
+                },
+            );
+        }
+    };
+    let workers = get_layer_concurrency(jobs.len()).min(jobs.len());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(scan_jobs);
+        }
+    });
+    let mut found = found.into_inner().unwrap_or_default();
+    found.sort_by_key(|b| (Reverse(b.savings()), b.path.clone()));
+    found
+}
 
 /// Outcome of analyzing the image entrypoint for runtime-libc compatibility.
 /// Serialized as part of `DockerAnalyzeResult`. Every field is "best
@@ -659,6 +805,92 @@ fn classify_issue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal little-endian ELF64 file with the given sections
+    /// (name, sh_type, size) plus a trailing `.shstrtab`.
+    fn tiny_elf(sections: &[(&str, u32, u64)]) -> Vec<u8> {
+        const SHT_STRTAB: u32 = 3;
+        let mut names = vec![0u8];
+        let mut name_offsets = Vec::new();
+        for (name, _, _) in sections.iter().chain([(".shstrtab", SHT_STRTAB, 0)].iter()) {
+            name_offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let mut body = vec![0u8; 64];
+        // (name, type, offset, size) for the null section, ours, .shstrtab
+        let mut headers = vec![(0u32, 0u32, 0u64, 0u64)];
+        for (i, (_, ty, size)) in sections.iter().enumerate() {
+            let offset = body.len() as u64;
+            if *ty != SHT_NOBITS {
+                body.resize(body.len() + *size as usize, 0xaa);
+            }
+            headers.push((name_offsets[i], *ty, offset, *size));
+        }
+        let strtab_offset = body.len() as u64;
+        body.extend_from_slice(&names);
+        headers.push((
+            *name_offsets.last().unwrap(),
+            SHT_STRTAB,
+            strtab_offset,
+            names.len() as u64,
+        ));
+        let shoff = body.len() as u64;
+        for (name, ty, offset, size) in &headers {
+            let mut sh = Vec::with_capacity(64);
+            sh.extend_from_slice(&name.to_le_bytes());
+            sh.extend_from_slice(&ty.to_le_bytes());
+            sh.extend_from_slice(&[0; 16]); // flags, addr
+            sh.extend_from_slice(&offset.to_le_bytes());
+            sh.extend_from_slice(&size.to_le_bytes());
+            sh.extend_from_slice(&[0; 24]); // link, info, addralign, entsize
+            body.extend_from_slice(&sh);
+        }
+        let header = &mut body[..64];
+        header[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+        header[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        header[18..20].copy_from_slice(&62u16.to_le_bytes()); // x86-64
+        header[20..24].copy_from_slice(&1u32.to_le_bytes());
+        header[40..48].copy_from_slice(&shoff.to_le_bytes());
+        header[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        header[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        header[60..62].copy_from_slice(&(headers.len() as u16).to_le_bytes());
+        header[62..64].copy_from_slice(&((headers.len() - 1) as u16).to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn strip_savings_counts_debug_and_symbol_sections() {
+        const PROGBITS: u32 = 1;
+        const SYMTAB: u32 = 2;
+        const STRTAB: u32 = 3;
+        let elf = tiny_elf(&[
+            (".text", PROGBITS, 100),
+            (".debug_info", PROGBITS, 3000),
+            (".zdebug_line", PROGBITS, 1000),
+            (".symtab", SYMTAB, 500),
+            (".strtab", STRTAB, 200),
+            // NOBITS takes no room in the file, whatever its size says.
+            (".debug_fake_bss", SHT_NOBITS, 9999),
+        ]);
+        assert_eq!(strip_savings(&elf), Some((4000, 700)));
+        // Already stripped: only the section names remain.
+        assert_eq!(
+            strip_savings(&tiny_elf(&[(".text", PROGBITS, 100)])),
+            Some((0, 0))
+        );
+        assert_eq!(strip_savings(b"#!/bin/sh\necho hi\n"), None);
+    }
+
+    #[test]
+    fn strip_candidates_are_executables_and_shared_objects() {
+        assert!(is_executable("-rwxr-xr-x"));
+        assert!(is_executable("-rw-r--r-x"));
+        assert!(!is_executable("-rw-r--r--"));
+        assert!(is_shared_object("usr/lib/libfoo.so"));
+        assert!(is_shared_object("usr/lib/libfoo.so.1.2.3"));
+        assert!(!is_shared_object("usr/share/doc/sonar.txt"));
+    }
 
     #[test]
     fn parses_basic_glibc_versions() {
