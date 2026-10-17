@@ -19,7 +19,7 @@ use crate::diff;
 use crate::i18n::Lang;
 use crate::image::{
     get_file_content_from_layer, is_local_registry, parse_image_info, DockerAnalyzeResult,
-    FileTreeItem, Op,
+    FileTreeItem, Op, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_PODMAN,
 };
 use crate::markdown::to_markdown;
 use crate::store::{get_blob_path, is_safe_blob_id};
@@ -70,8 +70,8 @@ pub struct ImageParams {
     /// Image reference, e.g. `redis:alpine`, `ghcr.io/org/app:1.2`,
     /// `registry.example.com:5000/team/app@sha256:…`.
     pub image: String,
-    /// Platform architecture for multi-arch images: `amd64`, `arm64`, …
-    /// Defaults to the server's architecture.
+    /// Platform architecture for multi-platform images (registry or an OCI
+    /// archive): `amd64`, `arm64`, … Defaults to the server's architecture.
     pub arch: Option<String>,
     /// Language of the recommendations text: `en` or `zh`. Defaults to the
     /// server's locale.
@@ -417,13 +417,15 @@ async fn run_analysis(
 }
 
 /// Fold the tool's `arch` argument into the `?arch=` query the image parser
-/// understands — same shape the web frontend sends. Local sources carry
-/// their own platform, and an explicit `?arch=` in `image` wins.
+/// understands — same rule as the web frontend. A registry image or an OCI
+/// archive / layout (`file://`) may hold several platforms; `docker://` /
+/// `podman://` name one local image. An explicit `?arch=` in `image` wins.
 fn with_arch(image: &str, arch: Option<&str>) -> String {
     let image = image.trim();
     let arch = arch.map(str::trim).unwrap_or_default();
-    let is_local = is_local_registry(&parse_image_info(image).registry);
-    if arch.is_empty() || is_local || image.contains("?arch=") {
+    let registry = parse_image_info(image).registry;
+    let one_image = registry == REGISTRY_LOCAL_DOCKER || registry == REGISTRY_LOCAL_PODMAN;
+    if arch.is_empty() || one_image || image.contains("?arch=") {
         return image.to_string();
     }
     format!("{image}?arch={arch}")
@@ -763,9 +765,14 @@ mod tests {
             with_arch("redis:alpine?arch=amd64", Some("arm64")),
             "redis:alpine?arch=amd64"
         );
+        // An OCI archive may hold several platforms.
         assert_eq!(
             with_arch("file:///tmp/a.tar", Some("arm64")),
-            "file:///tmp/a.tar"
+            "file:///tmp/a.tar?arch=arm64"
+        );
+        assert_eq!(
+            with_arch("file:///tmp/a.tar?arch=amd64", Some("arm64")),
+            "file:///tmp/a.tar?arch=amd64"
         );
         assert_eq!(
             with_arch("docker://app:dev", Some("arm64")),

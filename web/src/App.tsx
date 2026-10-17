@@ -116,6 +116,30 @@ const readQuery = () => {
   return { image, arch, base, target };
 };
 
+/** How a navigation touches the browser history: a user action adds an
+ *  entry, the first load only normalizes the URL, and back / forward has
+ *  already moved it. */
+type HistoryMode = "push" | "replace" | "none";
+
+const setLocation = (search: string, mode: HistoryMode) => {
+  if (mode === "none" || window.location.search === search) {
+    return;
+  }
+  if (mode === "push") {
+    window.history.pushState(null, "", `./${search}`);
+  } else {
+    window.history.replaceState(null, "", `./${search}`);
+  }
+};
+
+// `docker://` / `podman://` name one local image; a registry image or an
+// OCI archive / layout may hold several platforms. A `?arch=` already in
+// the reference wins.
+const withArch = (image: string, arch: string) =>
+  /^(docker|podman):\/\//.test(image) || image.includes("?arch=") || !arch
+    ? image
+    : `${image}?arch=${arch}`;
+
 const showRequestError = (err: unknown, fallback: string) => {
   let msg = (err as Error)?.message as string;
   const axiosErr = err as AxiosError;
@@ -146,28 +170,34 @@ const App = () => {
     null,
   );
 
-  // Local sources carry their own platform.
-  const withArch = (image: string) =>
-    /^(file|docker|podman):\/\//.test(image) || !arch
-      ? image
-      : `${image}?arch=${arch}`;
+  // Every request takes a ticket; a response whose ticket is no longer the
+  // latest — the user moved on, e.g. with the back button — is dropped.
+  const ticket = useRef(0);
 
-  const onSearch = async (value: string) => {
+  const onSearch = async (
+    value: string,
+    history: HistoryMode = "push",
+    archValue = arch,
+  ) => {
     const image = value.trim();
     if (!image) {
       return;
     }
-    const url = `./?image=${image}&arch=${arch}`;
-    if (window.location.href !== url) {
-      window.history.pushState(null, "", url);
-    }
+    setLocation(
+      `?image=${encodeURIComponent(image)}&arch=${archValue}`,
+      history,
+    );
     setImageName(image);
     setLoading(true);
+    const current = ++ticket.current;
     try {
-      const reqUrl = `/analyze?image=${encodeURIComponent(withArch(image))}`;
+      const reqUrl = `/analyze?image=${encodeURIComponent(withArch(image, archValue))}`;
       const { data } = await request.get<ImageAnalyzeResult>(reqUrl, {
         timeout: 10 * 60 * 1000,
       });
+      if (current !== ticket.current) {
+        return;
+      }
       (data.fileTreeList || []).forEach((fileTree) => {
         addKeyToFileTreeItem(fileTree, "");
       });
@@ -188,31 +218,74 @@ const App = () => {
       setCurrentLayer(0);
       setDiff(null);
     } catch (err: unknown) {
-      showRequestError(err, "analyze image fail");
+      if (current === ticket.current) {
+        showRequestError(err, "analyze image fail");
+      }
     } finally {
-      setLoading(false);
+      if (current === ticket.current) {
+        setLoading(false);
+      }
     }
   };
 
-  const onCompare = async (base: string, target: string) => {
-    const search = `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${arch}`;
-    if (window.location.search !== search) {
-      window.history.pushState(null, "", `./${search}`);
-    }
+  const onCompare = async (
+    base: string,
+    target: string,
+    history: HistoryMode = "push",
+    archValue = arch,
+  ) => {
+    setLocation(
+      `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${archValue}`,
+      history,
+    );
     setLoading(true);
+    const current = ++ticket.current;
     try {
       const { data } = await request.get<ImageDiff>(
-        `/diff?base=${encodeURIComponent(withArch(base))}&target=${encodeURIComponent(withArch(target))}`,
+        `/diff?base=${encodeURIComponent(withArch(base, archValue))}&target=${encodeURIComponent(withArch(target, archValue))}`,
         { timeout: 20 * 60 * 1000 },
       );
+      if (current !== ticket.current) {
+        return;
+      }
       setDiff({ refs: { base, target }, data });
       setReport(null);
     } catch (err: unknown) {
-      showRequestError(err, "compare images fail");
+      if (current === ticket.current) {
+        showRequestError(err, "compare images fail");
+      }
     } finally {
-      setLoading(false);
+      if (current === ticket.current) {
+        setLoading(false);
+      }
     }
   };
+
+  // Show whatever the URL names: on the first load and after back / forward.
+  const openQuery = (history: HistoryMode) => {
+    const query = readQuery();
+    setArch(query.arch);
+    if (query.base && query.target) {
+      onCompare(query.base, query.target, history, query.arch);
+    } else if (query.image) {
+      onSearch(query.image, history, query.arch);
+    } else {
+      ticket.current++;
+      setLoading(false);
+      setReport(null);
+      setDiff(null);
+      setImageName("");
+    }
+  };
+  const openQueryRef = useRef(openQuery);
+  useEffect(() => {
+    openQueryRef.current = openQuery;
+  });
+  useEffect(() => {
+    const onPopState = () => openQueryRef.current("none");
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   const mounted = useRef(false);
   useEffect(() => {
@@ -220,11 +293,7 @@ const App = () => {
       return;
     }
     mounted.current = true;
-    if (initial.base && initial.target) {
-      onCompare(initial.base, initial.target);
-    } else if (initial.image) {
-      onSearch(initial.image);
-    }
+    openQuery("replace");
     request
       .get<LatestImages>("/latest-images", { timeout: 5 * 1000 })
       .then(({ data }) => {
@@ -534,7 +603,7 @@ const App = () => {
                 diff={diff.data}
                 refs={diff.refs}
                 onSwap={() => onCompare(diff.refs.target, diff.refs.base)}
-                onOpen={onSearch}
+                onOpen={(image) => onSearch(image)}
               />
             </div>
           </Content>

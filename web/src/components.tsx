@@ -299,7 +299,7 @@ export const SearchBar = ({
   const selectBefore = (
     <Select
       size={size}
-      defaultValue={arch}
+      value={arch}
       style={{ width: size === "large" ? 108 : 96 }}
       onChange={onArchChange}
     >
@@ -318,7 +318,8 @@ export const SearchBar = ({
       allowClear
       enterButton={i18nGet("analyzeButton")}
       size={size}
-      onSearch={onSearch}
+      // antd also passes the event and the trigger source.
+      onSearch={(value) => onSearch(value)}
     />
   );
 };
