@@ -8,7 +8,7 @@
 
 use crate::config;
 use crate::i18n::{self, Lang};
-use crate::image::{get_file_content_from_layer, parse_image_info, DockerAnalyzeResult};
+use crate::image::{get_file_content_from_layer, host_arch, parse_image_info, DockerAnalyzeResult};
 use crate::store::get_blob_path;
 use crate::util::get_http_client;
 use serde::{Deserialize, Serialize};
@@ -202,7 +202,10 @@ fn history_key(image: &str) -> String {
     // Strip an `@sha256:…` digest if it rode along on the name component.
     let name = info.name.split('@').next().unwrap_or(info.name.as_str());
     let mut identity = format!("{}/{}/{}", info.registry, info.user, name);
-    if !info.arch.is_empty() {
+    // The host's platform is the one a bare reference always meant, so it
+    // keeps the key snapshots were written under before references carried
+    // their platform explicitly.
+    if !info.arch.is_empty() && info.arch != host_arch() {
         identity.push('@');
         identity.push_str(&info.arch);
     }
@@ -512,10 +515,20 @@ mod tests {
             history_key("redis:alpine"),
             "https___index.docker.io_v2_library_redis.md"
         );
-        // Private registry + arch kept, tag dropped.
+        // Private registry + a foreign arch kept, tag dropped.
+        let other = if host_arch() == "arm64" {
+            "amd64"
+        } else {
+            "arm64"
+        };
         assert_eq!(
-            history_key("registry.example.com/user/img:v1?arch=arm64"),
-            "https___registry.example.com_v2_user_img_arm64.md"
+            history_key(&format!("registry.example.com/user/img:v1?arch={other}")),
+            format!("https___registry.example.com_v2_user_img_{other}.md")
+        );
+        // The host's arch is what a bare reference means: same snapshot.
+        assert_eq!(
+            history_key(&format!("redis:alpine?arch={}", host_arch())),
+            history_key("redis:alpine")
         );
         // Degenerate input still yields a safe, non-empty name.
         assert_eq!(history_key(""), "https___index.docker.io_v2_library_.md");

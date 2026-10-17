@@ -53,8 +53,12 @@ Inside the TUI:
 diving redis:alpine
 diving quay.io/prometheus/node-exporter
 
-# pick an architecture for multi-arch images
+# pick an architecture for multi-arch images (default: the host's;
+# x86_64 / aarch64 are accepted for amd64 / arm64)
 diving redis:alpine?arch=arm64
+
+# pin an exact manifest by digest
+diving redis@sha256:<digest>
 
 # from the local docker or podman client (runs `docker save` / `podman save`)
 diving docker://redis:alpine
@@ -450,7 +454,7 @@ highest_user_wasted_percent: 0.1
 diving keeps two on-disk caches under `~/.diving/`, both governed by `layer_ttl` and swept hourly:
 
 - **Layer blobs** (`~/.diving/layers/`) — compressed layer downloads, keyed by layer digest. A hit skips the network download; decompression and file-tree construction still run.
-- **Analysis results** (`~/.diving/analysis/`) — the fully analyzed result, keyed by the `Docker-Content-Digest` (from a `HEAD` against the manifest endpoint) plus architecture. A hit short-circuits the entire pipeline.
+- **Analysis results** (`~/.diving/analysis/`) — the fully analyzed result, keyed by the `Docker-Content-Digest` (from a `HEAD` against the manifest endpoint), plus the architecture when that digest is a multi-platform index. An image published for a single platform is keyed by its digest alone, so requests for it with any `?arch=` share one entry, and a reference without `?arch=` shares the entry of `?arch=<host architecture>`. A hit short-circuits the entire pipeline.
 
 The analysis cache is **content-addressable**, so re-pushing a mutable tag like `:latest` automatically invalidates the entry. If the `HEAD` probe fails for any reason, diving silently falls back to a full analysis — caching never blocks a request.
 

@@ -28,7 +28,8 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OnceCell as TokioOnceCell;
 
 use super::image_ref::{
-    repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    host_arch, repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    REGISTRY_LOCAL_PODMAN,
 };
 use super::layer::{path_under_dir, TarIndex};
 use super::sensitive::{is_dev_artifact, is_pkg_cache, is_sensitive_file, MIN_PKG_CACHE_BYTES};
@@ -41,6 +42,7 @@ use super::{
     },
     FileTreeItem, ImageConfig, ImageIndex, ImageLayer, ImageManifest, ImageManifestConfig, Op,
     MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST, MEDIA_TYPE_IMAGE_INDEX, MEDIA_TYPE_MANIFEST_LIST,
+    MEDIA_TYPE_OCI_MANIFEST,
 };
 use super::{get_files_from_layer, get_os_release_from_layer};
 use crate::{
@@ -601,20 +603,6 @@ struct DockerRequestError {
     pub message: String,
 }
 
-fn get_value_from_json(v: &[u8], key: &str) -> Result<String> {
-    let mut root: Value = serde_json::from_slice(v).context(SerdeJsonSnafu {
-        category: "get_from_json",
-    })?;
-    for k in key.split('.') {
-        let value = root.get(k);
-        if value.is_none() {
-            return Ok("".to_string());
-        }
-        root = value.unwrap().to_owned();
-    }
-    Ok(root.as_str().unwrap_or("").to_string())
-}
-
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalManifest {
@@ -690,8 +678,30 @@ fn oci_blob_path(digest: &str) -> String {
     format!("blobs/{}", digest.replacen(':', "/", 1))
 }
 
+/// Every manifest kind a tag can name: a multi-platform index or a single
+/// image's manifest, in both the OCI and the Docker spelling.
+const MANIFEST_ACCEPTS: [&str; 4] = [
+    MEDIA_TYPE_IMAGE_INDEX,
+    MEDIA_TYPE_MANIFEST_LIST,
+    MEDIA_TYPE_OCI_MANIFEST,
+    MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
+];
+
 fn is_index_media_type(media_type: &str) -> bool {
     media_type == MEDIA_TYPE_IMAGE_INDEX || media_type == MEDIA_TYPE_MANIFEST_LIST
+}
+
+/// The platform part of the analysis-cache key for a tag whose manifest has
+/// `content_type`: the requested architecture when the digest names a
+/// multi-platform index, empty when it names a single image — that digest
+/// already pins the platform, so every `?arch=` request for an image
+/// published for one platform shares the entry. Without a content type it
+/// is taken for an index, which only costs a duplicate entry.
+fn cache_arch(content_type: Option<&str>, arch: &str) -> String {
+    match content_type {
+        Some(t) if !is_index_media_type(t) => String::new(),
+        _ => arch.to_string(),
+    }
 }
 
 /// The descriptor to analyze among `manifests`: the requested architecture
@@ -703,15 +713,7 @@ fn pick_oci_descriptor<'a>(
     manifests: &'a [OciDescriptor],
     arch: &str,
 ) -> Option<&'a OciDescriptor> {
-    let wanted = if arch.is_empty() {
-        if std::env::consts::ARCH.contains("aarch64") || std::env::consts::ARCH.contains("arm") {
-            "arm64"
-        } else {
-            "amd64"
-        }
-    } else {
-        arch
-    };
+    let wanted = if arch.is_empty() { host_arch() } else { arch };
     let linux = |d: &&OciDescriptor| {
         d.platform
             .as_ref()
@@ -1437,17 +1439,19 @@ impl DockerClient {
         if !token.is_empty() {
             headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
-        let accepts = [
-            MEDIA_TYPE_IMAGE_INDEX,
-            MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
-            MEDIA_TYPE_MANIFEST_LIST,
-        ];
-        headers.insert("Accept".to_string(), accepts.join(", "));
+        headers.insert("Accept".to_string(), MANIFEST_ACCEPTS.join(", "));
         let data = self.get_bytes(url.clone(), headers).await?;
-        let media_type = get_value_from_json(&data, "mediaType")?;
-        let (resp, supported_archs): (ImageManifest, Vec<String>) = if media_type
-            == MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST
-        {
+        // An index lists `manifests`; a tag or digest naming one image gets
+        // that image's manifest, Docker schema 2 or OCI. Told apart by shape:
+        // `mediaType` is optional in OCI manifests, and checking it against
+        // schema 2 alone sent OCI manifests down the index path.
+        let is_index = serde_json::from_slice::<Value>(&data)
+            .context(SerdeJsonSnafu {
+                category: "get_manifest",
+            })?
+            .get("manifests")
+            .is_some();
+        let (resp, supported_archs): (ImageManifest, Vec<String>) = if !is_index {
             let manifest = serde_json::from_slice(&data).context(SerdeJsonSnafu {
                 category: "get_manifest_schema2",
             })?;
@@ -1767,7 +1771,9 @@ impl DockerClient {
     /// cache key for the full analysis result. Any failure (network,
     /// 4xx/5xx, missing header, malformed value) returns `None` so the
     /// caller falls through to the full analysis. Never bubbles an error.
-    async fn head_manifest_digest(&self, params: &DockerImageParams) -> Option<String> {
+    /// The tag's manifest digest from a `HEAD`, with the platform part of
+    /// the analysis-cache key (see [`cache_arch`]).
+    async fn head_manifest_digest(&self, params: &DockerImageParams) -> Option<(String, String)> {
         if self.is_local() {
             return None;
         }
@@ -1775,13 +1781,8 @@ impl DockerClient {
         let token = &params.token;
         let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
         let client = get_http_client();
-        let accepts = [
-            MEDIA_TYPE_IMAGE_INDEX,
-            MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST,
-            MEDIA_TYPE_MANIFEST_LIST,
-        ];
         let mut req = client.head(url).timeout(Duration::from_secs(30));
-        req = req.header("Accept", accepts.join(", "));
+        req = req.header("Accept", MANIFEST_ACCEPTS.join(", "));
         if !token.is_empty() {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
@@ -1789,10 +1790,17 @@ impl DockerClient {
         if !resp.status().is_success() {
             return None;
         }
-        resp.headers()
-            .get("Docker-Content-Digest")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.split(';').next().unwrap_or_default().trim().to_string())
+        };
+        let digest = header("Docker-Content-Digest")?;
+        Some((
+            digest,
+            cache_arch(header("Content-Type").as_deref(), &params.arch),
+        ))
     }
 
     pub async fn analyze(&self, params: &mut DockerImageParams) -> Result<DockerAnalyzeResult> {
@@ -1815,13 +1823,13 @@ impl DockerClient {
         // detection is enabled — otherwise we'd risk reading or writing an
         // incomplete result. With `--no-verify-dup`, we go straight to a
         // fresh analyze + skip cache write at the end.
-        let cache_digest: Option<String> = if params.verify_dup {
+        let cache_key: Option<(String, String)> = if params.verify_dup {
             self.head_manifest_digest(params).await
         } else {
             None
         };
-        if let Some(digest) = cache_digest.as_deref() {
-            if let Some(mut cached) = read_analysis(digest, &params.arch).await {
+        if let Some((digest, cache_arch)) = &cache_key {
+            if let Some(mut cached) = read_analysis(digest, cache_arch).await {
                 tl_info!(digest = digest, "analysis cache hit");
                 if !params.quiet {
                     let short = &digest[..digest.len().min(19)];
@@ -1871,9 +1879,13 @@ impl DockerClient {
         let scan = scan_layers(&config, &manifest.layers, &info_list);
 
         tl_info!(repo = repo.as_str(), tag = tag, "analyze image done",);
-        // Local sources (`file://`, some `docker://` refs) have no tag.
+        // Local sources (`file://`, some `docker://` refs) have no tag; a
+        // digest (`sha256:…`, the only kind of reference with a `:`) is
+        // written `repo@digest`.
         let image_name = if tag.is_empty() {
             repo.to_string()
+        } else if tag.contains(':') {
+            format!("{repo}@{tag}")
         } else {
             format!("{repo}:{tag}")
         };
@@ -1995,8 +2007,8 @@ impl DockerClient {
         // Best-effort cache write. Skips silently on any error (logged
         // inside `write_analysis`) and only runs when HEAD earlier gave
         // us a digest to key on.
-        if let Some(digest) = cache_digest.as_deref() {
-            write_analysis(digest, &params.arch, &result).await;
+        if let Some((digest, cache_arch)) = &cache_key {
+            write_analysis(digest, cache_arch, &result).await;
             // Only now, with the analysis on disk: a digest recorded before
             // its analysis exists would replace one that still has a result.
             let image_ref = image_ref_key(&self.registry, &params.repo(), &params.tag);
@@ -2104,6 +2116,21 @@ pub async fn analyze_docker_image_or_last_known(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_arch_drops_the_platform_for_single_image_manifests() {
+        assert_eq!(cache_arch(Some(MEDIA_TYPE_IMAGE_INDEX), "arm64"), "arm64");
+        assert_eq!(cache_arch(Some(MEDIA_TYPE_MANIFEST_LIST), "arm64"), "arm64");
+        assert_eq!(cache_arch(None, "arm64"), "arm64");
+        assert_eq!(
+            cache_arch(Some(MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST), "arm64"),
+            ""
+        );
+        assert_eq!(
+            cache_arch(Some("application/vnd.oci.image.manifest.v1+json"), "amd64"),
+            ""
+        );
+    }
 
     #[test]
     fn summary_handles_zero_total_size() {

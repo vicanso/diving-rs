@@ -14,6 +14,29 @@ static FILE_PROTOCOL: &str = "file://";
 static LOCAL_DOCKER_PROTOCOL: &str = "docker://";
 static LOCAL_PODMAN_PROTOCOL: &str = "podman://";
 
+/// The platform an image is analyzed for when the reference names none:
+/// the host's, as `docker pull` would pick.
+pub fn host_arch() -> &'static str {
+    let arch = std::env::consts::ARCH;
+    if arch.contains("aarch64") || arch.contains("arm") {
+        "arm64"
+    } else {
+        "amd64"
+    }
+}
+
+/// An architecture as OCI platforms spell it: trimmed, lowercased, and the
+/// kernel's names (`x86_64`, `aarch64`) mapped to Go's (`amd64`, `arm64`),
+/// so every spelling of one platform selects, and caches, the same image.
+pub fn normalize_arch(arch: &str) -> String {
+    let arch = arch.trim().to_ascii_lowercase();
+    match arch.as_str() {
+        "x86_64" | "x86-64" => "amd64".to_string(),
+        "aarch64" => "arm64".to_string(),
+        _ => arch,
+    }
+}
+
 /// Whether `registry` is one of the local-source markers (`file://`,
 /// `docker://`, `podman://`) rather than a registry URL.
 pub fn is_local_registry(registry: &str) -> bool {
@@ -48,6 +71,12 @@ fn looks_like_registry_host(host: &str) -> bool {
 /// Split `name[:tag]` where the tag colon only counts inside the last
 /// path component — so `localhost:5000/user/img:tag` keeps the port.
 fn split_name_and_tag(reference: &str) -> (String, String) {
+    // `name@sha256:…` (also `name:tag@sha256:…`): the digest is what the
+    // registry is asked for; a tag beside it is only a label. Splitting on
+    // the last `:` instead asked for repository `name@sha256`.
+    if let Some((name, digest)) = reference.split_once('@') {
+        return (split_name_and_tag(name).0, digest.to_string());
+    }
     let last_slash = reference.rfind('/').map(|i| i + 1).unwrap_or(0);
     let after_slash = &reference[last_slash..];
     if let Some(colon) = after_slash.rfind(':') {
@@ -81,7 +110,7 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
         return ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
             name: path.to_string(),
-            arch: arch.to_string(),
+            arch: normalize_arch(arch),
             ..Default::default()
         };
     }
@@ -108,6 +137,13 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
         }
         value = value[..index].to_string();
     }
+    // A registry image always names its platform: no `?arch=` means the
+    // host's, which is what the manifest list resolves to anyway. Keeping
+    // it implicit split one image across two cache keys (`""` vs `arm64`).
+    let arch = match normalize_arch(&arch) {
+        arch if arch.is_empty() => host_arch().to_string(),
+        arch => arch,
+    };
 
     let (path, tag) = split_name_and_tag(&value);
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -255,6 +291,37 @@ mod tests {
         let info = parse_image_info("docker://redis:alpine");
         assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
         assert_eq!(info.name, "redis:alpine");
+    }
+
+    #[test]
+    fn registry_images_always_name_their_platform() {
+        // No `?arch=`: the host's, as the manifest list resolves it, so a
+        // bare reference and `?arch=<host>` are one cache key.
+        assert_eq!(parse_image_info("redis:alpine").arch, host_arch());
+        assert_eq!(parse_image_info("ghcr.io/org/app:1").arch, host_arch());
+        // Kernel spellings and case map to the OCI names.
+        assert_eq!(parse_image_info("redis?arch=x86_64").arch, "amd64");
+        assert_eq!(parse_image_info("redis?arch=AARCH64").arch, "arm64");
+        // Local sources keep "unspecified": the archive itself decides.
+        assert_eq!(parse_image_info("file:///tmp/a.tar").arch, "");
+        assert_eq!(parse_image_info("file:///tmp/a?arch=aarch64").arch, "arm64");
+        assert_eq!(parse_image_info("docker://app:dev").arch, "");
+    }
+
+    #[test]
+    fn digest_references_ask_for_the_digest() {
+        let info = parse_image_info("alpine@sha256:abc");
+        assert_eq!(
+            (info.user.as_str(), info.name.as_str(), info.tag.as_str()),
+            ("library", "alpine", "sha256:abc")
+        );
+        let info = parse_image_info("registry.example.com:5000/team/app:1.2@sha256:abc?arch=arm64");
+        assert_eq!(info.registry, "https://registry.example.com:5000/v2");
+        assert_eq!(
+            (info.user.as_str(), info.name.as_str(), info.tag.as_str()),
+            ("team", "app", "sha256:abc")
+        );
+        assert_eq!(info.arch, "arm64");
     }
 
     #[test]

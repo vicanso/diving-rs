@@ -1,8 +1,10 @@
 //! Caches the per-image `DockerAnalyzeResult` JSON so that repeated analyses
-//! of the same image (same registry manifest digest + same requested arch)
-//! skip layer decompression and file-tree construction entirely.
+//! of the same image (same registry manifest digest + same platform) skip
+//! layer decompression and file-tree construction entirely.
 //!
-//! Cache key: `<safe(digest)>_<safe(arch)>.json` under `~/.diving/analysis/`.
+//! Cache key: `<safe(digest)>_<safe(arch)>.json` under `~/.diving/analysis/`
+//! when the digest names a multi-platform index, `<safe(digest)>.json` when
+//! it names a single image (the digest alone pins the platform then).
 //! `safe(...)` rewrites `:` / `/` / `\` / space to `_` so the digest /
 //! architecture (e.g. `sha256:abc...`, `arm/v7`) can be used as a filename
 //! portably.
@@ -99,12 +101,12 @@ fn safe_segment(s: &str) -> String {
 }
 
 fn cache_file_path(digest: &str, arch: &str) -> PathBuf {
-    let arch_part = if arch.is_empty() {
-        "default".to_string()
+    let name = if arch.is_empty() {
+        format!("{}.json", safe_segment(digest))
     } else {
-        safe_segment(arch)
+        format!("{}_{}.json", safe_segment(digest), safe_segment(arch))
     };
-    get_analysis_path().join(format!("{}_{}.json", safe_segment(digest), arch_part))
+    get_analysis_path().join(name)
 }
 
 async fn read_entry(digest: &str, arch: &str) -> Option<AnalysisCacheEntry> {
@@ -174,7 +176,12 @@ pub async fn read_last_known(image_ref: &str, arch: &str) -> Option<(DockerAnaly
     let digest = fs::read_to_string(last_known_path(image_ref, arch))
         .await
         .ok()?;
-    let entry = read_entry(digest.trim(), arch).await?;
+    let digest = digest.trim();
+    // Keyed by platform for an index, by digest alone for a single image.
+    let entry = match read_entry(digest, arch).await {
+        Some(entry) => entry,
+        None => read_entry(digest, "").await?,
+    };
     Some((entry.result, entry.cached_at))
 }
 
@@ -280,10 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_file_path_uses_default_when_arch_empty() {
+    fn cache_file_path_leaves_the_platform_out_when_arch_empty() {
         let p1 = cache_file_path("sha256:abc", "");
         let p2 = cache_file_path("sha256:abc", "amd64");
-        assert!(p1.to_string_lossy().ends_with("sha256_abc_default.json"));
-        assert!(p2.to_string_lossy().ends_with("sha256_abc_amd64.json"));
+        assert!(p1.to_string_lossy().ends_with("/sha256_abc.json"));
+        assert!(p2.to_string_lossy().ends_with("/sha256_abc_amd64.json"));
     }
 }

@@ -81,7 +81,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 ### Data Flow: Image Analysis
 
 1. **Image Source Parsing** (`src/image/image_ref.rs`)
-   - Parse image references: `redis:alpine`, `docker://`, `podman://`, `file://`, registry URLs, `?arch=` query (also on `file://`, for multi-platform OCI archives / layouts)
+   - Parse image references: `redis:alpine`, `name@sha256:…`, `docker://`, `podman://`, `file://`, registry URLs, `?arch=` query (also on `file://`, for multi-platform OCI archives / layouts)
    - Determine source type: registry (default), docker / podman client (`docker save` / `podman save`), or a local `docker save` tar / OCI archive / OCI layout directory (`manifest.json` first, else `index.json`)
 
 2. **Auth & Manifest Resolution** (`src/image/registry_auth.rs` + `src/image/docker.rs` + `src/image/oci_image.rs`)
@@ -103,7 +103,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 
 5. **Derived Analyses** (`src/image/docker.rs::analyze`)
    - Sensitive files, heuristic tags, big modified files, base-OS fingerprint, cross-layer duplicates, ELF runtime compat, recommendations
-   - Full result cached as JSON under `~/.diving/analysis/` keyed by manifest digest + arch (schema-versioned; see `src/store/analysis_cache.rs`)
+   - Full result cached as JSON under `~/.diving/analysis/` keyed by manifest digest, plus arch only when the digest is a multi-platform index (schema-versioned; see `src/store/analysis_cache.rs` and `cache_arch` in `docker.rs`)
 
 6. **Output Rendering**
    - **Terminal**: TUI interface via `src/ui/` modules (layers, files, details)
@@ -272,7 +272,7 @@ All targets require `make build-web` before Rust compilation.
 ## Performance Considerations
 
 - **Layer Caching**: Blobs cached locally (digest-verified, atomic writes); TTL-based cleanup cron in `src/lib.rs`
-- **Analysis Caching**: Full results cached on disk keyed by manifest digest + arch (`src/store/analysis_cache.rs`)
+- **Analysis Caching**: Full results cached on disk keyed by manifest digest (+ arch for a multi-platform index; a single-platform image's digest already pins it) (`src/store/analysis_cache.rs`). `parse_image_info` always gives a registry image an arch: no `?arch=` means `host_arch()`, and `x86_64` / `aarch64` normalize to `amd64` / `arm64`, so CLI, web and MCP requests for one platform share the cache, the singleflight and the in-memory results
 - **Registry-unavailable fallback**: each successful analysis records the digest its reference resolved to (`ref_*.txt` beside the analyses). `analyze_docker_image_or_last_known` (TUI, web, MCP — not the CI gate) serves that cached analysis when the registry is unreachable / 5xx / 429, with `DockerAnalyzeResult::stale_as_of` set; the TUI image panel, Markdown, the WeCom summary, the web UI and `get_findings` all surface it. Registry-returned 401/403/404 never fall back
 - **Duplicate hashing**: the second decompression pass that hashes duplicate candidates runs one layer per worker (`detect_cross_layer_duplicates`); the OS and ELF probes cost ~0 and need no such treatment
 - **Singleflight**: Concurrent web requests for the same image share one analysis (`src/controller.rs`)

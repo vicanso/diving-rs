@@ -53,8 +53,12 @@ TUI 内快捷键：
 diving redis:alpine
 diving quay.io/prometheus/node-exporter
 
-# 为多架构镜像指定架构
+# 为多架构镜像指定架构（默认为本机架构；
+# 也接受 x86_64 / aarch64，等同 amd64 / arm64）
 diving redis:alpine?arch=arm64
+
+# 用 digest 固定到某个 manifest
+diving redis@sha256:<digest>
 
 # 来自本地 docker 或 podman 客户端（执行 `docker save` / `podman save`）
 diving docker://redis:alpine
@@ -449,7 +453,7 @@ highest_user_wasted_percent: 0.1
 diving 在 `~/.diving/` 下维护两层缓存，均受 `layer_ttl` 控制并每小时清理一次：
 
 - **Layer blobs**（`~/.diving/layers/`）—— 从 registry 下载的压缩 layer，按 layer digest 索引。命中时省去网络下载，但解压与文件树构建仍会运行。
-- **分析结果**（`~/.diving/analysis/`）—— 完整的分析结果，以「`HEAD` 镜像 manifest 返回的 `Docker-Content-Digest` + 架构」为键。命中时整条流水线被短路。
+- **分析结果**（`~/.diving/analysis/`）—— 完整的分析结果，以 `HEAD` 镜像 manifest 返回的 `Docker-Content-Digest` 为键；该 digest 是多平台 index 时再加上架构。只发布了单一平台的镜像只按 digest 作键，所以无论带哪个 `?arch=` 都共用同一份缓存；不带 `?arch=` 的引用与 `?arch=<本机架构>` 共用缓存。命中时整条流水线被短路。
 
 分析缓存是**内容寻址**的：`:latest` 这类可变 tag 被重新推送时，digest 变化，缓存条目自动失效。如果 `HEAD` 探测因任何原因失败，diving 会静默回退到完整分析 —— 缓存绝不会阻塞请求。
 

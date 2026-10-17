@@ -7,6 +7,7 @@ use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+use super::image_ref::host_arch;
 use super::layer::hash_files_from_layer;
 use crate::config::get_layer_concurrency;
 use crate::store::get_blob_path;
@@ -17,6 +18,7 @@ pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
 pub static MEDIA_TYPE_MANIFEST_LIST: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
+pub static MEDIA_TYPE_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,14 +93,7 @@ impl ImageIndex {
     pub fn guess_manifest(&self, arch: &str) -> Option<ImageIndexManifest> {
         let os = "linux";
         let mut os_match_manifests = vec![];
-        let mut architecture = arch.to_string();
-        if architecture.is_empty() {
-            architecture = "amd64".to_string();
-            let arch = std::env::consts::ARCH;
-            if arch.contains("arm") || arch.contains("aarch64") {
-                architecture = "arm64".to_string()
-            }
-        }
+        let architecture = if arch.is_empty() { host_arch() } else { arch };
         for item in &self.manifests {
             if item.platform.os != os {
                 continue;
