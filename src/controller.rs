@@ -8,8 +8,8 @@ use crate::error::{HTTPError, HTTPResult};
 use crate::i18n;
 use crate::image::{
     analyze_docker_image_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
-    is_local_registry, parse_image_info, registry_host, resolve_explicit, DockerAnalyzeResult,
-    ImageInfo,
+    is_local_registry, parse_image_info, preview_docker_image, registry_host, resolve_explicit,
+    DockerAnalyzeResult, ImageInfo, ImagePreview,
 };
 use crate::markdown;
 use crate::mcp::McpStatus;
@@ -132,6 +132,7 @@ pub fn new_router(mcp: McpStatus) -> Router {
         .route("/ping", get(ping))
         .route("/api/analyze", get(analyze))
         .route("/api/diff", get(diff))
+        .route("/api/manifest", get(manifest))
         .route("/api/file", get(get_file))
         .route("/api/file-preview", get(preview_file))
         .route("/api/latest-images", get(get_latest_images))
@@ -159,6 +160,12 @@ struct AnalyzeParams {
     include_tree: Option<bool>,
     /// When `true`, skip cross-layer duplicate detection (faster cold path).
     no_verify_dup: Option<bool>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ManifestParams {
+    /// Registry image (with `?arch=` like `/api/analyze`).
+    image: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -350,6 +357,18 @@ async fn analyze(Query(params): Query<AnalyzeParams>) -> HTTPResult<Response> {
         stale_as_of: src.stale_as_of.clone(),
     };
     Ok(Json(slim.report(&summary)).into_response())
+}
+
+/// The image's layers from its manifest and config alone, in about a second
+/// — what the web shows while a first analysis downloads the layers.
+async fn manifest(Query(params): Query<ManifestParams>) -> JSONResult<ImagePreview> {
+    let image_info = parse_image_info(&params.image);
+    ensure_registry_allowed(&image_info)?;
+    // Web mode: credentials from env only, as for `/api/analyze`.
+    let preview = preview_docker_image(image_info, resolve_explicit(None, None, false))
+        .await
+        .map_err(|e| HTTPError::new_with_category(&e.to_string(), "docker"))?;
+    Ok(Json(preview))
 }
 
 /// Compare two images. Both go through the same singleflight and caches as

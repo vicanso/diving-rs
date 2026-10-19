@@ -7,7 +7,7 @@ use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use super::image_ref::host_arch;
+use super::image_ref::{host_arch, platform_matches};
 use super::layer::hash_files_from_layer;
 use crate::config::get_layer_concurrency;
 use crate::store::get_blob_path;
@@ -74,6 +74,10 @@ pub struct ImageFileSummary {
     pub op: Op,
     // 文件信息
     pub info: ImageFileInfo,
+    // 被覆盖/删除的那一份由哪一层写入（从 0 开始），即"第 3 层写入、
+    // 第 5 层删除"里的第 3 层。0.12.0 写入的缓存没有这个字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_in: Option<usize>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,7 +102,11 @@ impl ImageIndex {
             if item.platform.os != os {
                 continue;
             }
-            if item.platform.architecture == architecture {
+            if platform_matches(
+                architecture,
+                &item.platform.architecture,
+                item.platform.variant.as_deref(),
+            ) {
                 return Some(item.clone());
             }
             os_match_manifests.push(item)
@@ -764,6 +772,23 @@ mod tests {
         let hit = index.guess_manifest("amd64").unwrap();
         assert_eq!(hit.platform.architecture, "amd64");
         assert_eq!(hit.platform.os, "linux");
+        // A variant picks among one architecture's images.
+        let arm = |variant: &str| ImageIndexManifest {
+            platform: ImageIndexPlatform {
+                os: "linux".to_string(),
+                architecture: "arm".to_string(),
+                variant: Some(variant.to_string()),
+            },
+            ..Default::default()
+        };
+        let index_arm = ImageIndex {
+            manifests: vec![mk("linux", "amd64"), arm("v6"), arm("v7")],
+            ..Default::default()
+        };
+        let pick = |arch: &str| index_arm.guess_manifest(arch).unwrap().platform.variant;
+        assert_eq!(pick("arm/v7").as_deref(), Some("v7"));
+        assert_eq!(pick("arm/v6").as_deref(), Some("v6"));
+        assert_eq!(pick("arm").as_deref(), Some("v6"));
         // Unknown arch falls back to the first linux manifest.
         let hit = index.guess_manifest("riscv64").unwrap();
         assert_eq!(hit.platform.os, "linux");

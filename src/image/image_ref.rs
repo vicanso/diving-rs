@@ -28,13 +28,42 @@ pub fn host_arch() -> &'static str {
 /// An architecture as OCI platforms spell it: trimmed, lowercased, and the
 /// kernel's names (`x86_64`, `aarch64`) mapped to Go's (`amd64`, `arm64`),
 /// so every spelling of one platform selects, and caches, the same image.
+/// A variant stays (`arm/v7`), written as [`platform_name`] writes it.
 pub fn normalize_arch(arch: &str) -> String {
     let arch = arch.trim().to_ascii_lowercase();
-    match arch.as_str() {
-        "x86_64" | "x86-64" => "amd64".to_string(),
-        "aarch64" => "arm64".to_string(),
+    let (arch, variant) = match arch.split_once('/') {
+        Some((arch, variant)) => (arch, Some(variant)),
+        None => (arch.as_str(), None),
+    };
+    let arch = match arch {
+        "x86_64" | "x86-64" => "amd64",
+        "aarch64" => "arm64",
         _ => arch,
+    };
+    platform_name(arch, variant)
+}
+
+/// A platform as `?arch=` and `supported_archs` write it: the architecture,
+/// plus the variant where it tells images apart (`arm/v6` vs `arm/v7`).
+/// `arm64/v8` is the only arm64 there is, so it is plain `arm64`.
+pub fn platform_name(architecture: &str, variant: Option<&str>) -> String {
+    match variant {
+        Some(v) if !v.is_empty() && !(architecture == "arm64" && v == "v8") => {
+            format!("{architecture}/{v}")
+        }
+        _ => architecture.to_string(),
     }
+}
+
+/// Whether a manifest for `architecture` / `variant` is the platform
+/// `wanted` names: the architecture must match, and so must the variant
+/// when `wanted` has one (`arm/v7`; plain `arm` takes any arm).
+pub fn platform_matches(wanted: &str, architecture: &str, variant: Option<&str>) -> bool {
+    let (arch, wanted_variant) = match wanted.split_once('/') {
+        Some((arch, variant)) => (arch, Some(variant)),
+        None => (wanted, None),
+    };
+    arch == architecture && wanted_variant.is_none_or(|v| variant == Some(v))
 }
 
 /// Whether `registry` is one of the local-source markers (`file://`,
@@ -291,6 +320,22 @@ mod tests {
         let info = parse_image_info("docker://redis:alpine");
         assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
         assert_eq!(info.name, "redis:alpine");
+    }
+
+    #[test]
+    fn platforms_are_written_one_way() {
+        assert_eq!(normalize_arch("ARM/V7"), "arm/v7");
+        assert_eq!(normalize_arch("arm64/v8"), "arm64");
+        assert_eq!(normalize_arch("aarch64/v8"), "arm64");
+        assert_eq!(normalize_arch(" x86_64 "), "amd64");
+        assert_eq!(platform_name("arm", Some("v6")), "arm/v6");
+        assert_eq!(platform_name("arm64", Some("v8")), "arm64");
+        assert_eq!(platform_name("amd64", None), "amd64");
+        assert!(platform_matches("arm/v7", "arm", Some("v7")));
+        assert!(!platform_matches("arm/v7", "arm", Some("v6")));
+        assert!(platform_matches("arm", "arm", Some("v6")));
+        assert!(platform_matches("arm64", "arm64", Some("v8")));
+        assert!(!platform_matches("arm64", "amd64", None));
     }
 
     #[test]

@@ -28,8 +28,8 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OnceCell as TokioOnceCell;
 
 use super::image_ref::{
-    host_arch, repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
-    REGISTRY_LOCAL_PODMAN,
+    host_arch, is_local_registry, normalize_arch, platform_matches, platform_name, repository_path,
+    ImageInfo, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 use super::layer::{path_under_dir, TarIndex};
 use super::sensitive::{is_dev_artifact, is_pkg_cache, is_sensitive_file, MIN_PKG_CACHE_BYTES};
@@ -413,6 +413,18 @@ pub struct ImageFileWastedSummary {
     pub path: String,
     pub total_size: u64,
     pub count: u32,
+    /// How each wasted copy came about, in layer order.
+    pub changes: Vec<WasteChange>,
+}
+
+/// A copy written in one layer and overwritten or deleted in a later one.
+/// Layers are 0-based.
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
+pub struct WasteChange {
+    /// `None` for analyses cached by 0.12.0, which did not record it.
+    pub written_in: Option<usize>,
+    pub layer: usize,
+    pub removed: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize)]
@@ -457,15 +469,22 @@ impl DockerAnalyzeResult {
         for file in self.file_summary_list.iter() {
             let info = &file.info;
             wasted_size += info.size;
+            let change = WasteChange {
+                written_in: file.written_in,
+                layer: file.layer_index,
+                removed: file.op == Op::Removed,
+            };
             if let Some(&i) = path_index.get(info.path.as_str()) {
                 wasted_list[i].count += 1;
                 wasted_list[i].total_size += info.size;
+                wasted_list[i].changes.push(change);
             } else {
                 path_index.insert(&info.path, wasted_list.len());
                 wasted_list.push(ImageFileWastedSummary {
                     path: info.path.clone(),
                     count: 1,
                     total_size: info.size,
+                    changes: vec![change],
                 });
             }
         }
@@ -658,6 +677,8 @@ struct OciPlatform {
     architecture: String,
     #[serde(default)]
     os: String,
+    #[serde(default)]
+    variant: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -725,7 +746,7 @@ fn pick_oci_descriptor<'a>(
         .find(|d| {
             d.platform
                 .as_ref()
-                .is_some_and(|p| p.architecture == wanted)
+                .is_some_and(|p| platform_matches(wanted, &p.architecture, p.variant.as_deref()))
         })
         .or_else(|| manifests.iter().find(linux))
         .or_else(|| manifests.iter().find(|d| d.platform.is_none()))
@@ -909,8 +930,10 @@ fn scan_layers(
     let mut file_summary_list = vec![];
     let mut image_size = 0;
     let mut image_total_size = 0;
-    // path → size for every file seen in previous layers; used for O(1) modification detection
-    let mut seen_files: HashMap<String, u64> = HashMap::new();
+    // path → (size, layer that wrote it) for every file seen in previous
+    // layers; O(1) modification detection, and the "written in" layer of
+    // whatever a later layer overwrites or deletes.
+    let mut seen_files: HashMap<String, (u64, usize)> = HashMap::new();
     // Paths recorded in `file_summary_list` (modified/removed), maintained
     // incrementally. `convert_files_to_file_tree` consumes this set so it
     // no longer rebuilds one from the whole cumulative summary on every
@@ -958,12 +981,12 @@ fn scan_layers(
                     // under this directory (and the dir itself).
                     if file.is_opaque == Some(true) {
                         let dir = file.path.as_str();
-                        let doomed: Vec<(String, u64)> = seen_files
+                        let doomed: Vec<(String, (u64, usize))> = seen_files
                             .iter()
                             .filter(|(p, _)| path_under_dir(p, dir))
-                            .map(|(p, &sz)| (p.clone(), sz))
+                            .map(|(p, &seen)| (p.clone(), seen))
                             .collect();
-                        for (path, prev_size) in doomed {
+                        for (path, (prev_size, written_in)) in doomed {
                             seen_files.remove(&path);
                             let mut file_info = file.clone();
                             file_info.path = path.clone();
@@ -973,6 +996,7 @@ fn scan_layers(
                                 layer_index,
                                 op: Op::Removed,
                                 info: file_info,
+                                written_in: Some(written_in),
                             });
                             modified_paths.insert(path);
                         }
@@ -980,7 +1004,7 @@ fn scan_layers(
                         continue;
                     }
                     if layer_index != 0 {
-                        if let Some(&prev_size) = seen_files.get(&file.path) {
+                        if let Some(&(prev_size, written_in)) = seen_files.get(&file.path) {
                             let op;
                             let mut file_info = file.clone();
                             if file.is_whiteout.is_some() {
@@ -996,6 +1020,7 @@ fn scan_layers(
                                 layer_index,
                                 op,
                                 info: file_info,
+                                written_in: Some(written_in),
                             });
                             modified_paths.insert(file.path.clone());
                         }
@@ -1003,7 +1028,7 @@ fn scan_layers(
                     if file.is_whiteout.is_some() {
                         seen_files.remove(&file.path);
                     } else {
-                        seen_files.insert(file.path.clone(), file.size);
+                        seen_files.insert(file.path.clone(), (file.size, layer_index));
                     }
                     if is_new && file.size >= 1_000_000 && file.link.is_empty() {
                         big_modified_file_list.push(BigModifiedFileInfo {
@@ -1460,16 +1485,15 @@ impl DockerClient {
             let index = serde_json::from_slice::<ImageIndex>(&data).context(SerdeJsonSnafu {
                 category: "guess_manifest",
             })?;
-            // Collect linux platform architectures from the index
-            let archs = index
-                .manifests
-                .iter()
-                .filter(|m| m.platform.os == "linux")
-                .map(|m| match &m.platform.variant {
-                    Some(v) => format!("{}/{}", m.platform.architecture, v),
-                    None => m.platform.architecture.clone(),
-                })
-                .collect();
+            // The index's linux platforms, written the way `?arch=` takes
+            // them, so each one can be fed back to pick that image.
+            let mut archs: Vec<String> = vec![];
+            for m in index.manifests.iter().filter(|m| m.platform.os == "linux") {
+                let name = platform_name(&m.platform.architecture, m.platform.variant.as_deref());
+                if !archs.contains(&name) {
+                    archs.push(name);
+                }
+            }
             let chosen = index
                 .guess_manifest(&params.arch)
                 .ok_or_else(|| Error::Whatever {
@@ -1841,6 +1865,14 @@ impl DockerClient {
                 // Recommendations are language-specific and are not stored
                 // in the cache — rebuild for the current request's lang.
                 cached.recommendations = build_recommendations(&cached, params.lang);
+                // Entries cached by 0.12.0 spell arm64 `arm64/v8`.
+                let mut archs: Vec<String> = vec![];
+                for arch in cached.supported_archs.iter().map(|a| normalize_arch(a)) {
+                    if !archs.contains(&arch) {
+                        archs.push(arch);
+                    }
+                }
+                cached.supported_archs = archs;
                 let image_ref = image_ref_key(&self.registry, &params.repo(), &params.tag);
                 remember_digest(&image_ref, &params.arch, digest).await;
                 return Ok(cached);
@@ -1879,16 +1911,7 @@ impl DockerClient {
         let scan = scan_layers(&config, &manifest.layers, &info_list);
 
         tl_info!(repo = repo.as_str(), tag = tag, "analyze image done",);
-        // Local sources (`file://`, some `docker://` refs) have no tag; a
-        // digest (`sha256:…`, the only kind of reference with a `:`) is
-        // written `repo@digest`.
-        let image_name = if tag.is_empty() {
-            repo.to_string()
-        } else if tag.contains(':') {
-            format!("{repo}@{tag}")
-        } else {
-            format!("{repo}:{tag}")
-        };
+        let image_name = display_name(&repo, tag);
         let (run_user, envs, labels) = extract_image_meta(&config);
 
         // OS fingerprinting: probe cached blobs, fall back to history, then "Unknown".
@@ -2019,6 +2042,103 @@ impl DockerClient {
     }
 }
 
+/// `repo:tag`, or `repo@sha256:…` for a digest (the only kind of reference
+/// with a `:`). Local sources (`file://`, some `docker://` refs) have no tag.
+fn display_name(repo: &str, tag: &str) -> String {
+    if tag.is_empty() {
+        repo.to_string()
+    } else if tag.contains(':') {
+        format!("{repo}@{tag}")
+    } else {
+        format!("{repo}:{tag}")
+    }
+}
+
+/// An image before any layer is read: its layers with their build steps and
+/// compressed sizes, from the manifest and config alone (a few KB). The web
+/// shows it while a first analysis is still downloading the layers.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePreview {
+    pub name: String,
+    pub arch: String,
+    pub os: String,
+    /// One per history entry, like `DockerAnalyzeResult::layers`; the
+    /// uncompressed sizes are not known yet and stay 0.
+    pub layers: Vec<ImageLayer>,
+    /// Compressed size of all layers: what a first analysis downloads.
+    pub size: u64,
+    pub supported_archs: Vec<String>,
+}
+
+impl DockerClient {
+    async fn preview(&self, params: &mut DockerImageParams) -> Result<ImagePreview> {
+        params.token = self.get_auth_token(params).await?;
+        // Both land in the in-memory manifest cache and the blob cache, so
+        // the analysis running alongside does not fetch them again.
+        let (manifest, supported_archs) = self.get_manifest(params).await?;
+        let config = self.get_image_config(params).await?;
+        Ok(ImagePreview {
+            name: display_name(&params.repo(), &params.tag),
+            layers: preview_layers(&config.history, &manifest.layers),
+            arch: config.architecture,
+            os: config.os,
+            size: manifest.layers.iter().map(|l| l.size).sum(),
+            supported_archs,
+        })
+    }
+}
+
+/// One layer per history entry, the manifest's layers handed out in order
+/// to the entries that carry files (`empty_layer` ones — ENV, CMD, … —
+/// take none). Uncompressed sizes are unknown until the layers are read.
+fn preview_layers(
+    history: &[ImageHistory],
+    manifest_layers: &[ImageManifestLayer],
+) -> Vec<ImageLayer> {
+    let mut manifest_layers = manifest_layers.iter();
+    history
+        .iter()
+        .map(|history| {
+            let empty = history.empty_layer.unwrap_or_default();
+            let layer = if empty { None } else { manifest_layers.next() };
+            ImageLayer {
+                created: history.created.clone(),
+                cmd: history.created_by.clone().unwrap_or_default(),
+                empty,
+                digest: layer.map(|l| l.digest.clone()).unwrap_or_default(),
+                media_type: layer.map(|l| l.media_type.clone()).unwrap_or_default(),
+                size: layer.map_or(0, |l| l.size),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// [`ImagePreview`] of a registry image. Local sources have nothing cheaper
+/// to offer than the analysis itself (`docker save` writes every layer).
+pub async fn preview_docker_image(
+    image_info: ImageInfo,
+    credentials: Option<super::registry_auth::RegistryCredentials>,
+) -> Result<ImagePreview> {
+    if is_local_registry(&image_info.registry) {
+        return Err(Error::Whatever {
+            message: "a preview is only available for registry images".to_string(),
+        });
+    }
+    DockerClient::new(&image_info.registry)
+        .preview(&mut DockerImageParams {
+            user: image_info.user,
+            img: image_info.name,
+            tag: image_info.tag,
+            arch: image_info.arch,
+            quiet: true,
+            credentials,
+            ..Default::default()
+        })
+        .await
+}
+
 pub async fn analyze_docker_image(
     image_info: ImageInfo,
     lang: crate::i18n::Lang,
@@ -2116,6 +2236,42 @@ pub async fn analyze_docker_image_or_last_known(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_layers_skip_empty_history_entries() {
+        let entry = |cmd: &str, empty: bool| ImageHistory {
+            created_by: Some(cmd.to_string()),
+            empty_layer: empty.then_some(true),
+            ..Default::default()
+        };
+        let blob = |digest: &str, size: u64| ImageManifestLayer {
+            digest: digest.to_string(),
+            size,
+            ..Default::default()
+        };
+        let layers = preview_layers(
+            &[
+                entry("ADD rootfs", false),
+                entry("ENV A=1", true),
+                entry("RUN make", false),
+                entry("CMD [\"app\"]", true),
+            ],
+            &[blob("sha256:a", 10), blob("sha256:b", 20)],
+        );
+        let view: Vec<(&str, bool, &str, u64)> = layers
+            .iter()
+            .map(|l| (l.cmd.as_str(), l.empty, l.digest.as_str(), l.size))
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("ADD rootfs", false, "sha256:a", 10),
+                ("ENV A=1", true, "", 0),
+                ("RUN make", false, "sha256:b", 20),
+                ("CMD [\"app\"]", true, "", 0),
+            ]
+        );
+    }
 
     #[test]
     fn cache_arch_drops_the_platform_for_single_image_manifests() {

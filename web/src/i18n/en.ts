@@ -31,6 +31,10 @@ export default {
   expandLabel: "Expand",
   keywordsLabel: "Keywords",
   wastedSummaryTitle: "Wasted Summary",
+  wasteRemoved: "written in layer {from}, deleted in layer {to}",
+  wasteOverwritten: "written in layer {from}, overwritten in layer {to}",
+  wasteRemovedIn: "deleted in layer {to}",
+  wasteOverwrittenIn: "overwritten in layer {to}",
   totalSizeLabel: "Total Size",
   countLabel: "Count",
   pathLabel: "Path",
@@ -59,12 +63,18 @@ export default {
   treemapSmaller: "{n} smaller items",
   treemapHint:
     "Final filesystem as seen by a container. Area is size, color is the layer that wrote the bytes. Click a directory to open it.",
+  previewAnalyzing: "Analyzing files…",
+  previewMeta: "{platform} · {layers} layers · {size} compressed",
+  previewHint:
+    "Layers from the image manifest. The file tree, wasted space and findings appear once the layers are read — a first analysis downloads them, later ones use the cache.",
   compareButton: "Compare with…",
   compareTitle: "Compare with another image",
   compareIntro:
     "Compare {target} against an earlier image — say the previous release — to see what grew, what was added and what went away.",
   compareBasePlaceholder: "Base image, e.g. app:1.0",
   compareSubmit: "Compare",
+  comparePlatforms:
+    "Or compare {platform} with another platform of this image:",
   diffBase: "Base",
   diffTarget: "Target",
   diffChange: "Change",

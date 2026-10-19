@@ -3,7 +3,7 @@ use chrono::DateTime;
 use std::cmp::Reverse;
 
 use crate::i18n::{self, Lang};
-use crate::image::{final_filesystem, DockerAnalyzeResult, FileTreeItem, Op};
+use crate::image::{final_filesystem, DockerAnalyzeResult, FileTreeItem, Op, WasteChange};
 
 pub(crate) fn icon(severity: &str) -> &'static str {
     match severity {
@@ -26,6 +26,34 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// Changes listed per wasted path; the count column covers the rest.
+const WASTE_CHANGES_SHOWN: usize = 3;
+
+/// `L1 → L3 deleted, L3 → L5 overwritten` (1-based, like the layer
+/// headings). The writing layer is missing from analyses cached by 0.12.0.
+fn waste_changes(changes: &[WasteChange], lang: Lang) -> String {
+    let mut parts: Vec<String> = changes
+        .iter()
+        .take(WASTE_CHANGES_SHOWN)
+        .map(|c| {
+            let from = c
+                .written_in
+                .map(|l| format!("L{} → ", l + 1))
+                .unwrap_or_default();
+            let key = if c.removed {
+                "md.waste.removed"
+            } else {
+                "md.waste.overwritten"
+            };
+            format!("{from}L{} {}", c.layer + 1, i18n::tr(lang, key))
+        })
+        .collect();
+    if changes.len() > WASTE_CHANGES_SHOWN {
+        parts.push("…".to_string());
+    }
+    parts.join(", ")
 }
 
 /// Largest files in the final filesystem shown in the summary.
@@ -416,17 +444,19 @@ pub fn to_markdown(result: &DockerAnalyzeResult, skip_base: bool, lang: Lang) ->
         md.push_str(&t("md.wasted.desc"));
         md.push_str("\n\n");
         md.push_str(&format!(
-            "| {} | {} | {} |\n|------|-------------|-------------|\n",
+            "| {} | {} | {} | {} |\n|------|-------------|-------------|-------------|\n",
             t("md.col.path"),
             t("md.col.totwasted"),
-            t("md.col.occ")
+            t("md.col.occ"),
+            t("md.col.layers")
         ));
         for item in summary.wasted_list.iter().take(20) {
             md.push_str(&format!(
-                "| `{}` | {} | {} |\n",
+                "| `{}` | {} | {} | {} |\n",
                 item.path,
                 ByteSize(item.total_size),
-                item.count
+                item.count,
+                waste_changes(&item.changes, lang)
             ));
         }
         md.push('\n');
@@ -622,6 +652,29 @@ mod tests {
     use super::*;
     use crate::image::ImageLayer;
     use crate::recommend::Recommendation;
+
+    #[test]
+    fn waste_changes_name_both_layers() {
+        let change = |written_in, layer, removed| WasteChange {
+            written_in,
+            layer,
+            removed,
+        };
+        assert_eq!(
+            waste_changes(&[change(Some(0), 2, true)], Lang::En),
+            "L1 → L3 deleted"
+        );
+        // Cached by 0.12.0: no writing layer.
+        assert_eq!(
+            waste_changes(&[change(None, 1, false)], Lang::Zh),
+            "L2 覆盖"
+        );
+        let many: Vec<WasteChange> = (1..6).map(|l| change(Some(l - 1), l, false)).collect();
+        assert_eq!(
+            waste_changes(&many, Lang::En),
+            "L1 → L2 overwritten, L2 → L3 overwritten, L3 → L4 overwritten, …"
+        );
+    }
 
     #[test]
     fn clip_never_splits_a_character() {

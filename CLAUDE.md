@@ -116,11 +116,11 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **`src/lib.rs`**: `Args` (clap CLI; the `diff` subcommand, with the output/config/lang/credential flags `global` so they work on either side of it), `run()` mode selection (terminal/web/diff), CI gate output, cleanup cron; all modules live here so `cargo test --lib` works
 - **`src/image/`**: Core image analysis logic
   - `docker.rs`: Registry API client, blob download (streaming + digest verify + 401 token refresh), the `analyze` pipeline
-  - `image_ref.rs`: Image reference parsing (`ImageInfo`)
+  - `image_ref.rs`: Image reference parsing (`ImageInfo`); platform spelling (`normalize_arch` / `platform_name`: `arm/v7`, plain `arm64`) and matching (`platform_matches`, variant-aware), shared by the registry index and local OCI index pickers
   - `registry_auth.rs`: Credential resolution (CLI/env, docker config.json, credential helpers)
   - `layer.rs`: Tar extraction, streaming decompress, per-file blake3 hashing, whiteout parsing
   - `oci_image.rs`: OCI spec types, file tree building, `final_filesystem` (what a container sees, whiteout / opaque-dir aware), cross-layer duplicate detection
-  - `sensitive.rs`: Path-based secret / cache / dev-artifact heuristics (plus `has_path_frag` segment matcher)
+  - `sensitive.rs`: Path-based secret / cache / dev-artifact heuristics (plus `has_path_frag` segment matcher). `is_pkg_cache` / `is_dev_artifact` are the single definitions behind both the risk tags (scan) and the recommendations (final filesystem)
   - `elf.rs`: Entrypoint ELF probe (goblin): libc family, min glibc vs. base OS; `find_unstripped_binaries` (section-header scan, runs concurrently with the duplicate pass)
 - **`src/recommend.rs`**: Rule engine deriving localized recommendation cards from the analysis result (pure function of `DockerAnalyzeResult`)
 - **`src/diff.rs`**: `diff_images(base, target) -> ImageDiff` (pure, like `recommend`) and `to_diff_markdown`; layers match by `ImageLayer::diff_id` (config `rootfs.diff_ids`) because a `docker save` tar names layers by path
@@ -134,6 +134,7 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
   - `layers.rs`, `files.rs`, `layer_detail.rs`, `image_detail.rs`, `util.rs`: Widget definitions
 - **`src/controller.rs`: Web API endpoints**
   - `/api/analyze`: Initiate image analysis (singleflight-deduplicated; `format=markdown` / `format=summary`, `includeTree=false`, `noVerifyDup` variants)
+  - `/api/manifest`: Registry image's layers from manifest + config only (`preview_docker_image` → `ImagePreview`); the web shows it when a first analysis is still running after 500 ms
   - `/api/diff`: Compare two images (`base`, `target`, `format=markdown`); both go through the same singleflight, one after the other so shared layers download once
   - `/api/file`: Download individual files from layers
   - `/api/file-preview`: First bytes of a file for the web preview (text, or a hex dump for binaries)
@@ -182,6 +183,8 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 `stale_as_of` on the result is set only for a fallback result served while the registry was unavailable (serialized as `staleAsOf`, never written to the disk cache).
 
 **AnalyzeReport** (`DockerAnalyzeResult::report`): the result flattened together with `efficiencyScore` / `wastedSize` / `wastedPercent`. This is what `-o` JSON and `/api/analyze` serialize; the bare `DockerAnalyzeResult` (analysis cache) does not store those derived numbers.
+
+`fileSummaryList` entries carry `written_in` (the layer that wrote the copy a later layer overwrites / removes), so wasted space reads "written in layer 1, deleted in layer 3"; analyses cached by 0.12.0 lack it. Every user-facing layer number (web, Markdown, MCP) is 1-based.
 
 **FileTreeItem**: Hierarchical file representation with operation type:
 - Op 0: Normal (added in this layer)

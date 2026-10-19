@@ -46,12 +46,14 @@ import {
   FilePreview,
   FileTreeList,
   ImageDescriptions,
+  ImagePreview,
   Layer,
   McpStatus,
   ModifiedFile,
   Recommendation,
   SensitiveFile,
   FileWastedSummary,
+  WasteChange,
 } from "./types";
 
 const { Option } = Select;
@@ -283,6 +285,7 @@ export const VirtualFileTree = ({
 
 export const SearchBar = ({
   arch,
+  platforms,
   defaultImage,
   loading,
   onArchChange,
@@ -290,21 +293,29 @@ export const SearchBar = ({
   size = "large",
 }: {
   arch: string;
+  /** The shown image's platforms; amd64 / arm64 when there is none. */
+  platforms?: string[];
   defaultImage: string;
   loading: boolean;
   onArchChange: (arch: string) => void;
   onSearch: (image: string) => void;
   size?: "large" | "middle";
 }) => {
+  const choices =
+    platforms && platforms.length > 0 ? platforms : ["amd64", "arm64"];
   const selectBefore = (
     <Select
       size={size}
       value={arch}
       style={{ width: size === "large" ? 108 : 96 }}
+      popupMatchSelectWidth={false}
       onChange={onArchChange}
     >
-      <Option value="amd64">AMD64</Option>
-      <Option value="arm64">ARM64</Option>
+      {(choices.includes(arch) ? choices : [...choices, arch]).map((p) => (
+        <Option key={p} value={p}>
+          {p.toUpperCase()}
+        </Option>
+      ))}
     </Select>
   );
   return (
@@ -440,6 +451,68 @@ export const ImageSummaryCard = memo(
   },
 );
 
+const fill = (template: string, values: Record<string, string>) =>
+  Object.entries(values).reduce(
+    (text, [key, value]) => text.replace(`{${key}}`, value),
+    template,
+  );
+
+/** The layer list from the manifest, shown while a first analysis reads
+ *  the layers; replaced by the full report when it is done. */
+export const ImagePreviewCard = memo(
+  ({ preview }: { preview: ImagePreview }) => {
+    const fileLayers = preview.layers.filter((l) => !l.empty).length;
+    return (
+      <Card
+        className="panel"
+        title={<code className="previewName">{preview.name}</code>}
+        extra={
+          <span className="previewStatus">
+            <Spin size="small" /> {i18nGet("previewAnalyzing")}
+          </span>
+        }
+      >
+        <p className="previewMeta">
+          {fill(i18nGet("previewMeta"), {
+            platform: `${preview.os}/${preview.arch}`,
+            layers: String(fileLayers),
+            size: prettyBytes(preview.size),
+          })}
+        </p>
+        <ol className="previewLayers">
+          {preview.layers.map((layer, i) => (
+            <li key={i} className={layer.empty ? "empty" : undefined}>
+              <span>{i + 1}</span>
+              <span>{layer.empty ? "" : prettyBytes(layer.size)}</span>
+              <code title={layer.cmd}>{layer.cmd || "—"}</code>
+            </li>
+          ))}
+        </ol>
+        <p className="previewHint">{i18nGet("previewHint")}</p>
+      </Card>
+    );
+  },
+);
+
+/** Changes listed per wasted path; the count column covers the rest. */
+const WASTE_CHANGES_SHOWN = 3;
+
+/** "written in layer 1, deleted in layer 3" — 1-based, like the layer
+ *  select. Analyses cached by 0.12.0 lack the writing layer. */
+const wasteChangeText = (change: WasteChange) => {
+  const to = String(change.layer + 1);
+  if (change.writtenIn === undefined) {
+    return fill(
+      i18nGet(change.removed ? "wasteRemovedIn" : "wasteOverwrittenIn"),
+      { to },
+    );
+  }
+  return fill(i18nGet(change.removed ? "wasteRemoved" : "wasteOverwritten"), {
+    from: String(change.writtenIn + 1),
+    to,
+  });
+};
+
 export const WastedSummaryCard = memo(
   ({ wastedList }: { wastedList: FileWastedSummary[]; isDark?: boolean }) => {
     const arr = wastedList.filter((item) => item.totalSize > 0);
@@ -458,7 +531,16 @@ export const WastedSummaryCard = memo(
             <li key={item.path}>
               <span className="monoCell">{prettyBytes(item.totalSize)}</span>
               <span className="monoCell">{item.count}</span>
-              <span className="monoCell">/{item.path}</span>
+              <span className="monoCell">
+                /{item.path}
+                <span className="wasteChanges">
+                  {item.changes
+                    .slice(0, WASTE_CHANGES_SHOWN)
+                    .map(wasteChangeText)
+                    .join(" · ")}
+                  {item.changes.length > WASTE_CHANGES_SHOWN ? " · …" : ""}
+                </span>
+              </span>
             </li>
           ))}
         </ul>
@@ -486,7 +568,7 @@ export const SensitiveFilesCard = memo(
           </li>
           {files.map((f) => (
             <li key={`${f.layerIndex}-${f.path}`}>
-              <span className="monoCell">{f.layerIndex}</span>
+              <span className="monoCell">{f.layerIndex + 1}</span>
               <span className="monoCell">{prettyBytes(f.size || 0)}</span>
               <span>{f.reason}</span>
               <span className="monoCell">/{f.path}</span>
@@ -518,7 +600,7 @@ export const DuplicateGroupsCard = memo(
               g.paths && g.paths.length > 0
                 ? g.paths
                     .slice(0, 3)
-                    .map((p) => `L${p.layerIndex}:/${p.path}`)
+                    .map((p) => `L${p.layerIndex + 1}:/${p.path}`)
                     .join(" · ")
                 : g.hash.slice(0, 12);
             return (
@@ -844,12 +926,6 @@ const textWidth = (text: string) => {
   }
   return measureCtx ? measureCtx.measureText(text).width : text.length * 7;
 };
-
-const fill = (template: string, values: Record<string, string>) =>
-  Object.entries(values).reduce(
-    (text, [key, value]) => text.replace(`{${key}}`, value),
-    template,
-  );
 
 /** `node`'s children as tiles, largest first, the tail past `max` merged. */
 const childTiles = (

@@ -85,12 +85,24 @@ export interface FileSummaryList {
   layerIndex: number;
   op: number;
   info: Info;
+  /** Layer that wrote the copy overwritten / removed here (0-based);
+   *  missing from analyses cached by 0.12.0. */
+  writtenIn?: number;
+}
+
+/** A copy written in one layer and overwritten or removed in a later one
+ *  (0-based layers). */
+export interface WasteChange {
+  writtenIn?: number;
+  layer: number;
+  removed: boolean;
 }
 
 export interface FileWastedSummary {
   path: string;
   totalSize: number;
   count: number;
+  changes: WasteChange[];
 }
 
 export interface ImageAnalyzeResult {
@@ -111,6 +123,9 @@ export interface ImageAnalyzeResult {
   duplicateGroups?: DuplicateGroup[];
   recommendations?: Recommendation[];
   runtimeCompat?: RuntimeCompat;
+  /** The image index's linux platforms as `?arch=` takes them (`arm/v7`);
+   *  empty for an image published for one platform. */
+  supportedArchs?: string[];
   /** Set only when the registry was unavailable and this is the last
    *  cached analysis: the time (RFC 3339) that analysis was made. */
   staleAsOf?: string;
@@ -147,6 +162,18 @@ export interface LatestImages {
   images: string[];
   version: string;
   mcp?: McpStatus;
+}
+
+/** `/api/manifest`: an image before any layer is read. */
+export interface ImagePreview {
+  name: string;
+  arch: string;
+  os: string;
+  /** One per history entry; `unpackSize` is not known yet (0). */
+  layers: Layer[];
+  /** Compressed size of all layers. */
+  size: number;
+  supportedArchs: string[];
 }
 
 /** `/api/diff`: one side's headline numbers. */

@@ -53,9 +53,10 @@ Inside the TUI:
 diving redis:alpine
 diving quay.io/prometheus/node-exporter
 
-# pick an architecture for multi-arch images (default: the host's;
-# x86_64 / aarch64 are accepted for amd64 / arm64)
+# pick a platform of a multi-platform image (default: the host's;
+# x86_64 / aarch64 are accepted for amd64 / arm64; arm/v6 vs arm/v7)
 diving redis:alpine?arch=arm64
+diving redis:alpine?arch=arm/v7
 
 # pin an exact manifest by digest
 diving redis@sha256:<digest>
@@ -195,6 +196,28 @@ The step fails with diving's [exit code](#exit-codes). Its `summary-file` output
     GH_TOKEN: ${{ github.token }}   # needs `pull-requests: write`
 ```
 
+### GitLab CI
+
+GitLab sets `CI=true` in every job, so the gate is on. The Docker image starts `diving` in web mode, so clear its entrypoint to run commands:
+
+```yaml
+image-check:
+  image:
+    name: vicanso/diving:latest
+    entrypoint: [""]
+  variables:
+    # pull from the project's own registry
+    REGISTRY_USERNAME: $CI_REGISTRY_USER
+    REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - diving "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" --summary diving-summary.md
+  artifacts:
+    when: always
+    paths: [diving-summary.md]
+```
+
+To compare against the main-branch build, run `diving diff "$CI_REGISTRY_IMAGE:main" "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"` instead.
+
 ### Accepting known findings
 
 Every recommendation has a stable id, printed in parentheses in the CI output and available as `id` in the JSON. List the findings you have reviewed and accept under `ignore_recommendations`. They are still printed, marked `ignored`, but no longer count toward `fail_on_severity` (the three thresholds above are unaffected):
@@ -316,7 +339,7 @@ Open `http://127.0.0.1:7001/` in the browser.
 
 ![](./assets/diving-web.png)
 
-Besides the layer explorer and the findings, a report has a treemap of the final filesystem (area is size, color is the layer that wrote the bytes; click a directory to drill in), a preview for text files (binary ones show a hex dump), and **Compare with…** to [diff](#compare-two-images) the image against another one.
+Besides the layer explorer and the findings, a report has a treemap of the final filesystem (area is size, color is the layer that wrote the bytes; click a directory to drill in), a preview for text files (binary ones show a hex dump), and **Compare with…** to [diff](#compare-two-images) the image against another one — or against another platform of the same image. The platform selector next to the search box lists the platforms the image is published for and switches between them. While a first analysis is still downloading the layers, the page shows the layer list from the manifest: each build step with its compressed size.
 
 The container runs as a non-root UID (`1000:1000`); the `chown` above lets it write the layer cache (without it the container fails to start). The image is based on `debian:trixie-slim` plus a CA certificate bundle. It has no `tzdata`, so timestamps are in UTC, and it ships no `wget`/`curl`, so there is no in-image `HEALTHCHECK` — probe `GET /ping` from your orchestrator (Kubernetes `livenessProbe`, a sidecar, etc.) instead.
 
@@ -351,6 +374,10 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 # Markdown report including base layers (hidden by default)
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```
+
+#### `GET /api/manifest`
+
+The layers of a registry image from its manifest and config alone — build steps, compressed sizes, platforms — without reading any layer (`image` as for `/api/analyze`). The web UI shows it while a first analysis runs.
 
 #### `GET /api/diff`
 

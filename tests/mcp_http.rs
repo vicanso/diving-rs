@@ -332,3 +332,30 @@ async fn diff_images_over_mcp_and_api() {
     assert_eq!(diff["added"]["count"], 2);
     assert_eq!(diff["changed"]["files"][0]["path"], "data/model.bin");
 }
+
+/// `/api/manifest` reads a registry manifest; a local source has none to
+/// offer short of the full `docker save` / tar read, so it says so.
+#[tokio::test]
+async fn manifest_preview_is_registry_only() {
+    use_default_config();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, controller::new_router(McpStatus::default()))
+            .await
+            .unwrap();
+    });
+    let resp = client()
+        .get(format!(
+            "http://{addr}/api/manifest?image=file:///tmp/image.tar"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("only available for registry images"));
+}

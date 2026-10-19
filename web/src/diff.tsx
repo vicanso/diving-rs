@@ -34,9 +34,14 @@ const percentChange = (from: number, to: number) =>
  *  against it. */
 export const CompareButton = ({
   target,
+  platform,
+  platforms,
   onCompare,
 }: {
   target: string;
+  /** The platform shown, and the others the image is published for. */
+  platform: string;
+  platforms: string[];
   onCompare: (base: string, target: string) => void;
 }) => {
   const [open, setOpen] = useState(false);
@@ -45,6 +50,14 @@ export const CompareButton = ({
     if (!base.trim()) return;
     setOpen(false);
     onCompare(base.trim(), target);
+  };
+  // Another platform of this very image: both sides name their platform,
+  // so the page's arch setting doesn't apply to either.
+  const image = target.split("?arch=")[0];
+  const others = platforms.filter((p) => p !== platform);
+  const comparePlatform = (other: string) => {
+    setOpen(false);
+    onCompare(`${image}?arch=${other}`, `${image}?arch=${platform}`);
   };
   return (
     <>
@@ -68,6 +81,20 @@ export const CompareButton = ({
           onChange={(e) => setBase(e.target.value)}
           onPressEnter={submit}
         />
+        {others.length > 0 && (
+          <div className="comparePlatforms">
+            <p>
+              {fill(i18nGet("comparePlatforms"), {
+                platform: platform.toUpperCase(),
+              })}
+            </p>
+            {others.map((p) => (
+              <Button key={p} size="small" onClick={() => comparePlatform(p)}>
+                {p.toUpperCase()}
+              </Button>
+            ))}
+          </div>
+        )}
       </Modal>
     </>
   );

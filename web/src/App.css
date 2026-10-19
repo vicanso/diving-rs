@@ -940,6 +940,14 @@
   overflow-y: auto;
 }
 
+.wasteChanges {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
 /* —— treemap —— */
 .treemapBar {
   display: flex;
@@ -1182,6 +1190,67 @@
   color: var(--ink-muted);
 }
 
+/* —— layer preview (before the analysis is done) —— */
+.previewName {
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.previewStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink-secondary);
+}
+
+.previewMeta {
+  margin: 0 0 12px;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.previewLayers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.previewLayers li {
+  display: grid;
+  grid-template-columns: 2.5em 6.5em minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.previewLayers li > span:first-child {
+  color: var(--ink-muted);
+}
+.previewLayers li > span:nth-child(2) {
+  text-align: right;
+  color: var(--ink);
+}
+.previewLayers code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+.previewLayers li.empty code {
+  color: var(--ink-muted);
+}
+
+.previewHint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
 /* —— image diff —— */
 .reportToolbar {
   display: flex;
@@ -1199,6 +1268,18 @@
 }
 
 .compareIntro {
+  color: var(--ink-secondary);
+}
+
+.comparePlatforms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+.comparePlatforms p {
+  flex-basis: 100%;
+  margin: 0;
   color: var(--ink-secondary);
 }
 

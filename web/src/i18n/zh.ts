@@ -30,6 +30,10 @@ export default {
   expandLabel: "展开所有目录",
   keywordsLabel: "关键字",
   wastedSummaryTitle: "浪费的空间概要",
+  wasteRemoved: "第 {from} 层写入，第 {to} 层删除",
+  wasteOverwritten: "第 {from} 层写入，第 {to} 层覆盖",
+  wasteRemovedIn: "第 {to} 层删除",
+  wasteOverwrittenIn: "第 {to} 层覆盖",
   totalSizeLabel: "总大小",
   countLabel: "次数",
   pathLabel: "路径",
@@ -59,12 +63,17 @@ export default {
   treemapSmaller: "其余 {n} 项",
   treemapHint:
     "容器内看到的最终文件系统。面积表示大小，颜色表示写入这些字节的层。点击目录可进入。",
+  previewAnalyzing: "正在分析文件…",
+  previewMeta: "{platform} · {layers} 层 · 压缩后 {size}",
+  previewHint:
+    "以上是镜像 manifest 中的层信息。读完各层后会显示文件树、浪费空间和各项发现 —— 首次分析需要下载这些层，之后走缓存。",
   compareButton: "对比…",
   compareTitle: "与另一个镜像对比",
   compareIntro:
     "把 {target} 与一个更早的镜像（比如上一个版本）对比，看哪里变大了、新增了什么、去掉了什么。",
   compareBasePlaceholder: "基准镜像，例如 app:1.0",
   compareSubmit: "对比",
+  comparePlatforms: "或者把 {platform} 与本镜像的其它平台对比：",
   diffBase: "基准",
   diffTarget: "目标",
   diffChange: "变化",

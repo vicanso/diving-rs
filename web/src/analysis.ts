@@ -38,23 +38,32 @@ export interface FileTreeRow {
 
 export const getImageSummary = (result: ImageAnalyzeResult) => {
   let wastedSize = 0;
-  const wastedList: FileWastedSummary[] = [];
-  // 计算浪费的空间以及文件
+  // 计算浪费的空间以及文件（按路径聚合；Map 而非逐个 find，`chmod -R`
+  // 这类层会有成千上万条）
+  const byPath = new Map<string, FileWastedSummary>();
   result.fileSummaryList.forEach((item) => {
     const { size, path } = item.info;
-    const found = wastedList.find((item) => item.path === path);
+    const change = {
+      writtenIn: item.writtenIn,
+      layer: item.layerIndex,
+      removed: item.op === opRemoved,
+    };
+    const found = byPath.get(path);
     if (found) {
       found.count++;
       found.totalSize += size;
+      found.changes.push(change);
     } else {
-      wastedList.push({
+      byPath.set(path, {
         path,
         count: 1,
         totalSize: size,
+        changes: [change],
       });
     }
     wastedSize += size;
   });
+  const wastedList = [...byPath.values()];
   wastedList.sort((a, b) => {
     return b.totalSize - a.totalSize;
   });

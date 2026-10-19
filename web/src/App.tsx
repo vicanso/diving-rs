@@ -36,6 +36,7 @@ import {
   DuplicateGroupsCard,
   EXAMPLE_IMAGES,
   ImageSummaryCard,
+  ImagePreviewCard,
   ImageTreemap,
   LatestImagesList,
   McpGuide,
@@ -54,6 +55,7 @@ import {
   ImageAnalyzeResult,
   ImageDescriptions,
   ImageDiff,
+  ImagePreview,
   LatestImages,
   Layer,
   McpStatus,
@@ -68,7 +70,6 @@ const { defaultAlgorithm, darkAlgorithm } = theme;
 const { Header, Content } = Layout;
 
 const amd64Arch = "amd64";
-const arm64Arch = "arm64";
 const request = axios.create({
   timeout: 600 * 1000,
   baseURL: "./api",
@@ -102,6 +103,7 @@ interface ReportState {
   duplicateGroups: DuplicateGroup[];
   dockerfile: string;
   staleAsOf: string;
+  supportedArchs: string[];
 }
 
 const readQuery = () => {
@@ -109,10 +111,11 @@ const readQuery = () => {
   const image = urlInfo.searchParams.get("image") || "";
   const base = urlInfo.searchParams.get("base") || "";
   const target = urlInfo.searchParams.get("target") || "";
-  let arch = urlInfo.searchParams.get("arch") || amd64Arch;
-  if ([amd64Arch, arm64Arch].indexOf(arch) === -1) {
-    arch = amd64Arch;
-  }
+  // Any platform `?arch=` takes: `arm64`, `arm/v7`, `s390x`, …
+  const requested = (urlInfo.searchParams.get("arch") || "").toLowerCase();
+  const arch = /^[a-z0-9_]+(\/[a-z0-9]+)?$/.test(requested)
+    ? requested
+    : amd64Arch;
   return { image, arch, base, target };
 };
 
@@ -139,6 +142,10 @@ const withArch = (image: string, arch: string) =>
   /^(docker|podman):\/\//.test(image) || image.includes("?arch=") || !arch
     ? image
     : `${image}?arch=${arch}`;
+
+/** A first analysis that has not finished by then shows the layer list
+ *  from the manifest; a cached one is back sooner and never flashes it. */
+const PREVIEW_DELAY_MS = 500;
 
 const showRequestError = (err: unknown, fallback: string) => {
   let msg = (err as Error)?.message as string;
@@ -169,6 +176,7 @@ const App = () => {
   const [diff, setDiff] = useState<{ refs: DiffRefs; data: ImageDiff } | null>(
     null,
   );
+  const [preview, setPreview] = useState<ImagePreview | null>(null);
 
   // Every request takes a ticket; a response whose ticket is no longer the
   // latest — the user moved on, e.g. with the back button — is dropped.
@@ -189,9 +197,26 @@ const App = () => {
     );
     setImageName(image);
     setLoading(true);
+    setPreview(null);
     const current = ++ticket.current;
+    const ref = encodeURIComponent(withArch(image, archValue));
+    // Registry images only: a local source has no cheap manifest to read.
+    const previewTimer = /^(file|docker|podman):\/\//.test(image)
+      ? undefined
+      : window.setTimeout(() => {
+          request
+            .get<ImagePreview>(`/manifest?image=${ref}`, { timeout: 60 * 1000 })
+            .then(({ data }) => {
+              if (current === ticket.current) {
+                setPreview(data);
+              }
+            })
+            .catch(() => {
+              /* the analysis reports any error */
+            });
+        }, PREVIEW_DELAY_MS);
     try {
-      const reqUrl = `/analyze?image=${encodeURIComponent(withArch(image, archValue))}`;
+      const reqUrl = `/analyze?image=${ref}`;
       const { data } = await request.get<ImageAnalyzeResult>(reqUrl, {
         timeout: 10 * 60 * 1000,
       });
@@ -214,6 +239,7 @@ const App = () => {
         duplicateGroups: data.duplicateGroups || [],
         dockerfile: data.dockerfile || "",
         staleAsOf: data.staleAsOf || "",
+        supportedArchs: data.supportedArchs || [],
       });
       setCurrentLayer(0);
       setDiff(null);
@@ -222,8 +248,10 @@ const App = () => {
         showRequestError(err, "analyze image fail");
       }
     } finally {
+      window.clearTimeout(previewTimer);
       if (current === ticket.current) {
         setLoading(false);
+        setPreview(null);
       }
     }
   };
@@ -272,6 +300,7 @@ const App = () => {
     } else {
       ticket.current++;
       setLoading(false);
+      setPreview(null);
       setReport(null);
       setDiff(null);
       setImageName("");
@@ -374,12 +403,23 @@ const App = () => {
     });
   }, []);
 
+  // Switching platform redoes what is on screen for that platform.
+  const onArchChange = (value: string) => {
+    setArch(value);
+    if (diff) {
+      onCompare(diff.refs.base, diff.refs.target, "push", value);
+    } else if (report && imageName) {
+      onSearch(imageName, "push", value);
+    }
+  };
+
   const searchBar = (
     <SearchBar
       arch={arch}
+      platforms={report?.supportedArchs}
       defaultImage={imageName}
       loading={loading}
-      onArchChange={setArch}
+      onArchChange={onArchChange}
       onSearch={onSearch}
     />
   );
@@ -514,7 +554,9 @@ const App = () => {
     >
       <Layout className="appLayout">
         {githubIcon}
-        <Header className={report || diff ? "header hasSearch" : "header"}>
+        <Header
+          className={report || diff || preview ? "header hasSearch" : "header"}
+        >
           <div
             className={githubIcon ? "headerInner withCorner" : "headerInner"}
           >
@@ -528,14 +570,22 @@ const App = () => {
               <span>Diving</span>
               {version && <span className="version">v{version}</span>}
             </div>
-            {(report || diff) && (
+            {(report || diff || preview) && (
               <div className="headerSearch">{searchBar}</div>
             )}
             {mcp?.enabled && <McpGuide status={mcp} />}
           </div>
         </Header>
 
-        {!report && !diff && (
+        {preview && (
+          <Content>
+            <div className="contentWrapper reportStack">
+              <ImagePreviewCard preview={preview} />
+            </div>
+          </Content>
+        )}
+
+        {!report && !diff && !preview && (
           <div className="landing">
             <div className="landingInner">
               <div className="landingEyebrow">Docker · OCI · layers</div>
@@ -559,12 +609,17 @@ const App = () => {
           </div>
         )}
 
-        {report && (
+        {report && !preview && (
           <Content>
             <div className="contentWrapper reportStack">
               <div className="reportToolbar">
                 <code>{imageName}</code>
-                <CompareButton target={imageName} onCompare={onCompare} />
+                <CompareButton
+                  target={imageName}
+                  platform={arch}
+                  platforms={report.supportedArchs}
+                  onCompare={onCompare}
+                />
               </div>
               {report.staleAsOf && (
                 <Alert
@@ -596,7 +651,7 @@ const App = () => {
             </div>
           </Content>
         )}
-        {diff && (
+        {diff && !preview && (
           <Content>
             <div className="contentWrapper reportStack">
               <DiffView

@@ -53,9 +53,10 @@ TUI 内快捷键：
 diving redis:alpine
 diving quay.io/prometheus/node-exporter
 
-# 为多架构镜像指定架构（默认为本机架构；
-# 也接受 x86_64 / aarch64，等同 amd64 / arm64）
+# 为多平台镜像指定平台（默认为本机架构；也接受 x86_64 / aarch64，
+# 等同 amd64 / arm64；arm/v6 与 arm/v7 可区分）
 diving redis:alpine?arch=arm64
+diving redis:alpine?arch=arm/v7
 
 # 用 digest 固定到某个 manifest
 diving redis@sha256:<digest>
@@ -194,6 +195,28 @@ CI=true diving --config .diving.yml myimage:latest
     GH_TOKEN: ${{ github.token }}   # 需要 `pull-requests: write` 权限
 ```
 
+### GitLab CI
+
+GitLab 在每个 job 里都会设置 `CI=true`，所以卡口默认生效。Docker 镜像默认以 web 模式启动 `diving`，要执行命令需先清空 entrypoint：
+
+```yaml
+image-check:
+  image:
+    name: vicanso/diving:latest
+    entrypoint: [""]
+  variables:
+    # 从项目自己的镜像仓库拉取
+    REGISTRY_USERNAME: $CI_REGISTRY_USER
+    REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - diving "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" --summary diving-summary.md
+  artifacts:
+    when: always
+    paths: [diving-summary.md]
+```
+
+要与 main 分支构建的镜像对比，把命令换成 `diving diff "$CI_REGISTRY_IMAGE:main" "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"`。
+
 ### 接受已知问题
 
 每条建议都有一个固定的 id，CI 输出里显示在括号中，JSON 里是 `id` 字段。把已经评估并接受的问题写进 `ignore_recommendations`，它们仍会打印（标注「已忽略」），但不再参与 `fail_on_severity` 判定（上面三项阈值不受影响）：
@@ -315,7 +338,7 @@ docker run -d --restart=always \
 
 ![](./assets/diving-web.png)
 
-除了逐层浏览和各项发现，报告页还有最终文件系统的 Treemap（面积表示大小，颜色表示写入这些字节的层；点击目录可进入）、文本文件预览（二进制文件显示十六进制），以及 **对比…** 按钮，用来与另一个镜像[对比](#镜像对比)。
+除了逐层浏览和各项发现，报告页还有最终文件系统的 Treemap（面积表示大小，颜色表示写入这些字节的层；点击目录可进入）、文本文件预览（二进制文件显示十六进制），以及 **对比…** 按钮，用来与另一个镜像[对比](#镜像对比)，或与同一镜像的其它平台对比。搜索框旁的平台下拉框列出该镜像发布的所有平台，可直接切换。首次分析还在下载各层时，页面会先显示 manifest 里的层列表：每一步构建指令和它的压缩大小。
 
 容器以非 root 身份（UID `1000:1000`）运行；上方的 `chown` 让它能写入 layer 缓存（省略会导致启动失败）。镜像基于 `debian:trixie-slim`，另带 CA 证书包；不含 `tzdata`，时间一律按 UTC 显示。由于默认不含 `wget`/`curl`，未设置 in-image `HEALTHCHECK` —— 请改用编排层探针访问 `GET /ping`（Kubernetes `livenessProbe`、sidecar 等）。
 
@@ -350,6 +373,10 @@ curl "http://127.0.0.1:7001/api/analyze?image=redis:alpine&format=markdown"
 # Markdown 报告并包含基础镜像层（默认隐藏）
 curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&skipBase=false"
 ```
+
+#### `GET /api/manifest`
+
+只读 registry 镜像的 manifest 和 config，返回各层构建指令、压缩大小和支持的平台，不读取任何层（`image` 参数同 `/api/analyze`）。Web 界面在首次分析进行时显示它。
 
 #### `GET /api/diff`
 

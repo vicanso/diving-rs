@@ -7,8 +7,8 @@ mod registry_auth;
 mod sensitive;
 
 pub use docker::{
-    analyze_docker_image, analyze_docker_image_or_last_known, AnalyzeReport, DockerAnalyzeResult,
-    DockerAnalyzeSummary, SensitiveFileInfo,
+    analyze_docker_image, analyze_docker_image_or_last_known, preview_docker_image, AnalyzeReport,
+    DockerAnalyzeResult, DockerAnalyzeSummary, ImagePreview, SensitiveFileInfo, WasteChange,
 };
 pub use elf::{RuntimeCompat, UnstrippedBinary};
 pub use image_ref::{
@@ -26,4 +26,4 @@ pub use oci_image::{
     MEDIA_TYPE_OCI_MANIFEST,
 };
 pub use registry_auth::{registry_host, resolve_explicit, RegistryCredentials};
-pub(crate) use sensitive::{has_path_frag, MIN_PKG_CACHE_BYTES};
+pub(crate) use sensitive::{is_dev_artifact, is_pkg_cache, MIN_PKG_CACHE_BYTES};

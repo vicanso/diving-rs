@@ -14,6 +14,7 @@ use common::{build_fixture_tar, use_default_config};
 use diving::diff::{diff_images, to_diff_markdown};
 use diving::i18n::Lang;
 use diving::image::{analyze_docker_image, parse_image_info, FileTreeItem, Op};
+use diving::markdown::to_markdown;
 
 fn find_leaf<'a>(items: &'a [FileTreeItem], path: &str) -> Option<&'a FileTreeItem> {
     let (head, rest) = match path.split_once('/') {
@@ -73,12 +74,21 @@ async fn analyze_local_tar_end_to_end() {
     assert_eq!(removed.op, Op::Removed);
     assert_eq!(removed.layer_index, 2);
     assert_eq!(removed.info.size, "legacy-binary".len() as u64);
+    // ...and it records which layer wrote the copy it threw away.
+    assert_eq!(removed.written_in, Some(0));
     let modified = result
         .file_summary_list
         .iter()
         .find(|s| s.info.path == "etc/config.yml")
         .expect("modified summary entry");
     assert_eq!(modified.op, Op::Modified);
+    assert_eq!(modified.written_in, Some(0));
+    // The report numbers layers from 1, like its layer headings.
+    let md = to_markdown(&result, false, Lang::En);
+    assert!(
+        md.contains("| `usr/bin/old` | 13 B | 1 | L1 → L3 deleted |"),
+        "{md}"
+    );
 
     // Sensitive-file detection.
     assert!(result
