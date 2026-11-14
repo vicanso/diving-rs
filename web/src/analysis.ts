@@ -12,13 +12,16 @@ import {
 
 export const opRemoved = 1;
 export const opModified = 2;
+export const opAdded = 3;
 
 export interface FileTreeViewOption {
   expandAll: boolean;
   expandItems: string[];
+  collapsedItems?: string[];
   sizeLimit: number;
   onlyModifiedRemoved: boolean;
   keyword: string;
+  compactPaths?: boolean;
 }
 
 /** Flat row used by the virtualized file-tree renderer. */
@@ -166,16 +169,36 @@ const isModifiedRemoved = (item: FileTreeList): boolean => {
 };
 
 const isMatchKeyword = (item: FileTreeList, keyword: string): boolean => {
-  if (item.name.includes(keyword)) {
+  const normalized = keyword.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  if (
+    item.key.toLowerCase().includes(normalized) ||
+    item.name.toLowerCase().includes(normalized)
+  ) {
     return true;
   }
   // 如果子元素符合，则也符合
   for (let i = 0; i < item.children.length; i++) {
-    if (isMatchKeyword(item.children[i], keyword)) {
+    if (isMatchKeyword(item.children[i], normalized)) {
       return true;
     }
   }
   return false;
+};
+
+const matchesFilters = (item: FileTreeList, opt: FileTreeViewOption): boolean => {
+  if (opt.sizeLimit && item.size < opt.sizeLimit) {
+    return false;
+  }
+  if (opt.onlyModifiedRemoved && !isModifiedRemoved(item)) {
+    return false;
+  }
+  if (opt.keyword && !isMatchKeyword(item, opt.keyword)) {
+    return false;
+  }
+  return true;
 };
 
 export const flattenFileTree = (
@@ -187,21 +210,40 @@ export const flattenFileTree = (
   if (!items) {
     return;
   }
-  const expandAll = !!(opt.expandAll || opt.keyword);
-  const shouldExpand = (key: string) =>
-    expandAll || !!(opt.expandItems && opt.expandItems.includes(key));
+  const collapsedItems = opt.collapsedItems || [];
+  const shouldExpand = (key: string) => {
+    if (collapsedItems.includes(key)) return false;
+    if (opt.keyword) return true;
+    if (opt.expandAll) return true;
+    return !!(opt.expandItems && opt.expandItems.includes(key));
+  };
 
-  for (const item of items) {
-    if (opt.sizeLimit && item.size < opt.sizeLimit) {
+  for (const rawItem of items) {
+    if (!matchesFilters(rawItem, opt)) {
       continue;
     }
-    if (opt.onlyModifiedRemoved && !isModifiedRemoved(item)) {
-      continue;
+    let item = rawItem;
+    let displayName = rawItem.name;
+    let isDir = item.children.length > 0;
+
+    // Compact single-child directory chains (e.g. usr/local/lib/redis/modules)
+    // when compactPaths is enabled, skipping root "." or symlinked dirs.
+    if (opt.compactPaths !== false && isDir && displayName !== ".") {
+      while (item.children.length === 1) {
+        const onlyChild = item.children[0];
+        if (
+          onlyChild.children.length === 0 ||
+          onlyChild.link ||
+          !matchesFilters(onlyChild, opt)
+        ) {
+          break;
+        }
+        displayName = `${displayName}/${onlyChild.name}`;
+        item = onlyChild;
+      }
+      isDir = item.children.length > 0;
     }
-    if (opt.keyword && !isMatchKeyword(item, opt.keyword)) {
-      continue;
-    }
-    const isDir = item.children.length > 0;
+
     const expanded = isDir && shouldExpand(item.key);
     out.push({
       key: item.key,
@@ -209,7 +251,7 @@ export const flattenFileTree = (
       uid: item.uid,
       gid: item.gid,
       size: item.size,
-      name: item.name,
+      name: displayName,
       link: item.link,
       op: item.op,
       depth,
@@ -219,8 +261,7 @@ export const flattenFileTree = (
     if (isDir && expanded) {
       const beforeChildren = out.length;
       flattenFileTree(item.children, depth + 1, opt, out);
-      // Drop empty directories when keyword filtering produced no children
-      // and no keyword is active (matches prior list.pop() behaviour).
+      // Drop empty directories when filtering produced no children
       if (out.length === beforeChildren && !opt.keyword) {
         out.pop();
       }
@@ -424,4 +465,223 @@ export const squarify = (
     i = j;
   }
   return rects;
+};
+
+// ---- Layer command parsing & file count helpers ----
+
+export type LayerOpcode =
+  | "FROM"
+  | "RUN"
+  | "COPY"
+  | "ADD"
+  | "ENV"
+  | "ARG"
+  | "DIR"
+  | "EXPOSE"
+  | "CMD"
+  | "ENTRY"
+  | "USER"
+  | "LABEL"
+  | "VOL"
+  | "META";
+
+export interface ParsedLayerCommand {
+  opcode: LayerOpcode;
+  summary: string;
+  envArgs: string[];
+  formatted: string;
+}
+
+const formatShellBody = (body: string): string => {
+  const trimmed = body.trim();
+  if (!trimmed) return "";
+  // Split chained commands on `;` or `&&` outside single/double quotes.
+  const lines: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escape = false;
+
+  for (let idx = 0; idx < trimmed.length; idx++) {
+    const ch = trimmed[idx];
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escape = true;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      current += ch;
+      continue;
+    }
+    if (!inSingle && !inDouble) {
+      if (ch === ";") {
+        current += ";";
+        if (current.trim()) lines.push(current.trim());
+        current = "";
+        continue;
+      }
+      if (ch === "&" && trimmed[idx + 1] === "&") {
+        if (current.trim()) lines.push(`${current.trim()} &&`);
+        current = "";
+        idx++;
+        continue;
+      }
+    }
+    current += ch;
+  }
+  if (current.trim()) {
+    lines.push(current.trim());
+  }
+  return lines.join("\n");
+};
+
+export const parseLayerCommand = (
+  rawCmd: string,
+  layerIndex: number,
+  layerSize = 0,
+): ParsedLayerCommand => {
+  let text = (rawCmd || "").trim();
+  if (!text) {
+    return {
+      opcode: layerIndex === 0 && layerSize > 0 ? "FROM" : "META",
+      summary: layerIndex === 0 ? "base image" : "metadata",
+      envArgs: [],
+      formatted: "",
+    };
+  }
+
+  // Strip `/bin/sh -c #(nop) ` prefix common in Docker history.
+  text = text.replace(/^\/bin\/sh\s+-c\s+#\(nop\)\s+/i, "").trim();
+
+  // Check for BuildKit `RUN |N ARG=VAL ... /bin/sh -c ...` or `|N ARG=VAL ...`
+  const envArgs: string[] = [];
+  let explicitOp = "";
+
+  const opMatch = text.match(
+    /^(RUN|COPY|ADD|ENV|ARG|WORKDIR|EXPOSE|CMD|ENTRYPOINT|USER|LABEL|VOLUME|FROM|SHELL|STOPSIGNAL|HEALTHCHECK)\b\s*/i,
+  );
+  if (opMatch) {
+    explicitOp = opMatch[1].toUpperCase();
+    text = text.slice(opMatch[0].length).trim();
+  }
+
+  // Strip BuildKit `|N KEY=VALUE ... /bin/sh -c ` boilerplate.
+  const bkMatch = text.match(/^\|(\d+)\s+([\s\S]*?)\s+\/bin\/sh\s+-c\s+([\s\S]*)$/);
+  if (bkMatch) {
+    const argCount = parseInt(bkMatch[1], 10);
+    const argBlob = bkMatch[2].trim();
+    if (argBlob && argCount > 0) {
+      // Split roughly on ` KEY=` boundaries
+      const parts = argBlob.split(/\s+(?=[A-Za-z_][A-Za-z0-9_]*=)/);
+      for (const p of parts) {
+        if (p.trim()) envArgs.push(p.trim());
+      }
+    }
+    text = bkMatch[3].trim();
+    if (!explicitOp) explicitOp = "RUN";
+  } else {
+    const shMatch = text.match(/^\/bin\/sh\s+-c\s+([\s\S]*)$/);
+    if (shMatch) {
+      text = shMatch[1].trim();
+      if (!explicitOp) explicitOp = "RUN";
+    }
+  }
+
+  // Strip `# buildkit` trailing comment
+  text = text.replace(/\s*#\s*buildkit\s*$/i, "").trim();
+
+  let opcode: LayerOpcode = "RUN";
+  if (explicitOp === "WORKDIR") opcode = "DIR";
+  else if (explicitOp === "ENTRYPOINT") opcode = "ENTRY";
+  else if (explicitOp === "VOLUME") opcode = "VOL";
+  else if (
+    explicitOp === "FROM" ||
+    explicitOp === "RUN" ||
+    explicitOp === "COPY" ||
+    explicitOp === "ADD" ||
+    explicitOp === "ENV" ||
+    explicitOp === "ARG" ||
+    explicitOp === "EXPOSE" ||
+    explicitOp === "CMD" ||
+    explicitOp === "USER" ||
+    explicitOp === "LABEL"
+  ) {
+    opcode = explicitOp as LayerOpcode;
+  } else if (
+    layerIndex === 0 &&
+    /^(ADD|COPY)\s+file:/i.test(rawCmd)
+  ) {
+    opcode = "FROM";
+  } else if (explicitOp) {
+    opcode = "META";
+  }
+
+  const formatted =
+    opcode === "RUN" ? formatShellBody(text) : text;
+
+  // Build concise 1-line summary for the Layer Timeline
+  const firstMeaningfulLine =
+    formatted
+      .split("\n")
+      .map((l) => l.trim())
+      .find(
+        (l) =>
+          l &&
+          l !== "set -eux;" &&
+          l !== "set -ex;" &&
+          l !== "set -e;" &&
+          !l.startsWith("#"),
+      ) || text;
+  const compactSummary = firstMeaningfulLine.replace(/\s+/g, " ").trim();
+
+  return {
+    opcode,
+    summary: compactSummary || opcode.toLowerCase(),
+    envArgs,
+    formatted,
+  };
+};
+
+export interface LayerFileCounts {
+  total: number;
+  added: number;
+  modified: number;
+  removed: number;
+}
+
+export const countLayerFiles = (
+  items: FileTreeList[] | undefined,
+): LayerFileCounts => {
+  const counts: LayerFileCounts = {
+    total: 0,
+    added: 0,
+    modified: 0,
+    removed: 0,
+  };
+  if (!items) return counts;
+  const walk = (nodes: FileTreeList[]) => {
+    for (const node of nodes) {
+      if (node.children.length > 0) {
+        walk(node.children);
+      } else if (node.name) {
+        counts.total++;
+        if (node.op === opRemoved) counts.removed++;
+        else if (node.op === opModified) counts.modified++;
+        else counts.added++;
+      }
+    }
+  };
+  walk(items);
+  return counts;
 };

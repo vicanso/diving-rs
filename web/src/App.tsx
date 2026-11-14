@@ -10,14 +10,14 @@ import {
   Alert,
   Card,
   Checkbox,
-  Col,
   ConfigProvider,
-  Form,
   Input,
+  InputRef,
   Layout,
   message,
-  Row,
+  Segmented,
   Select,
+  Tabs,
   theme,
 } from "antd";
 import axios, { AxiosError } from "axios";
@@ -25,6 +25,7 @@ import prettyBytes from "pretty-bytes";
 import i18nGet from "./i18n";
 import {
   addKeyToFileTreeItem,
+  countLayerFiles,
   flattenFileTree,
   getImageSummary,
   FileTreeRow,
@@ -32,13 +33,15 @@ import {
 } from "./analysis";
 import {
   BigModifiedFilesCard,
+  CommandInspector,
   DockerfileCard,
   DuplicateGroupsCard,
   EXAMPLE_IMAGES,
-  ImageSummaryCard,
   ImagePreviewCard,
   ImageTreemap,
+  KpiStrip,
   LatestImagesList,
+  LayerTimeline,
   McpGuide,
   RecommendationsCard,
   SearchBar,
@@ -47,7 +50,7 @@ import {
   WastedSummaryCard,
 } from "./components";
 import { CompareButton, DiffRefs, DiffView } from "./diff";
-import { getGithubIcon, getLogoIcon } from "./icons";
+import { getGithubIcon, getLogoIcon, getThemeIcon } from "./icons";
 import {
   DuplicateGroup,
   FileTreeList,
@@ -75,20 +78,52 @@ const request = axios.create({
   baseURL: "./api",
 });
 
-const useDarkMode = () => {
-  const [dark, setDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+type ThemeMode = "system" | "light" | "dark";
+const THEME_STORAGE_KEY = "diving-theme";
+
+const useThemeMode = () => {
+  const [mode, setMode] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if (saved === "light" || saved === "dark" || saved === "system") {
+        return saved;
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+    return "system";
+  });
+  const [systemDark, setSystemDark] = useState(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
+
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+
+  const isDark = mode === "system" ? systemDark : mode === "dark";
+
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark);
-  }, [dark]);
-  return dark;
+    document.documentElement.classList.toggle("dark", isDark);
+  }, [isDark]);
+
+  const cycleMode = useCallback(() => {
+    setMode((prev) => {
+      const next: ThemeMode =
+        prev === "system" ? "light" : prev === "light" ? "dark" : "system";
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  return { mode, isDark, cycleMode };
 };
 
 interface ReportState {
@@ -160,16 +195,27 @@ const showRequestError = (err: unknown, fallback: string) => {
 };
 
 const App = () => {
-  const isDark = useDarkMode();
+  const { mode: themeMode, isDark, cycleMode: cycleTheme } = useThemeMode();
   const [initial] = useState(readQuery);
   const [imageName, setImageName] = useState(initial.image);
   const [arch, setArch] = useState(initial.arch);
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ReportState | null>(null);
   const [currentLayer, setCurrentLayer] = useState(0);
-  const [viewOption, setViewOption] = useState<FileTreeViewOption>(
-    {} as FileTreeViewOption,
+  const [viewOption, setViewOption] = useState<FileTreeViewOption>({
+    expandAll: false,
+    expandItems: [],
+    collapsedItems: [],
+    sizeLimit: 0,
+    onlyModifiedRemoved: false,
+    keyword: "",
+    compactPaths: true,
+  });
+  const [showMetaColumns, setShowMetaColumns] = useState(false);
+  const [mobilePane, setMobilePane] = useState<"layers" | "workspace">(
+    "workspace",
   );
+  const fileSearchRef = useRef<InputRef>(null);
   const [latestImages, setLatestImages] = useState<string[]>([]);
   const [version, setVersion] = useState("");
   const [mcp, setMcp] = useState<McpStatus | null>(null);
@@ -338,6 +384,13 @@ const App = () => {
 
   const onToggleExpand = useCallback((key: string) => {
     setViewOption((opt) => {
+      if (opt.expandAll || opt.keyword) {
+        const collapsed = opt.collapsedItems || [];
+        const next = collapsed.includes(key)
+          ? collapsed.filter((k) => k !== key)
+          : [...collapsed, key];
+        return { ...opt, collapsedItems: next };
+      }
       const items = opt.expandItems || [];
       const next = items.includes(key)
         ? items.filter((k) => k !== key)
@@ -349,6 +402,41 @@ const App = () => {
   const updateOption = (patch: Partial<FileTreeViewOption>) => {
     setViewOption((opt) => ({ ...opt, ...patch }));
   };
+
+  // Keyboard shortcuts: ↑/↓ navigate layers, / focuses file filter, Esc blurs
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isEditing =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable);
+
+      if (e.key === "Escape") {
+        if (isEditing && target) {
+          target.blur();
+        }
+        return;
+      }
+      if (isEditing || !report || preview) {
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCurrentLayer((i) => Math.min(report.layers.length - 1, i + 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCurrentLayer((i) => Math.max(0, i - 1));
+      } else if (e.key === "/") {
+        e.preventDefault();
+        fileSearchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [report, preview]);
 
   const deferredOption = useDeferredValue(viewOption);
   const fileTreeRows = useMemo(() => {
@@ -364,25 +452,20 @@ const App = () => {
     return rows;
   }, [report, currentLayer, deferredOption]);
 
-  const layerOptions = useMemo(() => {
-    return (report?.layers || []).map((item, index) => {
-      let { digest } = item;
-      if (digest) {
-        digest = digest.replace("sha256:", "").substring(0, 8);
-      }
-      if (!digest) {
-        digest = "none";
-      }
-      const size = item.size || 0;
-      let sizeDesc = "";
-      if (size > 0) {
-        sizeDesc = ` (${prettyBytes(size)})`;
-      }
-      return {
-        value: index,
-        label: `${index + 1}: ${digest.toUpperCase()}${sizeDesc}`,
-      };
-    });
+  const activeLayerCounts = useMemo(
+    () => countLayerFiles(report?.fileTreeList[currentLayer]),
+    [report, currentLayer],
+  );
+
+  const findingsCount = useMemo(() => {
+    if (!report) return 0;
+    return (
+      report.wastedList.filter((w) => w.totalSize > 0).length +
+      report.sensitiveFiles.length +
+      report.duplicateGroups.length +
+      report.bigModifiedFileList.length +
+      report.recommendations.length
+    );
   }, [report]);
 
   const sizeOptions = useMemo(() => {
@@ -424,7 +507,7 @@ const App = () => {
     />
   );
 
-  const getLayerContentView = () => {
+  const renderFileTreeTab = () => {
     if (!report) {
       return null;
     }
@@ -432,148 +515,178 @@ const App = () => {
     if (!layerInfo) {
       return null;
     }
+    const isEmptyLayer =
+      !report.fileTreeList[currentLayer] ||
+      report.fileTreeList[currentLayer].length === 0;
     return (
-      <Card className="panel" title={i18nGet("layerContentTitle")}>
-        <div className="layerToolbar">
-          <Row gutter={[12, 4]}>
-            <Col xs={24} sm={12} md={8}>
-              <Form.Item
-                label={i18nGet("layerLabel")}
-                style={{ marginBottom: 12 }}
-              >
-                <Select
-                  value={currentLayer}
-                  style={{ width: "100%" }}
-                  onChange={setCurrentLayer}
-                  options={layerOptions}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} sm={6} md={4}>
-              <Form.Item
-                label={i18nGet("sizeLabel")}
-                style={{ marginBottom: 12 }}
-              >
-                <Select
-                  defaultValue={0}
-                  options={sizeOptions}
-                  style={{ width: "100%" }}
-                  onChange={(limit: number) => {
-                    updateOption({ sizeLimit: limit });
-                  }}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} sm={6} md={4}>
-              <Form.Item label=" " colon={false} style={{ marginBottom: 12 }}>
-                <Checkbox
-                  onChange={(e) => {
-                    updateOption({ onlyModifiedRemoved: e.target.checked });
-                  }}
-                >
-                  {i18nGet("modificationLabel")}
-                </Checkbox>
-              </Form.Item>
-            </Col>
-            <Col xs={12} sm={6} md={3}>
-              <Form.Item label=" " colon={false} style={{ marginBottom: 12 }}>
-                <Checkbox
-                  onChange={(e) => {
-                    updateOption({ expandAll: e.target.checked });
-                  }}
-                >
-                  {i18nGet("expandLabel")}
-                </Checkbox>
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={12} md={5}>
-              <Form.Item
-                label={i18nGet("keywordsLabel")}
-                style={{ marginBottom: 12 }}
-              >
-                <Input
-                  allowClear
-                  placeholder="path…"
-                  onChange={(e) => {
-                    updateOption({ keyword: e.target.value.trim() });
-                  }}
-                />
-              </Form.Item>
-            </Col>
-          </Row>
+      <div className="fileTreeWorkspace">
+        <CommandInspector
+          layer={layerInfo}
+          layerIndex={currentLayer}
+          fileCounts={activeLayerCounts}
+        />
+        <div className="fileTreeToolbar">
+          <Input
+            ref={fileSearchRef}
+            className="fileTreeSearchInput"
+            allowClear
+            size="small"
+            placeholder={`${i18nGet("keywordsLabel")} (e.g. usr/local, *.so)  [/]`}
+            onChange={(e) => {
+              updateOption({ keyword: e.target.value.trim(), collapsedItems: [] });
+            }}
+          />
+          <Select
+            size="small"
+            value={viewOption.sizeLimit || 0}
+            options={sizeOptions}
+            className="fileTreeSizeSelect"
+            onChange={(limit: number) => {
+              updateOption({ sizeLimit: limit });
+            }}
+          />
+          <Checkbox
+            checked={!!viewOption.onlyModifiedRemoved}
+            onChange={(e) => {
+              updateOption({ onlyModifiedRemoved: e.target.checked });
+            }}
+          >
+            {i18nGet("modificationLabel")}
+          </Checkbox>
+          <Checkbox
+            checked={!!viewOption.expandAll}
+            onChange={(e) => {
+              updateOption({
+                expandAll: e.target.checked,
+                collapsedItems: [],
+                expandItems: [],
+              });
+            }}
+          >
+            {i18nGet("expandLabel")}
+          </Checkbox>
+          <Checkbox
+            checked={viewOption.compactPaths !== false}
+            onChange={(e) => {
+              updateOption({ compactPaths: e.target.checked });
+            }}
+          >
+            {i18nGet("compactPathsLabel")}
+          </Checkbox>
+          <Checkbox
+            checked={showMetaColumns}
+            onChange={(e) => {
+              setShowMetaColumns(e.target.checked);
+            }}
+          >
+            {i18nGet("showColumnsLabel")}
+          </Checkbox>
         </div>
-        <div className="layerCmd">
-          <div>
-            <span className="label">{i18nGet("createdLabel")}</span>
-            {new Date(layerInfo.created).toLocaleString()}
-          </div>
-          <div style={{ marginTop: 6 }}>
-            <span className="label">{i18nGet("commandLabel")}</span>
-            <span className="cmd">{layerInfo.cmd || "—"}</span>
-          </div>
-        </div>
-        <ul className="fileTreeHeaderOnly">
+        <ul
+          className={`fileTreeHeaderOnly ${showMetaColumns ? "withMeta" : ""}`}
+        >
           <li>
-            <span>{i18nGet("permissionLabel")}</span>
-            <span>UID:GID</span>
-            <span>{i18nGet("sizeLabel")}</span>
-            <span>{i18nGet("fileTreeLabel")}</span>
+            <span className="colStatus">{i18nGet("statusLabel")}</span>
+            {showMetaColumns && (
+              <>
+                <span className="colMode">{i18nGet("permissionLabel")}</span>
+                <span className="colUid">UID:GID</span>
+              </>
+            )}
+            <span className="colSize">{i18nGet("sizeLabel")}</span>
+            <span className="colBar" aria-hidden="true" />
+            <span className="colPath">{i18nGet("fileTreeLabel")}</span>
           </li>
         </ul>
         <VirtualFileTree
           rows={fileTreeRows}
           layer={layerInfo}
           onToggleExpand={onToggleExpand}
+          showMetaColumns={showMetaColumns}
+          emptyMessage={
+            isEmptyLayer ? i18nGet("noFilesInLayer") : undefined
+          }
         />
-      </Card>
+      </div>
     );
   };
 
   const githubIcon = getGithubIcon(isDark);
+  const themeTitle =
+    themeMode === "light"
+      ? i18nGet("themeLight")
+      : themeMode === "dark"
+        ? i18nGet("themeDark")
+        : i18nGet("themeSystem");
 
   return (
     <ConfigProvider
       theme={{
         algorithm: isDark ? darkAlgorithm : defaultAlgorithm,
         token: {
-          colorPrimary: isDark ? "#2dd4bf" : "#0d9488",
-          colorInfo: isDark ? "#38bdf8" : "#0284c7",
+          colorPrimary: isDark ? "#38bdf8" : "#0ea5e9",
+          colorInfo: isDark ? "#818cf8" : "#6366f1",
           colorSuccess: isDark ? "#34d399" : "#059669",
           colorWarning: isDark ? "#fbbf24" : "#d97706",
           colorError: isDark ? "#f87171" : "#dc2626",
-          borderRadius: 8,
+          borderRadius: 6,
           fontFamily: '"IBM Plex Sans", system-ui, -apple-system, sans-serif',
-          colorBgContainer: isDark ? "#141d26" : "#ffffff",
-          colorBgLayout: isDark ? "#0b1218" : "#eef3f6",
-          colorText: isDark ? "#e8eef2" : "#0f1c24",
+          colorBgContainer: isDark ? "#111720" : "#ffffff",
+          colorBgLayout: isDark ? "#090d12" : "#f8fafc",
+          colorText: isDark ? "#f1f5f9" : "#0f172a",
           colorBorder: isDark
-            ? "rgba(232, 238, 242, 0.1)"
-            : "rgba(15, 28, 36, 0.1)",
+            ? "rgba(255, 255, 255, 0.12)"
+            : "rgba(15, 23, 42, 0.12)",
         },
       }}
     >
       <Layout className="appLayout">
-        {githubIcon}
         <Header
           className={report || diff || preview ? "header hasSearch" : "header"}
         >
-          <div
-            className={githubIcon ? "headerInner withCorner" : "headerInner"}
-          >
-            <div
-              className="logo"
-              onClick={() => {
-                window.location.href = "/";
-              }}
-            >
-              {getLogoIcon(isDark)}
-              <span>Diving</span>
-              {version && <span className="version">v{version}</span>}
+          <div className="headerInner">
+            <div className="headerLeft">
+              <div
+                className="logo"
+                onClick={() => {
+                  window.location.href = "/";
+                }}
+              >
+                {getLogoIcon(isDark)}
+                <span>Diving</span>
+                {version && <span className="version">v{version}</span>}
+              </div>
+              {report && !preview && (
+                <div className="headerBreadcrumb" title={imageName}>
+                  <span className="breadcrumbSep">/</span>
+                  <code className="breadcrumbImage">{imageName}</code>
+                </div>
+              )}
             </div>
             {(report || diff || preview) && (
               <div className="headerSearch">{searchBar}</div>
             )}
-            {mcp?.enabled && <McpGuide status={mcp} />}
+            <div className="headerActions">
+              {report && !preview && (
+                <CompareButton
+                  target={imageName}
+                  platform={arch}
+                  platforms={report.supportedArchs}
+                  onCompare={onCompare}
+                />
+              )}
+              {mcp?.enabled && <McpGuide status={mcp} />}
+              <button
+                type="button"
+                className="headerIconBtn"
+                onClick={cycleTheme}
+                title={themeTitle}
+                aria-label={themeTitle}
+              >
+                {getThemeIcon(themeMode)}
+              </button>
+              {githubIcon}
+            </div>
           </div>
         </Header>
 
@@ -611,16 +724,7 @@ const App = () => {
 
         {report && !preview && (
           <Content>
-            <div className="contentWrapper reportStack">
-              <div className="reportToolbar">
-                <code>{imageName}</code>
-                <CompareButton
-                  target={imageName}
-                  platform={arch}
-                  platforms={report.supportedArchs}
-                  onCompare={onCompare}
-                />
-              </div>
+            <div className="contentWrapper workspaceShell">
               {report.staleAsOf && (
                 <Alert
                   type="warning"
@@ -631,22 +735,93 @@ const App = () => {
                   )}
                 />
               )}
-              <ImageSummaryCard
+              <KpiStrip
                 desc={report.imageDescriptions}
                 tags={report.tags}
               />
-              <ImageTreemap
-                fileTreeList={report.fileTreeList}
-                layers={report.layers}
-              />
-              {getLayerContentView()}
-              <div className="findingsGrid">
-                <WastedSummaryCard wastedList={report.wastedList} />
-                <SensitiveFilesCard files={report.sensitiveFiles} />
-                <DuplicateGroupsCard groups={report.duplicateGroups} />
-                <BigModifiedFilesCard files={report.bigModifiedFileList} />
-                <RecommendationsCard recommendations={report.recommendations} />
-                <DockerfileCard dockerfile={report.dockerfile} />
+              <div className="workspaceMobileSwitch">
+                <Segmented
+                  block
+                  value={mobilePane}
+                  onChange={(v) =>
+                    setMobilePane(v as "layers" | "workspace")
+                  }
+                  options={[
+                    {
+                      label: `${i18nGet("mobileViewLayers")} (${report.layers.length})`,
+                      value: "layers",
+                    },
+                    {
+                      label: i18nGet("mobileViewWorkspace"),
+                      value: "workspace",
+                    },
+                  ]}
+                />
+              </div>
+              <div className={`workspaceGrid mobile-${mobilePane}`}>
+                <aside className="workspaceMaster">
+                  <LayerTimeline
+                    layers={report.layers}
+                    fileTreeList={report.fileTreeList}
+                    currentLayer={currentLayer}
+                    onSelectLayer={(idx) => {
+                      setCurrentLayer(idx);
+                      setMobilePane("workspace");
+                    }}
+                  />
+                </aside>
+                <main className="workspaceDetail">
+                  <Tabs
+                    className="workspaceTabs"
+                    defaultActiveKey="files"
+                    items={[
+                      {
+                        key: "files",
+                        label: `${i18nGet("tabFiles")} (${activeLayerCounts.total})`,
+                        children: renderFileTreeTab(),
+                      },
+                      {
+                        key: "treemap",
+                        label: i18nGet("tabTreemap"),
+                        children: (
+                          <ImageTreemap
+                            fileTreeList={report.fileTreeList}
+                            layers={report.layers}
+                          />
+                        ),
+                      },
+                      {
+                        key: "findings",
+                        label: `${i18nGet("tabFindings")} (${findingsCount})`,
+                        children: (
+                          <div className="findingsGrid">
+                            <WastedSummaryCard wastedList={report.wastedList} />
+                            <SensitiveFilesCard files={report.sensitiveFiles} />
+                            <DuplicateGroupsCard
+                              groups={report.duplicateGroups}
+                            />
+                            <BigModifiedFilesCard
+                              files={report.bigModifiedFileList}
+                            />
+                            <RecommendationsCard
+                              recommendations={report.recommendations}
+                            />
+                          </div>
+                        ),
+                      },
+                      {
+                        key: "dockerfile",
+                        label: i18nGet("tabDockerfile"),
+                        children: (
+                          <DockerfileCard dockerfile={report.dockerfile} />
+                        ),
+                      },
+                    ]}
+                  />
+                </main>
+              </div>
+              <div className="workspaceStatusBar">
+                <span>{i18nGet("shortcutsHint")}</span>
               </div>
             </div>
           </Content>

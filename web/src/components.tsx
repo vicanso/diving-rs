@@ -30,8 +30,12 @@ import {
   FileTreeRow,
   FsNode,
   layerBytes,
+  LayerFileCounts,
+  LayerOpcode,
+  opAdded,
   opModified,
   opRemoved,
+  parseLayerCommand,
   squarify,
   TreemapRect,
 } from "./analysis";
@@ -59,10 +63,69 @@ import {
 const { Option } = Select;
 const { Search } = Input;
 
-const FILE_TREE_ROW_HEIGHT = 36;
-/** Cap for the scroller; content shorter than this shrinks the panel. */
-const FILE_TREE_MAX_HEIGHT = 480;
+const FILE_TREE_ROW_HEIGHT = 34;
 const FILE_TREE_OVERSCAN = 8;
+
+const useFluidTreeHeight = () => {
+  const [maxH, setMaxH] = useState(() =>
+    typeof window !== "undefined"
+      ? Math.max(460, window.innerHeight - 400)
+      : 600,
+  );
+  useEffect(() => {
+    const onResize = () =>
+      setMaxH(Math.max(460, window.innerHeight - 400));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return maxH;
+};
+
+export const StatusBadge = ({
+  op,
+  isDir,
+}: {
+  op: number;
+  isDir: boolean;
+}) => {
+  if (op === opRemoved) {
+    return <span className="statusBadge del">- DEL</span>;
+  }
+  if (op === opModified) {
+    return <span className="statusBadge mod">~ MOD</span>;
+  }
+  if (op === opAdded || (op === 0 && !isDir)) {
+    return <span className="statusBadge add">+ ADD</span>;
+  }
+  return <span className="statusBadgeSpacer" aria-hidden="true" />;
+};
+
+export const SizeMicroBar = ({
+  size,
+  maxLayerSize,
+}: {
+  size: number;
+  maxLayerSize: number;
+}) => {
+  const percent =
+    maxLayerSize > 0
+      ? Math.min(100, Math.round((size / maxLayerSize) * 100))
+      : 0;
+  const isExtreme = size > 50 * 1024 * 1024;
+  const isHeavy = size > 5 * 1024 * 1024;
+  return (
+    <div
+      className="sizeBarTrack"
+      title={`${prettyBytes(size)} (${percent}%)`}
+      aria-hidden="true"
+    >
+      <div
+        className={`sizeBarFill ${isExtreme ? "extreme" : isHeavy ? "heavy" : ""}`}
+        style={{ width: `${percent}%` }}
+      />
+    </div>
+  );
+};
 
 const fileUrl = (api: string, layer: Layer, path: string) =>
   `./api/${api}?digest=${encodeURIComponent(
@@ -146,15 +209,20 @@ export const VirtualFileTree = ({
   rows,
   layer,
   onToggleExpand,
+  showMetaColumns = false,
+  emptyMessage,
 }: {
   rows: FileTreeRow[];
   layer: Layer;
   onToggleExpand: (key: string) => void;
+  showMetaColumns?: boolean;
+  emptyMessage?: string;
   isDark?: boolean;
 }) => {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [previewRow, setPreviewRow] = useState<FileTreeRow | null>(null);
+  const fluidMaxHeight = useFluidTreeHeight();
 
   const onScroll = useCallback(() => {
     if (scrollerRef.current) {
@@ -169,13 +237,32 @@ export const VirtualFileTree = ({
     setScrollTop(0);
   }, [rows]);
 
-  // Empty list still shows one row of breathing room.
+  const maxFileSize = useMemo(() => {
+    let max = 0;
+    for (const r of rows) {
+      if (!r.isDir && r.size > max) max = r.size;
+    }
+    if (max === 0) {
+      for (const r of rows) {
+        if (r.size > max) max = r.size;
+      }
+    }
+    return max;
+  }, [rows]);
+
+  if (rows.length === 0) {
+    return (
+      <div className="fileTreeEmpty">
+        {emptyMessage || i18nGet("noMatchingFiles")}
+      </div>
+    );
+  }
+
   const contentHeight = Math.max(
     rows.length * FILE_TREE_ROW_HEIGHT,
     FILE_TREE_ROW_HEIGHT,
   );
-  // Grow with content until the max; only then scroll.
-  const viewportHeight = Math.min(contentHeight, FILE_TREE_MAX_HEIGHT);
+  const viewportHeight = Math.min(contentHeight, fluidMaxHeight);
   const start = Math.max(
     0,
     Math.floor(scrollTop / FILE_TREE_ROW_HEIGHT) - FILE_TREE_OVERSCAN,
@@ -192,7 +279,6 @@ export const VirtualFileTree = ({
       onScroll={onScroll}
       style={{
         height: viewportHeight,
-        maxHeight: FILE_TREE_MAX_HEIGHT,
       }}
     >
       <ul
@@ -213,6 +299,7 @@ export const VirtualFileTree = ({
           } else if (row.op === opModified) {
             opClass = "modified";
           }
+          const isHeavy = !row.isDir && row.size > 5 * 1024 * 1024;
           let name = row.name;
           if (row.link) {
             name = `${name} → ${row.link}`;
@@ -220,7 +307,7 @@ export const VirtualFileTree = ({
           return (
             <li
               key={row.key}
-              className="virtualFileTreeRow"
+              className={`virtualFileTreeRow ${showMetaColumns ? "withMeta" : ""}`}
               style={{
                 position: "absolute",
                 top: rowTop,
@@ -229,12 +316,42 @@ export const VirtualFileTree = ({
                 height: FILE_TREE_ROW_HEIGHT,
               }}
             >
-              <span>{row.mode}</span>
-              <span>
-                {row.uid}:{row.gid}
+              <span className="colStatus">
+                <StatusBadge op={row.op} isDir={row.isDir} />
               </span>
-              <span>{prettyBytes(row.size)}</span>
-              <span className={opClass} style={{ paddingLeft: row.depth * 16 }}>
+              {showMetaColumns && (
+                <>
+                  <span className="colMode">{row.mode || "—"}</span>
+                  <span className="colUid">
+                    {row.uid}:{row.gid}
+                  </span>
+                </>
+              )}
+              <span className={`colSize ${isHeavy ? "heavy" : ""}`}>
+                {prettyBytes(row.size)}
+              </span>
+              <span className="colBar">
+                <SizeMicroBar size={row.size} maxLayerSize={maxFileSize} />
+              </span>
+              <span
+                className={`colPath ${opClass} ${row.isDir ? "isDir" : ""}`}
+                style={{ paddingLeft: row.depth * 18 }}
+              >
+                {row.depth > 0 && (
+                  <span
+                    className="treeGuides"
+                    aria-hidden="true"
+                    style={{ width: row.depth * 18 }}
+                  >
+                    {Array.from({ length: row.depth }).map((_, d) => (
+                      <span
+                        key={d}
+                        className="treeGuideLine"
+                        style={{ left: d * 18 + 7 }}
+                      />
+                    ))}
+                  </span>
+                )}
                 {row.isDir && (
                   <a
                     href="#"
@@ -247,9 +364,11 @@ export const VirtualFileTree = ({
                     {row.expanded ? minusOutlined : plusOutlined}
                   </a>
                 )}
-                {name}
+                <span className="fileNameText" title={row.key}>
+                  {name}
+                </span>
                 {!row.isDir && row.size > 0 && row.op !== opRemoved && (
-                  <>
+                  <span className="rowActions">
                     <a
                       href="#"
                       className="download"
@@ -263,11 +382,12 @@ export const VirtualFileTree = ({
                     </a>
                     <a
                       className="download"
+                      title={i18nGet("previewDownload")}
                       href={fileUrl("file", layer, row.key)}
                     >
                       {getDownloadIcon()}
                     </a>
-                  </>
+                  </span>
                 )}
               </span>
             </li>
@@ -520,8 +640,8 @@ export const WastedSummaryCard = memo(
       return null;
     }
     return (
-      <Card className="panel" title={i18nGet("wastedSummaryTitle")}>
-        <ul className="dataTable cols-wasted" style={{ margin: "-16px -18px" }}>
+      <Card className="panel flushPanel" title={i18nGet("wastedSummaryTitle")}>
+        <ul className="dataTable cols-wasted">
           <li className="head">
             <span>{i18nGet("totalSizeLabel")}</span>
             <span>{i18nGet("countLabel")}</span>
@@ -555,11 +675,8 @@ export const SensitiveFilesCard = memo(
       return null;
     }
     return (
-      <Card className="panel" title={i18nGet("sensitiveFilesTitle")}>
-        <ul
-          className="dataTable cols-sensitive"
-          style={{ margin: "-16px -18px" }}
-        >
+      <Card className="panel flushPanel" title={i18nGet("sensitiveFilesTitle")}>
+        <ul className="dataTable cols-sensitive">
           <li className="head">
             <span>{i18nGet("layerLabel")}</span>
             <span>{i18nGet("sizeLabel")}</span>
@@ -587,8 +704,8 @@ export const DuplicateGroupsCard = memo(
     }
     const sorted = [...groups].sort((a, b) => b.totalWasted - a.totalWasted);
     return (
-      <Card className="panel" title={i18nGet("duplicateGroupsTitle")}>
-        <ul className="dataTable cols-dup" style={{ margin: "-16px -18px" }}>
+      <Card className="panel flushPanel" title={i18nGet("duplicateGroupsTitle")}>
+        <ul className="dataTable cols-dup">
           <li className="head">
             <span>{i18nGet("duplicateWastedLabel")}</span>
             <span>{i18nGet("duplicateCountLabel")}</span>
@@ -627,8 +744,8 @@ export const BigModifiedFilesCard = memo(
     }
     const arr = files.slice(0).sort((a, b) => b.size - a.size);
     return (
-      <Card className="panel" title={i18nGet("modifiedAddedLargeFileTitle")}>
-        <ul className="dataTable cols-bigmod" style={{ margin: "-16px -18px" }}>
+      <Card className="panel flushPanel" title={i18nGet("modifiedAddedLargeFileTitle")}>
+        <ul className="dataTable cols-bigmod">
           <li className="head">
             <span>{i18nGet("layerLabel")}</span>
             <span>{i18nGet("totalSizeLabel")}</span>
@@ -672,8 +789,8 @@ export const RecommendationsCard = memo(
       info: "var(--info)",
     };
     return (
-      <Card className="panel span2" title={i18nGet("recommendationsTitle")}>
-        <ul className="recommendationList" style={{ margin: "-16px -18px" }}>
+      <Card className="panel flushPanel span2" title={i18nGet("recommendationsTitle")}>
+        <ul className="recommendationList">
           {recommendations.map((r, idx) => {
             const color = severityColor[r.severity] || "var(--info)";
             return (
@@ -882,18 +999,23 @@ export const McpGuide = memo(({ status }: { status: McpStatus }) => {
 });
 
 /** Tiles drawn per directory; the rest merge into one "smaller items" tile. */
-const TREEMAP_MAX_TILES = 40;
+const TREEMAP_MAX_TILES = 20;
 /** Tiles drawn inside each nested directory. */
-const TREEMAP_MAX_CHILD_TILES = 24;
+const TREEMAP_MAX_CHILD_TILES = 8;
+/** Minimum share of parent size for a tile to be drawn individually;
+ *  smaller items fold into the "smaller items" summary tile. */
+const TREEMAP_MIN_SHARE = 0.015;
+const TREEMAP_CHILD_MIN_SHARE = 0.035;
 /** Layers that get their own color; every other layer is "Other". Three is
  *  the most the categorical palette keeps distinguishable when any two
  *  colors may touch, as tiles in a treemap can. */
 const TREEMAP_COLORED_LAYERS = 3;
-const TREEMAP_HEIGHT = 360;
+const TREEMAP_HEIGHT = 440;
 /** Name strip on top of a directory whose children are drawn inside it. */
-const TREEMAP_GROUP_HEADER = 20;
+const TREEMAP_GROUP_HEADER = 22;
 /** Room a directory needs before its children are drawn inside it. */
-const TREEMAP_GROUP_MIN = 56;
+const TREEMAP_GROUP_MIN_W = 110;
+const TREEMAP_GROUP_MIN_H = 90;
 /** Start below a directory holding at least this share of its parent —
  *  in most images `/` is nearly all `usr/`. */
 const TREEMAP_AUTO_OPEN = 0.9;
@@ -927,16 +1049,28 @@ const textWidth = (text: string) => {
   return measureCtx ? measureCtx.measureText(text).width : text.length * 7;
 };
 
-/** `node`'s children as tiles, largest first, the tail past `max` merged. */
+/** `node`'s children as tiles, largest first, tiny/tail items merged. */
 const childTiles = (
   node: FsNode,
   max: number,
+  minShare: number,
   slotOf: (layer: number | null) => number,
 ): TreemapTile[] => {
   const children = [...(node.children?.values() || [])]
     .filter((c) => c.size > 0)
     .sort((a, b) => b.size - a.size);
-  const tiles: TreemapTile[] = children.slice(0, max).map((child) => {
+  const totalSize = node.size || children.reduce((s, c) => s + c.size, 0);
+  const kept: FsNode[] = [];
+  const rest: FsNode[] = [];
+  for (const child of children) {
+    const share = totalSize > 0 ? child.size / totalSize : 0;
+    if (kept.length < max && (kept.length < 3 || share >= minShare)) {
+      kept.push(child);
+    } else {
+      rest.push(child);
+    }
+  }
+  const tiles: TreemapTile[] = kept.map((child) => {
     const attribution =
       child.layer !== undefined
         ? { layer: child.layer, share: 1 }
@@ -951,7 +1085,6 @@ const childTiles = (
       share: attribution?.share ?? 0,
     };
   });
-  const rest = children.slice(max);
   if (rest.length > 0) {
     tiles.push({
       key: node.path ? `${node.path}/…` : "…",
@@ -1058,7 +1191,12 @@ export const ImageTreemap = memo(
     // Each directory big enough gets its own children drawn inside it,
     // under a name strip.
     const groups = useMemo(() => {
-      const tiles = childTiles(current, TREEMAP_MAX_TILES, slotOf);
+      const tiles = childTiles(
+        current,
+        TREEMAP_MAX_TILES,
+        TREEMAP_MIN_SHARE,
+        slotOf,
+      );
       const rects = squarify(
         tiles.map((t) => t.size),
         width,
@@ -1069,12 +1207,17 @@ export const ImageTreemap = memo(
         let children: PlacedTile[] = [];
         if (
           tile.node?.children &&
-          rect.w >= TREEMAP_GROUP_MIN &&
-          rect.h >= TREEMAP_GROUP_MIN
+          rect.w >= TREEMAP_GROUP_MIN_W &&
+          rect.h >= TREEMAP_GROUP_MIN_H
         ) {
           const x = rect.x + 3;
           const y = rect.y + TREEMAP_GROUP_HEADER;
-          const inner = childTiles(tile.node, TREEMAP_MAX_CHILD_TILES, slotOf);
+          const inner = childTiles(
+            tile.node,
+            TREEMAP_MAX_CHILD_TILES,
+            TREEMAP_CHILD_MIN_SHARE,
+            slotOf,
+          );
           const innerRects = squarify(
             inner.map((t) => t.size),
             rect.w - 6,
@@ -1299,3 +1442,418 @@ export const EXAMPLE_IMAGES = [
   "vicanso/diving",
   "quay.io/prometheus/node-exporter",
 ];
+
+// ---- Compact KPI Strip ----
+
+export const KpiStrip = memo(
+  ({ desc, tags }: { desc: ImageDescriptions; tags?: string[] }) => {
+    const scoreOnly = (desc.score || "0").replace("%", "");
+    const tone = scoreTone(scoreOnly);
+    return (
+      <section className="kpiStrip" aria-label={i18nGet("imageSummaryTitle")}>
+        <div className="kpiItem">
+          <span className="kpiLabel">{i18nGet("imageScoreLabel")}</span>
+          <span className={`kpiValue kpiScore ${tone}`.trim()}>
+            {desc.score}
+          </span>
+        </div>
+        <span className="kpiDivider" aria-hidden="true" />
+        <div className="kpiItem">
+          <span className="kpiLabel">{i18nGet("imageSizeLabel")}</span>
+          <span className="kpiValue mono">{desc.size}</span>
+        </div>
+        <span className="kpiDivider" aria-hidden="true" />
+        <div className="kpiItem">
+          <span className="kpiLabel">{i18nGet("wastedSizeLabel")}</span>
+          <span
+            className={`kpiValue mono ${desc.wastedSize !== "0 B" ? "warn" : ""}`}
+          >
+            {desc.wastedSize}
+          </span>
+        </div>
+        <span className="kpiDivider" aria-hidden="true" />
+        <div className="kpiItem">
+          <span className="kpiLabel">{i18nGet("osArchLabel")}</span>
+          <span className="kpiValue mono">{desc.osArch}</span>
+        </div>
+        {desc.baseOs && (
+          <>
+            <span className="kpiDivider" aria-hidden="true" />
+            <div className="kpiItem">
+              <span className="kpiLabel">{i18nGet("baseOsLabel")}</span>
+              <span className="kpiValue">{desc.baseOs}</span>
+            </div>
+          </>
+        )}
+        {desc.runUser && (
+          <>
+            <span className="kpiDivider" aria-hidden="true" />
+            <div className="kpiItem">
+              <span className="kpiLabel">{i18nGet("runAsUserLabel")}</span>
+              <span className="kpiValue mono">{desc.runUser}</span>
+            </div>
+          </>
+        )}
+        {desc.runtimeLibc && (
+          <>
+            <span className="kpiDivider" aria-hidden="true" />
+            <div className="kpiItem">
+              <span className="kpiLabel">{i18nGet("runtimeLibcLabel")}</span>
+              <span
+                className={`kpiValue ${desc.runtimeLibcIssue ? "danger" : ""}`}
+              >
+                {desc.runtimeLibc}
+              </span>
+            </div>
+          </>
+        )}
+        {tags && tags.length > 0 && (
+          <div className="kpiTags">
+            {tags.map((t) => (
+              <span key={t} className="riskTag">
+                {t}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  },
+);
+
+// ---- Master Pane: Persistent Layer Timeline ----
+
+type LayerFilterMode = "all" | "files" | "large";
+
+const opcodeClass = (op: LayerOpcode) => {
+  switch (op) {
+    case "FROM":
+      return "op-from";
+    case "RUN":
+      return "op-run";
+    case "COPY":
+    case "ADD":
+      return "op-copy";
+    case "CMD":
+    case "ENTRY":
+      return "op-cmd";
+    default:
+      return "op-meta";
+  }
+};
+
+export const LayerTimeline = memo(
+  ({
+    layers,
+    fileTreeList,
+    currentLayer,
+    onSelectLayer,
+  }: {
+    layers: Layer[];
+    fileTreeList: FileTreeList[][];
+    currentLayer: number;
+    onSelectLayer: (index: number) => void;
+  }) => {
+    const [filter, setFilter] = useState<LayerFilterMode>("all");
+    const activeRef = useRef<HTMLButtonElement | null>(null);
+
+    useEffect(() => {
+      activeRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    }, [currentLayer]);
+
+    const parsedLayers = useMemo(() => {
+      let maxSize = 0;
+      let totalCompressed = 0;
+      for (const l of layers) {
+        if (l.size > maxSize) maxSize = l.size;
+        totalCompressed += l.size || 0;
+      }
+      return {
+        maxSize,
+        totalCompressed,
+        items: layers.map((layer, index) => {
+          const parsed = parseLayerCommand(layer.cmd, index, layer.size);
+          const hasFiles = (fileTreeList[index]?.length || 0) > 0;
+          const isLarge = (layer.size || 0) >= 1024 * 1024;
+          return { layer, index, parsed, hasFiles, isLarge };
+        }),
+      };
+    }, [layers, fileTreeList]);
+
+    const counts = useMemo(() => {
+      let files = 0;
+      let large = 0;
+      for (const item of parsedLayers.items) {
+        if (item.hasFiles) files++;
+        if (item.isLarge) large++;
+      }
+      return { all: parsedLayers.items.length, files, large };
+    }, [parsedLayers]);
+
+    const visibleItems = useMemo(() => {
+      if (filter === "files") {
+        return parsedLayers.items.filter((i) => i.hasFiles);
+      }
+      if (filter === "large") {
+        return parsedLayers.items.filter((i) => i.isLarge);
+      }
+      return parsedLayers.items;
+    }, [parsedLayers, filter]);
+
+    return (
+      <section className="layerTimeline" aria-label={i18nGet("layersTitle")}>
+        <div className="layerTimelineHeader">
+          <div className="layerTimelineTitleRow">
+            <span className="layerTimelineTitle">{i18nGet("layersTitle")}</span>
+            <span className="layerTimelineMeta">
+              {layers.length} · {prettyBytes(parsedLayers.totalCompressed)}
+            </span>
+          </div>
+          <div className="layerFilterPills" role="group">
+            <button
+              type="button"
+              className={`filterPill ${filter === "all" ? "active" : ""}`}
+              onClick={() => setFilter("all")}
+            >
+              {i18nGet("filterAll")} ({counts.all})
+            </button>
+            <button
+              type="button"
+              className={`filterPill ${filter === "files" ? "active" : ""}`}
+              onClick={() => setFilter("files")}
+            >
+              {i18nGet("filterHasFiles")} ({counts.files})
+            </button>
+            <button
+              type="button"
+              className={`filterPill ${filter === "large" ? "active" : ""}`}
+              onClick={() => setFilter("large")}
+            >
+              {i18nGet("filterLarge")} ({counts.large})
+            </button>
+          </div>
+        </div>
+        <div className="layerTimelineList" role="listbox">
+          {visibleItems.map(({ layer, index, parsed }) => {
+            const isActive = index === currentLayer;
+            const pct =
+              parsedLayers.maxSize > 0
+                ? Math.round(((layer.size || 0) / parsedLayers.maxSize) * 100)
+                : 0;
+            const idxStr = String(index + 1).padStart(2, "0");
+            return (
+              <button
+                key={`${index}-${layer.digest || "meta"}`}
+                ref={isActive ? activeRef : undefined}
+                type="button"
+                role="option"
+                aria-selected={isActive}
+                className={`layerTimelineRow ${isActive ? "active" : ""} ${
+                  layer.size === 0 ? "isMeta" : ""
+                }`}
+                onClick={() => onSelectLayer(index)}
+              >
+                <span className="ltIndex">{idxStr}</span>
+                <span className={`opcodePill ${opcodeClass(parsed.opcode)}`}>
+                  {parsed.opcode}
+                </span>
+                <span className="ltSize">
+                  {layer.size > 0 ? prettyBytes(layer.size) : "0 B"}
+                </span>
+                <span className="ltBarTrack" aria-hidden="true">
+                  <span
+                    className="ltBarFill"
+                    style={{ width: `${pct}%` }}
+                  />
+                </span>
+                <span className="ltCmd" title={parsed.summary}>
+                  {parsed.summary}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  },
+);
+
+// ---- Command Inspector & Layer Metadata ----
+
+export const CommandInspector = memo(
+  ({
+    layer,
+    layerIndex,
+    fileCounts,
+  }: {
+    layer: Layer;
+    layerIndex: number;
+    fileCounts: LayerFileCounts;
+  }) => {
+    const [expanded, setExpanded] = useState(false);
+    const [wrap, setWrap] = useState(false);
+    const [copiedCmd, setCopiedCmd] = useState(false);
+    const [copiedDigest, setCopiedDigest] = useState(false);
+
+    useEffect(() => {
+      setExpanded(false);
+      setCopiedCmd(false);
+      setCopiedDigest(false);
+    }, [layerIndex, layer.digest]);
+
+    const parsed = useMemo(
+      () => parseLayerCommand(layer.cmd, layerIndex, layer.size),
+      [layer.cmd, layerIndex, layer.size],
+    );
+
+    const codeLines = useMemo(() => {
+      const lines: string[] = [];
+      if (parsed.envArgs.length > 0) {
+        lines.push(`# BuildKit args: ${parsed.envArgs.join(" ")}`);
+      }
+      if (parsed.formatted) {
+        lines.push(...parsed.formatted.split("\n"));
+      }
+      return lines;
+    }, [parsed]);
+
+    const canCollapse = codeLines.length > 6;
+    const visibleLines =
+      canCollapse && !expanded ? codeLines.slice(0, 6) : codeLines;
+    const hiddenCount = codeLines.length - 6;
+
+    const ratio =
+      layer.size > 0 && layer.unpackSize > 0
+        ? (layer.unpackSize / layer.size).toFixed(2)
+        : null;
+
+    const copyText = (text: string, which: "cmd" | "digest") => {
+      navigator.clipboard?.writeText(text).then(() => {
+        if (which === "cmd") {
+          setCopiedCmd(true);
+          window.setTimeout(() => setCopiedCmd(false), 1500);
+        } else {
+          setCopiedDigest(true);
+          window.setTimeout(() => setCopiedDigest(false), 1500);
+        }
+      });
+    };
+
+    const shortDigest = layer.digest
+      ? `${layer.digest.slice(0, 19)}…`
+      : "—";
+
+    return (
+      <div className="commandInspector">
+        <div className="layerMetaStrip">
+          <span className="layerMetaTitle">
+            #{layerIndex + 1}
+            <span className={`opcodePill ${opcodeClass(parsed.opcode)}`}>
+              {parsed.opcode}
+            </span>
+          </span>
+          <span className="layerMetaChip">
+            <strong>{prettyBytes(layer.size || 0)}</strong>{" "}
+            {i18nGet("compressedLabel")}
+          </span>
+          {layer.unpackSize > 0 && (
+            <span className="layerMetaChip">
+              <strong>{prettyBytes(layer.unpackSize)}</strong>{" "}
+              {i18nGet("unpackedLabel")}
+            </span>
+          )}
+          {ratio && (
+            <span className="layerMetaChip">
+              <strong>{ratio}×</strong>
+            </span>
+          )}
+          <span className="layerMetaChip">
+            <strong>{fileCounts.total}</strong> {i18nGet("filesCountLabel")}
+            {fileCounts.total > 0 && (
+              <span className="fileCountBreakdown">
+                {" "}
+                (+{fileCounts.added} / ~{fileCounts.modified} / -
+                {fileCounts.removed})
+              </span>
+            )}
+          </span>
+          <span className="layerMetaRight">
+            {layer.digest && (
+              <button
+                type="button"
+                className="metaCopyBtn"
+                onClick={() => copyText(layer.digest, "digest")}
+                title={layer.digest}
+              >
+                {shortDigest}{" "}
+                <span className="metaCopyTag">
+                  {copiedDigest ? i18nGet("copiedButton") : i18nGet("copyButton")}
+                </span>
+              </button>
+            )}
+            {layer.created && (
+              <span className="layerCreated">
+                {new Date(layer.created).toLocaleString()}
+              </span>
+            )}
+          </span>
+        </div>
+
+        {codeLines.length > 0 && (
+          <div className="commandBox">
+            <div className="commandBoxToolbar">
+              <span className="commandBoxLabel">
+                {i18nGet("commandLabel")}
+              </span>
+              <div className="commandBoxActions">
+                <button
+                  type="button"
+                  className={`cmdActionBtn ${wrap ? "active" : ""}`}
+                  onClick={() => setWrap((w) => !w)}
+                >
+                  {i18nGet("wrapLinesLabel")}
+                </button>
+                <button
+                  type="button"
+                  className="cmdActionBtn"
+                  onClick={() => copyText(codeLines.join("\n"), "cmd")}
+                >
+                  {copiedCmd ? i18nGet("copiedButton") : i18nGet("copyButton")}
+                </button>
+              </div>
+            </div>
+            <pre className={`commandPre ${wrap ? "wrap" : ""}`}>
+              {visibleLines.map((line, idx) => (
+                <div
+                  key={idx}
+                  className={`cmdLine ${
+                    line.startsWith("#") ? "isComment" : ""
+                  }`}
+                >
+                  <span className="cmdLineNo">{idx + 1}</span>
+                  <span className="cmdLineCode">{line}</span>
+                </div>
+              ))}
+            </pre>
+            {canCollapse && (
+              <button
+                type="button"
+                className="cmdExpandBtn"
+                onClick={() => setExpanded((e) => !e)}
+              >
+                {expanded
+                  ? i18nGet("showLessLines")
+                  : fill(i18nGet("showMoreLines"), {
+                      n: String(hiddenCount),
+                    })}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  },
+);

@@ -40,10 +40,75 @@
 .headerInner {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   height: var(--header-h);
-  width: min(100% - 32px, var(--content-max));
+  width: var(--content-max);
   margin: 0 auto;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.headerBreadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 240px;
+}
+
+.breadcrumbSep {
+  color: var(--ink-muted);
+  font-size: 14px;
+}
+
+.breadcrumbImage {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.headerIconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.headerIconBtn:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+@media (max-width: 900px) {
+  .headerBreadcrumb {
+    display: none;
+  }
 }
 
 .logo {
@@ -78,11 +143,10 @@
 .headerSearch {
   flex: 1;
   min-width: 0;
-  max-width: 720px;
+  max-width: 560px;
 }
 
 .mcpButton {
-  margin-left: auto;
   flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -92,7 +156,7 @@
   background: var(--accent-soft);
   border: 1px solid transparent;
   border-radius: 999px;
-  padding: 7px 14px;
+  padding: 6px 12px;
   cursor: pointer;
   transition:
     border-color 0.15s,
@@ -648,51 +712,86 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-bottom: none;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: var(--bg-muted);
+  background: var(--surface-sunken);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--ink-muted);
+  color: var(--text-tertiary);
 }
 
 .fileTreeHeaderOnly li {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
-  gap: 8px;
+  padding: 7px 12px;
+  gap: 10px;
 }
 
-.fileTreeHeaderOnly li span:nth-child(1) {
-  width: 88px;
+.fileTreeHeaderOnly .colStatus,
+.virtualFileTreeRow .colStatus {
+  width: 60px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
 }
-.fileTreeHeaderOnly li span:nth-child(2) {
-  width: 64px;
+
+.fileTreeHeaderOnly .colMode,
+.virtualFileTreeRow .colMode {
+  width: 84px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.fileTreeHeaderOnly .colUid,
+.virtualFileTreeRow .colUid {
+  width: 56px;
   flex-shrink: 0;
   text-align: right;
+  color: var(--text-tertiary);
 }
-.fileTreeHeaderOnly li span:nth-child(3) {
+
+.fileTreeHeaderOnly .colSize,
+.virtualFileTreeRow .colSize {
   width: 72px;
   flex-shrink: 0;
   text-align: right;
-  margin-right: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
-.fileTreeHeaderOnly li span:nth-child(4) {
+
+.virtualFileTreeRow .colSize.heavy {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.fileTreeHeaderOnly .colBar,
+.virtualFileTreeRow .colBar {
+  width: 56px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.fileTreeHeaderOnly .colPath,
+.virtualFileTreeRow .colPath {
   flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
 }
 
 .virtualFileTreeScroller {
   overflow: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-  background: var(--bg-elevated);
+  background: var(--surface-raised);
   position: relative;
-  /* height is set inline from content; max-height caps long trees */
-  max-height: 480px;
+  min-height: 200px;
 }
 
 .virtualFileTree {
@@ -700,49 +799,24 @@
   padding: 0;
   list-style: none;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .virtualFileTreeRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   list-style: none;
   padding: 0 12px;
   box-sizing: border-box;
   white-space: nowrap;
   overflow: hidden;
-  border-bottom: 1px solid var(--border);
-  color: var(--ink);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
 }
 
 .virtualFileTreeRow:hover {
-  background: var(--accent-soft);
-}
-
-.virtualFileTreeRow span:nth-child(1) {
-  width: 88px;
-  flex-shrink: 0;
-  color: var(--ink-muted);
-}
-.virtualFileTreeRow span:nth-child(2) {
-  width: 64px;
-  flex-shrink: 0;
-  text-align: right;
-  color: var(--ink-muted);
-}
-.virtualFileTreeRow span:nth-child(3) {
-  width: 72px;
-  flex-shrink: 0;
-  text-align: right;
-  margin-right: 12px;
-  color: var(--ink-secondary);
-}
-.virtualFileTreeRow span:nth-child(4) {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: var(--surface-hover);
 }
 
 .fileTree .icon {
@@ -1680,7 +1754,642 @@
   color: var(--ink-secondary);
 }
 
-/* github corner icon from icons.tsx */
-.githubCorner {
-  z-index: 110;
+/* —— flush card body (removes negative-margin hacks) —— */
+.flushPanel.ant-card .ant-card-body {
+  padding: 0 !important;
+}
+
+/* —— compact KPI strip —— */
+.kpiStrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 14px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+
+.kpiItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.kpiLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+
+.kpiValue {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.kpiValue.kpiScore {
+  color: var(--status-added);
+  font-weight: 700;
+}
+
+.kpiValue.kpiScore.score-warn {
+  color: var(--status-modified);
+}
+
+.kpiValue.kpiScore.score-bad {
+  color: var(--status-removed);
+}
+
+.kpiValue.warn {
+  color: var(--status-modified);
+}
+
+.kpiValue.danger {
+  color: var(--status-removed);
+}
+
+.kpiDivider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-default);
+}
+
+.kpiTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* —— 2-pane master-detail workspace —— */
+.workspaceShell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 14px;
+  padding-bottom: 24px;
+}
+
+.workspaceMobileSwitch {
+  display: none;
+}
+
+.workspaceGrid {
+  display: grid;
+  grid-template-columns: minmax(310px, 360px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.workspaceMaster {
+  position: sticky;
+  top: calc(var(--header-h) + 12px);
+  max-height: calc(100vh - var(--header-h) - 52px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.workspaceDetail {
+  min-width: 0;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 8px 16px 16px;
+}
+
+.workspaceTabs .ant-tabs-nav {
+  margin-bottom: 12px !important;
+}
+
+.workspaceStatusBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+@media (max-width: 1024px) {
+  .workspaceMobileSwitch {
+    display: block;
+  }
+  .workspaceGrid {
+    grid-template-columns: 1fr;
+  }
+  .workspaceMaster {
+    position: static;
+    max-height: 520px;
+  }
+  .workspaceGrid.mobile-workspace .workspaceMaster {
+    display: none;
+  }
+  .workspaceGrid.mobile-layers .workspaceDetail {
+    display: none;
+  }
+}
+
+/* —— master pane: layer timeline —— */
+.layerTimeline {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  overflow: hidden;
+}
+
+.layerTimelineHeader {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.layerTimelineTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.layerTimelineTitle {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-primary);
+}
+
+.layerTimelineMeta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.layerFilterPills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filterPill {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.filterPill:hover {
+  border-color: var(--accent-base);
+  color: var(--text-primary);
+}
+
+.filterPill.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent-base);
+  color: var(--accent-base);
+  font-weight: 600;
+}
+
+.layerTimelineList {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.layerTimelineRow {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 22px 48px 58px 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: background 0.1s;
+}
+
+.layerTimelineRow:hover {
+  background: var(--surface-hover);
+}
+
+.layerTimelineRow.active {
+  background: var(--surface-active);
+  border-left-color: var(--accent-base);
+}
+
+.layerTimelineRow.isMeta .ltSize {
+  color: var(--text-tertiary);
+}
+
+.ltIndex {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.layerTimelineRow.active .ltIndex {
+  color: var(--accent-base);
+  font-weight: 700;
+}
+
+.opcodePill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.opcodePill.op-from {
+  color: #0284c7;
+  background: rgba(14, 165, 233, 0.12);
+}
+
+.opcodePill.op-run {
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.opcodePill.op-copy {
+  color: #059669;
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.opcodePill.op-cmd {
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.14);
+}
+
+.opcodePill.op-meta {
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+}
+
+html.dark .opcodePill.op-from {
+  color: #38bdf8;
+}
+html.dark .opcodePill.op-run {
+  color: #fbbf24;
+}
+html.dark .opcodePill.op-copy {
+  color: #34d399;
+}
+html.dark .opcodePill.op-cmd {
+  color: #a78bfa;
+}
+
+.ltSize {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ltBarTrack {
+  height: 4px;
+  background: var(--size-bar-track);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ltBarFill {
+  display: block;
+  height: 100%;
+  background: var(--accent-base);
+  border-radius: 999px;
+}
+
+.ltCmd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— command inspector —— */
+.commandInspector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.layerMetaStrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.layerMetaTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.layerMetaChip {
+  color: var(--text-secondary);
+}
+
+.layerMetaChip strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.fileCountBreakdown {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.layerMetaRight {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.metaCopyBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.metaCopyBtn:hover {
+  border-color: var(--accent-base);
+  color: var(--text-primary);
+}
+
+.metaCopyTag {
+  color: var(--accent-base);
+  font-weight: 600;
+}
+
+.commandBox {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+.commandBoxToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+}
+
+.commandBoxLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+
+.commandBoxActions {
+  display: flex;
+  gap: 6px;
+}
+
+.cmdActionBtn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.cmdActionBtn:hover,
+.cmdActionBtn.active {
+  border-color: var(--accent-base);
+  color: var(--accent-base);
+  background: var(--accent-subtle);
+}
+
+.commandPre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  color: var(--text-primary);
+}
+
+.commandPre.wrap .cmdLineCode {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cmdLine {
+  display: flex;
+  gap: 10px;
+}
+
+.cmdLine.isComment {
+  color: var(--text-tertiary);
+}
+
+.cmdLineNo {
+  width: 24px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.cmdExpandBtn {
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+  color: var(--accent-base);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.cmdExpandBtn:hover {
+  background: var(--surface-hover);
+}
+
+/* —— file tree toolbar & badges —— */
+.fileTreeToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.fileTreeSearchInput {
+  flex: 1 1 220px;
+  max-width: 340px;
+}
+
+.fileTreeSizeSelect {
+  width: 112px;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+}
+
+.statusBadge.add {
+  color: var(--status-added);
+  background: var(--status-added-bg);
+  border: 1px solid color-mix(in srgb, var(--status-added) 30%, transparent);
+}
+
+.statusBadge.mod {
+  color: var(--status-modified);
+  background: var(--status-modified-bg);
+  border: 1px solid color-mix(in srgb, var(--status-modified) 30%, transparent);
+}
+
+.statusBadge.del {
+  color: var(--status-removed);
+  background: var(--status-removed-bg);
+  border: 1px solid color-mix(in srgb, var(--status-removed) 30%, transparent);
+}
+
+.statusBadgeSpacer {
+  display: inline-block;
+  width: 48px;
+}
+
+.sizeBarTrack {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--size-bar-track);
+  overflow: hidden;
+}
+
+.sizeBarFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--size-bar-fill);
+}
+
+.sizeBarFill.heavy {
+  background: var(--size-bar-heavy);
+}
+
+.sizeBarFill.extreme {
+  background: var(--size-bar-extreme);
+}
+
+.treeGuides {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.treeGuideLine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-subtle);
+}
+
+.virtualFileTreeRow .colPath.isDir .fileNameText {
+  font-weight: 600;
+}
+
+.virtualFileTreeRow .colPath.removed .fileNameText {
+  text-decoration: line-through;
+  color: var(--status-removed);
+}
+
+.virtualFileTreeRow .colPath.modified .fileNameText {
+  color: var(--status-modified);
+}
+
+.fileNameText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowActions {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+
+.fileTreeEmpty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--surface-raised);
 }
