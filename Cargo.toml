@@ -44,14 +44,14 @@ clap = { version = "4.6.7", features = ["derive"] }
 colored = "3.1.1"
 # Only YAML is used (~/.diving/config.yml). Disabling default features
 # drops the ron/json5/ini/toml parsers and their transitive deps.
-config = { version = "0.15.26", default-features = false, features = ["yaml"] }
+config = { version = "0.15.27", default-features = false, features = ["yaml"] }
 crossterm = "0.29.0"
 # gzip layer decompression. flate2 replaced libflate, whose decoder was ~2x
 # slower than flate2's default miniz_oxide in our measured workloads. It now
 # runs on the zlib-rs backend: still pure Rust (no C toolchain for the musl
 # builds), and on python:3.12 (424 MB of layers) it spent ~30% less CPU than
 # miniz_oxide (2.28s -> 1.55s for the file-listing pass) for ~33 KiB of binary.
-flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 futures = "0.3.34"
 glob = "0.3.4"
 # ELF parsing for runtime-compatibility checks (DT_NEEDED + glibc version
@@ -66,8 +66,8 @@ hex = "0.4.3"
 home = "0.5.12"
 http = "1.5.0"
 humantime = "2.4.0"
-lru = "0.18.5"
-mime = "0.3.17"
+lru = "0.19.0"
+mime = "0.3.18"
 # Replaces the system allocator with mimalloc to reduce lock contention and
 # fragmentation on the multi-threaded reqwest + tar/zstd decompression hot path.
 mimalloc = { version = "0.1.52", default-features = false }
@@ -94,16 +94,16 @@ ring = "0.17.14"
 # MCP (Model Context Protocol) server mounted at `/mcp` in web mode, over the
 # Streamable HTTP transport. Default features are dropped so only the server
 # side (no client / reqwest / child-process transports) is compiled in.
-rmcp = { version = "3.5.0", default-features = false, features = [
+rmcp = { version = "3.10.0", default-features = false, features = [
     "server",
     "macros",
     "transport-streamable-http-server",
 ] }
-rust-embed = { version = "8.12.0", features = ["compression", "mime-guess"] }
+rust-embed = { version = "8.14.0", features = ["compression", "mime-guess"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 serde_repr = "0.1.21"
-signal-hook = { version = "0.4.4", default-features = false }
+signal-hook = { version = "0.4.6", default-features = false }
 signal-hook-registry = "1.4.8"
 snafu = "0.9.2"
 # default-features = false drops the xattr feature; we only read tar
@@ -111,7 +111,7 @@ snafu = "0.9.2"
 tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
 time = "0.3.55"
-tokio = { version = "1.53.1", features = [
+tokio = { version = "1.54.1", features = [
     "macros",
     "rt",
     "rt-multi-thread",
@@ -125,14 +125,14 @@ tokio = { version = "1.53.1", features = [
 tower = { version = "0.5.3", features = ["timeout"] }
 # gzip for web responses: the analysis JSON shrinks ~10x and the embedded
 # frontend ~3x. Already in the tree via reqwest, and gzip reuses flate2.
-tower-http = { version = "0.6.11", default-features = false, features = [
+tower-http = { version = "0.7.1", default-features = false, features = [
     "compression-gzip",
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["local-time"] }
-unicode-width = "0.2.2"
+unicode-width = "0.2.3"
 unix_mode = "0.1.4"
-zstd = "0.14.0"
+zstd = "0.14.4"
 
 [profile.release]
 codegen-units = 1
