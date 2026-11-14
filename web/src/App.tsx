@@ -246,14 +246,22 @@ const App = () => {
     setPreview(null);
     const current = ++ticket.current;
     const ref = encodeURIComponent(withArch(image, archValue));
+    let analyzeDone = false;
+    const manifestController = new AbortController();
     // Registry images only: a local source has no cheap manifest to read.
     const previewTimer = /^(file|docker|podman):\/\//.test(image)
       ? undefined
       : window.setTimeout(() => {
+          if (analyzeDone || current !== ticket.current) {
+            return;
+          }
           request
-            .get<ImagePreview>(`/manifest?image=${ref}`, { timeout: 60 * 1000 })
+            .get<ImagePreview>(`/manifest?image=${ref}`, {
+              timeout: 60 * 1000,
+              signal: manifestController.signal,
+            })
             .then(({ data }) => {
-              if (current === ticket.current) {
+              if (!analyzeDone && current === ticket.current) {
                 setPreview(data);
               }
             })
@@ -294,7 +302,9 @@ const App = () => {
         showRequestError(err, "analyze image fail");
       }
     } finally {
+      analyzeDone = true;
       window.clearTimeout(previewTimer);
+      manifestController.abort();
       if (current === ticket.current) {
         setLoading(false);
         setPreview(null);
