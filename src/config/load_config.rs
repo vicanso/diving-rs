@@ -77,6 +77,31 @@ pub struct DivingConfig {
     /// `10.0.0.5:7001`）。默认只接受 loopback，防 DNS rebinding；配置
     /// `*` 关闭校验。设置了 `--mcp-token` 时不做 Host 校验（token 已足够）。
     pub mcp_allowed_hosts: Option<Vec<String>>,
+    /// Web 服务对外可访问的基础 URL（如 `https://diving.example.com`），
+    /// 用于在通知消息中生成可点击的分析报告详情链接。
+    pub public_url: Option<String>,
+    /// 入站 `POST /api/webhook` 鉴权 token（或设为 webhook secret 验证
+    /// `X-Hub-Signature-256`）。未设置时默认仅允许内网 / loopback 来源。
+    pub webhook_token: Option<String>,
+    /// 未设置 `webhook_token` 时，是否放行公网来源调用 `POST /api/webhook`。
+    /// 默认 `false`（仅允许 loopback / 私有网段）。
+    pub webhook_allow_public: Option<bool>,
+    /// 出站通知：企业微信群机器人 webhook 地址或裸 key（兜底于 CLI/环境变量）。
+    pub wecom_webhook: Option<String>,
+    /// 出站通知：飞书群机器人 webhook 地址或裸 hook ID（兜底于 CLI/环境变量）。
+    pub feishu_webhook: Option<String>,
+    /// 出站通知：飞书群机器人签名校验 secret（兜底于 CLI/环境变量）。
+    pub feishu_secret: Option<String>,
+    /// 出站通知：钉钉群机器人 webhook 地址或裸 access_token（兜底于 CLI/环境变量）。
+    pub dingtalk_webhook: Option<String>,
+    /// 出站通知：钉钉群机器人加签 secret（`SEC…`，兜底于 CLI/环境变量）。
+    pub dingtalk_secret: Option<String>,
+    /// 出站通知：Slack Incoming Webhook 地址（兜底于 CLI/环境变量）。
+    pub slack_webhook: Option<String>,
+    /// 出站通知：通用自定义 HTTP JSON Webhook 地址（兜底于 CLI/环境变量）。
+    pub notify_webhook: Option<String>,
+    /// 出站通知：通用自定义 HTTP Webhook HMAC-SHA256 签名 secret（兜底于 CLI/环境变量）。
+    pub notify_webhook_secret: Option<String>,
 }
 
 /// `--config` 指定的配置文件。未设置时依次回退到 `$DIVING_CONFIG`、
@@ -403,6 +428,11 @@ pub fn get_max_layer_cache_size() -> Option<u64> {
     must_load_config().max_layer_cache_size.map(|v| v.0)
 }
 
+/// 未设置 `webhook_token` 时是否允许公网调用 `POST /api/webhook`（默认 `false`）。
+pub fn get_webhook_allow_public() -> bool {
+    must_load_config().webhook_allow_public.unwrap_or(false)
+}
+
 /// Tokio runtime worker threads.
 ///
 /// Resolution: `worker_threads` → legacy `threads` → `num_cpus`.
@@ -480,5 +510,46 @@ mod tests {
         // A typo must fail loudly rather than silently disable the gate.
         let err = parse("fail_on_severity: hgih").unwrap_err().to_string();
         assert!(err.contains("hgih"), "{err}");
+    }
+
+    #[test]
+    fn webhook_and_notify_fields_deserialize() {
+        let yaml = r#"
+public_url: https://diving.example.com
+webhook_token: topsecret
+webhook_allow_public: true
+wecom_webhook: wecom-key
+feishu_webhook: https://open.feishu.cn/open-apis/bot/v2/hook/abc
+feishu_secret: fs-sec
+dingtalk_webhook: dt-token
+dingtalk_secret: SEC123
+slack_webhook: https://hooks.slack.com/services/T/B/X
+notify_webhook: https://hooks.example.com/diving
+notify_webhook_secret: hook-sec
+"#;
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(
+            cfg.public_url.as_deref(),
+            Some("https://diving.example.com")
+        );
+        assert_eq!(cfg.webhook_token.as_deref(), Some("topsecret"));
+        assert_eq!(cfg.webhook_allow_public, Some(true));
+        assert_eq!(cfg.wecom_webhook.as_deref(), Some("wecom-key"));
+        assert_eq!(
+            cfg.feishu_webhook.as_deref(),
+            Some("https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+        );
+        assert_eq!(cfg.feishu_secret.as_deref(), Some("fs-sec"));
+        assert_eq!(cfg.dingtalk_webhook.as_deref(), Some("dt-token"));
+        assert_eq!(cfg.dingtalk_secret.as_deref(), Some("SEC123"));
+        assert_eq!(
+            cfg.slack_webhook.as_deref(),
+            Some("https://hooks.slack.com/services/T/B/X")
+        );
+        assert_eq!(
+            cfg.notify_webhook.as_deref(),
+            Some("https://hooks.example.com/diving")
+        );
+        assert_eq!(cfg.notify_webhook_secret.as_deref(), Some("hook-sec"));
     }
 }

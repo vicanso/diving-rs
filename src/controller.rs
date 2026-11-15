@@ -55,7 +55,7 @@ fn in_flight() -> &'static Mutex<HashMap<String, AnalysisFuture>> {
 /// `None` when unlimited. Each analysis already fans out across its layers,
 /// so without a cap a burst of requests for *different* images multiplies
 /// downloads, decompression and memory.
-fn analysis_slots() -> Option<&'static Semaphore> {
+pub(crate) fn analysis_slots() -> Option<&'static Semaphore> {
     static SLOTS: OnceCell<Option<Semaphore>> = OnceCell::new();
     SLOTS
         .get_or_init(|| get_max_concurrent_analyses().map(Semaphore::new))
@@ -70,6 +70,11 @@ async fn in_slot<T>(slots: Option<&Semaphore>, task: impl Future<Output = T>) ->
         None => None,
     };
     task.await
+}
+
+/// Acquire a global analysis concurrency slot before running `task`.
+pub(crate) async fn run_in_slot<T>(task: impl Future<Output = T>) -> T {
+    in_slot(analysis_slots(), task).await
 }
 
 /// Finished analyses kept in memory at once. A result can run to tens of
@@ -109,6 +114,44 @@ fn remember_analysis(key: String, result: Arc<DockerAnalyzeResult>, lang: i18n::
             cache.purge_expired(Instant::now());
         }
     });
+}
+
+/// Drop in-memory cached analyses for every architecture of `image_info`
+/// (e.g. when a webhook signals that a tag has been re-pushed).
+pub(crate) fn invalidate_recent_analysis(image_info: &ImageInfo) {
+    let Some(recent) = recent_analyses() else {
+        return;
+    };
+    let prefix = format!(
+        "{}|{}|{}|{}|",
+        image_info.registry, image_info.user, image_info.name, image_info.tag
+    );
+    if let Ok(mut cache) = recent.lock() {
+        cache.remove_prefix(&prefix);
+    }
+}
+
+/// Store a completed webhook-triggered analysis into the in-memory recent
+/// cache so immediate browser/MCP visits reuse it without re-downloading.
+pub(crate) fn store_recent_analysis(
+    image_info: &ImageInfo,
+    verify_dup: bool,
+    result: Arc<DockerAnalyzeResult>,
+    lang: i18n::Lang,
+) {
+    if is_local_registry(&image_info.registry) {
+        return;
+    }
+    let key = format!(
+        "{}|{}|{}|{}|{}|{}",
+        image_info.registry,
+        image_info.user,
+        image_info.name,
+        image_info.tag,
+        image_info.arch,
+        verify_dup
+    );
+    remember_analysis(key, result, lang);
 }
 
 /// `result` with recommendations in `lang`. They are the only

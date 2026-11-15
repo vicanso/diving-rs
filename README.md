@@ -289,35 +289,48 @@ Each run stores a snapshot under `~/.diving/ai_history/`. On the next run of the
 
 > Security tip: the API key, base URL and webhook are **CLI/env only** — they are never accepted as web query parameters, so they don't end up in access logs.
 
-## WeCom push
+## Push notifications (WeCom · Feishu · DingTalk · Slack · Webhook)
 
-Pass a WeCom (企业微信) group-bot webhook to push the result straight into a chat instead of opening the TUI. Content is chosen so it always fits the bot's ~4096-byte markdown limit:
+Configure one or more outbound channels to push the analysis result straight to your team chat or downstream system instead of opening the TUI (or automatically after a [`POST /api/webhook`](#post-apiwebhook) trigger in web mode):
 
-- with `--ai-api-key` set → the concise AI report is pushed
-- without AI → a short summary (efficiency score, wasted space, recommendations)
+- with `--ai-api-key` (`$OPENAI_API_KEY`) set → pushes the concise AI optimization report
+- without AI → pushes a short summary (efficiency score, wasted space, image size, recommendations)
 
-With `CI=true` the message opens with the [CI gate](#ci-gate) verdict — passed, or failed with the checks that failed — so the chat shows the outcome without opening the pipeline.
+When `public_url` (`--public-url` / `$DIVING_PUBLIC_URL`) is configured, messages include a clickable link to the web UI report (`/?image=…&arch=…`). Under `CI=true` (or when triggered by `/api/webhook`), messages also open with the [CI gate](#ci-gate) verdict so readers see passed/failed checks at a glance.
 
 ```bash
-# bot key (expanded to the standard webhook URL automatically)
+# WeCom (bare key expanded automatically, or pass the full webhook URL)
 diving redis:alpine --wecom-webhook 693a91f6-7aoc-4bc4-97a0-0ec2sifa5aaa
 
-# or the full webhook URL
-diving redis:alpine --wecom-webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY"
+# Feishu / Lark (bare hook ID expanded automatically; optional signing secret)
+diving redis:alpine --feishu-webhook HOOK_ID --feishu-secret SECRET
 
-# push the AI report instead of the summary
-diving redis:alpine --ai-api-key sk-xxxx --wecom-webhook KEY
+# DingTalk (bare access_token expanded automatically; optional SEC... secret)
+diving redis:alpine --dingtalk-webhook ACCESS_TOKEN --dingtalk-secret SEC...
 
-# or from the environment
-export WECOM_WEBHOOK=KEY
-diving redis:alpine
+# Slack
+diving redis:alpine --slack-webhook "https://hooks.slack.com/services/T/B/X"
+
+# Custom HTTP JSON webhook (optional HMAC-SHA256 signature in X-Diving-Signature)
+diving redis:alpine --notify-webhook "https://hooks.example.com/diving" --notify-webhook-secret SECRET
+
+# Push the AI report instead of the summary, and attach a clickable Web UI link
+diving redis:alpine --ai-api-key sk-xxxx --feishu-webhook HOOK_ID --public-url https://diving.example.com
 ```
 
-| Flag | Environment | Default | Description |
-|------|-------------|---------|-------------|
-| `--wecom-webhook` | `WECOM_WEBHOOK` | — | WeCom group-bot webhook URL, or a bare bot key. Providing it pushes the result and skips the TUI. |
+| Flag | Environment | Config key | Description |
+|------|-------------|------------|-------------|
+| `--wecom-webhook` | `WECOM_WEBHOOK` | `wecom_webhook` | WeCom group-bot webhook URL or bare bot key (~4096-byte markdown limit). |
+| `--feishu-webhook` | `FEISHU_WEBHOOK` | `feishu_webhook` | Feishu custom bot webhook URL or bare hook ID (sends interactive card). |
+| `--feishu-secret` | `FEISHU_SECRET` | `feishu_secret` | Optional Feishu signing secret. |
+| `--dingtalk-webhook` | `DINGTALK_WEBHOOK` | `dingtalk_webhook` | DingTalk custom bot webhook URL or bare `access_token`. |
+| `--dingtalk-secret` | `DINGTALK_SECRET` | `dingtalk_secret` | Optional DingTalk signing secret (`SEC…`). |
+| `--slack-webhook` | `SLACK_WEBHOOK` | `slack_webhook` | Slack Incoming Webhook URL. |
+| `--notify-webhook` | `NOTIFY_WEBHOOK` | `notify_webhook` | Generic HTTP endpoint receiving structured JSON (`event: "analysis.completed"`). |
+| `--notify-webhook-secret` | `NOTIFY_WEBHOOK_SECRET` | `notify_webhook_secret` | Optional HMAC-SHA256 secret signing `X-Diving-Signature: sha256=<hex>`. |
+| `--public-url` | `DIVING_PUBLIC_URL` | `public_url` | Public base URL of the web UI for clickable report links. |
 
-Oversized content is truncated to the WeCom limit with a `… (truncated)` marker.
+Resolution priority: CLI flag → environment variable → `~/.diving/config.yml`. Oversized chat messages are truncated gracefully with `… (truncated)`.
 
 ## Web mode
 
@@ -391,6 +404,37 @@ Compare two images (see [Compare two images](#compare-two-images)).
 
 ```bash
 curl "http://127.0.0.1:7001/api/diff?base=myapp:1.4&target=myapp:1.5"
+```
+
+#### `POST /api/webhook`
+
+Receive a registry image push event, respond immediately with `202 Accepted`, invalidate in-memory caches for that tag, analyze the updated image in the background (respecting `registry_allowlist` and `max_concurrent_analyses`), and — when analysis succeeds — push the result to all configured [notification channels](#push-notifications-wecom--feishu--dingtalk--slack--webhook).
+
+Supported payload formats (auto-detected):
+
+- **Generic JSON**: `{"image": "org/app:v1"}` or `{"images": [...], "archs": ["amd64", "arm64"], "lang": "zh"}`
+- **Harbor**: `PUSH_ARTIFACT` / `pushImage` (`event_data.resources[].resource_url`; other event types return `200 {"status":"ignored"}`)
+- **Docker Hub / Aliyun ACR / Tencent TCR**: `push_data` + `repository` (automatically builds `registry.<region>.aliyuncs.com/...` when `repository.region` is present)
+- **Docker Registry v2**: `events[]` with `action: "push"` and manifest/index media types (blob layer pushes and pulls are ignored)
+
+Optional query parameters: `?token=<secret>` (for URL-only registries), `?registry=<host>` (override registry host), `?arch=arm64`, `?lang=zh`.
+
+Security:
+
+- Set `--webhook-token <token>` (`$DIVING_WEBHOOK_TOKEN` or `webhook_token` in `config.yml`). Accepted via `Authorization: Bearer <token>`, raw `Authorization: <token>`, `X-Webhook-Token`, `X-Gitlab-Token`, `X-Hub-Signature-256: sha256=<hmac>`, or `?token=<token>`.
+- When no token is configured, `/api/webhook` only accepts loopback / RFC 1918 private peers (and rejects requests carrying public `X-Forwarded-For` hops) unless `webhook_allow_public: true` is set. `--no-webhook` disables the endpoint.
+
+```bash
+diving --mode web \
+  --listen 0.0.0.0:7001 \
+  --webhook-token "$DIVING_WEBHOOK_TOKEN" \
+  --feishu-webhook "$FEISHU_WEBHOOK" \
+  --public-url https://diving.example.com
+
+curl -X POST "http://127.0.0.1:7001/api/webhook" \
+  -H "Authorization: Bearer $DIVING_WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"ghcr.io/org/app:1.2.3"}'
 ```
 
 ### MCP
@@ -480,6 +524,10 @@ Config file: `~/.diving/config.yml`. Use `--config <file>` (`-c`) or `$DIVING_CO
 | `max_concurrent_analyses` | — | Web mode: how many different images may be analyzed at once; further requests wait their turn. Unset = no limit |
 | `max_layer_cache_size` | — | Total size cap for the layer cache; when exceeded, the least recently accessed blobs are evicted. Unset = TTL cleanup only |
 | `mcp_allowed_hosts` | — | Web mode: extra `Host` values `/mcp` accepts besides loopback (`"*"` turns the check off; ignored when `--mcp-token` is set) |
+| `public_url` | — | External base URL of the web UI for clickable links inside push notifications |
+| `webhook_token` | — | Web mode: token/secret required on `POST /api/webhook` (overridden by `--webhook-token` / `$DIVING_WEBHOOK_TOKEN`) |
+| `webhook_allow_public` | `false` | Web mode: allow unauthenticated `POST /api/webhook` from public IPs (unsafe unless isolated otherwise) |
+| `wecom_webhook` / `feishu_webhook` / `feishu_secret` / `dingtalk_webhook` / `dingtalk_secret` / `slack_webhook` / `notify_webhook` / `notify_webhook_secret` | — | Outbound notification fallbacks when CLI flags and env vars are unset |
 
 ```yaml
 layer_ttl: 30d

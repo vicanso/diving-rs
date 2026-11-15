@@ -59,6 +59,20 @@ impl<V: Clone> RecentCache<V> {
         }
     }
 
+    /// Drop every entry whose key starts with `prefix` (e.g. when a webhook
+    /// notifies that an image tag has been updated).
+    pub fn remove_prefix(&mut self, prefix: &str) {
+        let matched: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in matched {
+            self.entries.pop(&key);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -125,5 +139,19 @@ mod tests {
         c.purge_expired(t0 + TTL);
         assert_eq!(c.len(), 1);
         assert_eq!(c.get("new", t0 + TTL), Some(2));
+    }
+
+    #[test]
+    fn remove_prefix_drops_matching_keys_only() {
+        let t0 = Instant::now();
+        let mut c = cache(4);
+        c.put("hub|org|app|latest|amd64|true".to_string(), 1, t0);
+        c.put("hub|org|app|latest|arm64|true".to_string(), 2, t0);
+        c.put("hub|org|app|v1|amd64|true".to_string(), 3, t0);
+
+        c.remove_prefix("hub|org|app|latest|");
+        assert_eq!(c.get("hub|org|app|latest|amd64|true", t0), None);
+        assert_eq!(c.get("hub|org|app|latest|arm64|true", t0), None);
+        assert_eq!(c.get("hub|org|app|v1|amd64|true", t0), Some(3));
     }
 }

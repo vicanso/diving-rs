@@ -14,11 +14,13 @@ pub mod image;
 pub mod markdown;
 pub mod mcp;
 pub mod middleware;
+pub mod notify;
 pub mod recommend;
 pub mod store;
 pub mod task_local;
 pub mod ui;
 pub mod util;
+pub mod webhook;
 pub mod wecom;
 
 use axum::{error_handling::HandleErrorLayer, middleware::from_fn, Router};
@@ -102,6 +104,37 @@ pub struct Args {
     /// WeCom (企业微信) group-bot webhook URL or key; pushes the result there (or $WECOM_WEBHOOK)
     #[arg(long)]
     wecom_webhook: Option<String>,
+    /// Feishu/Lark (飞书) custom bot webhook URL or hook ID (or $FEISHU_WEBHOOK)
+    #[arg(long)]
+    feishu_webhook: Option<String>,
+    /// Feishu/Lark bot signing secret (or $FEISHU_SECRET)
+    #[arg(long)]
+    feishu_secret: Option<String>,
+    /// DingTalk (钉钉) custom bot webhook URL or access_token (or $DINGTALK_WEBHOOK)
+    #[arg(long)]
+    dingtalk_webhook: Option<String>,
+    /// DingTalk bot signing secret (`SEC...`, or $DINGTALK_SECRET)
+    #[arg(long)]
+    dingtalk_secret: Option<String>,
+    /// Slack incoming webhook URL (or $SLACK_WEBHOOK)
+    #[arg(long)]
+    slack_webhook: Option<String>,
+    /// Generic outbound HTTP JSON webhook URL for analysis notifications (or $NOTIFY_WEBHOOK)
+    #[arg(long)]
+    notify_webhook: Option<String>,
+    /// HMAC-SHA256 secret signing the outbound `X-Diving-Signature` header (or $NOTIFY_WEBHOOK_SECRET)
+    #[arg(long)]
+    notify_webhook_secret: Option<String>,
+    /// Public base URL of the web UI (e.g. `https://diving.example.com`) for notification links (or $DIVING_PUBLIC_URL)
+    #[arg(long)]
+    public_url: Option<String>,
+    /// Web mode: bearer/signature token required on `POST /api/webhook` (or $DIVING_WEBHOOK_TOKEN).
+    /// Without it, `/api/webhook` defaults to private/loopback sources only.
+    #[arg(long)]
+    webhook_token: Option<String>,
+    /// Web mode: disable the inbound `POST /api/webhook` endpoint
+    #[arg(long)]
+    no_webhook: bool,
     /// Registry username for private pulls (or $REGISTRY_USERNAME). Also
     /// falls back to `~/.docker/config.json` / credential helpers when unset.
     #[arg(long, short = 'u', global = true)]
@@ -229,19 +262,19 @@ struct AnalyzeOptions {
     no_ai_history: bool,
     lang: i18n::Lang,
     ai_cfg: Option<ai::AiConfig>,
-    wecom_cfg: Option<wecom::WecomConfig>,
+    notify_cfg: notify::NotifyConfig,
     credentials: Option<image::RegistryCredentials>,
 }
 
 /// One failed CI check: the i18n key of its message plus the arguments that
 /// follow the `{0}` "FAIL" label.
-struct GateFailure {
+pub(crate) struct GateFailure {
     key: &'static str,
     args: Vec<String>,
 }
 
 impl GateFailure {
-    fn render(&self, lang: i18n::Lang, label: &str) -> String {
+    pub(crate) fn render(&self, lang: i18n::Lang, label: &str) -> String {
         let mut args = vec![label];
         args.extend(self.args.iter().map(String::as_str));
         i18n::fill(i18n::tr(lang, self.key), &args)
@@ -274,7 +307,7 @@ impl GateLimits<'static> {
 }
 
 /// Run the CI checks as configured. Empty means the image passes.
-fn evaluate_gate(
+pub(crate) fn evaluate_gate(
     result: &DockerAnalyzeResult,
     summary: &DockerAnalyzeSummary,
     lang: i18n::Lang,
@@ -338,9 +371,9 @@ fn evaluate_gate_with(
     failures
 }
 
-/// The gate outcome as Markdown, for the WeCom push: a bold verdict line and,
-/// when it failed, one bullet per failed check.
-fn gate_verdict_md(failures: &[GateFailure], lang: i18n::Lang) -> String {
+/// The gate outcome as Markdown, for outbound notifications: a bold verdict
+/// line and, when it failed, one bullet per failed check.
+pub(crate) fn gate_verdict_md(failures: &[GateFailure], lang: i18n::Lang) -> String {
     if failures.is_empty() {
         return format!("**{}**", i18n::tr(lang, "cli.gate.pass"));
     }
@@ -364,19 +397,20 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
         no_ai_history,
         lang,
         ai_cfg,
-        wecom_cfg,
+        notify_cfg,
         credentials,
     } = opts;
     sweep_caches().await?;
     let result = analyze_for_cli(&image, lang, verify_dup, credentials).await?;
-    // The gate is decided before anything is sent, so in CI the WeCom push
-    // can carry the verdict instead of leaving readers to guess.
+    // The gate is decided before anything is sent, so in CI the outbound
+    // push can carry the verdict instead of leaving readers to guess.
     let summary = result.summary();
     let failures = evaluate_gate(&result, &summary, lang);
+    let gate_passed = failures.is_empty();
     let verdict = is_ci().then(|| gate_verdict_md(&failures, lang));
     // AI analysis takes precedence: print the model's report and skip the TUI.
-    let reported = ai_cfg.is_some() || wecom_cfg.is_some();
-    if let Some(ai_cfg) = ai_cfg {
+    let reported = ai_cfg.is_some() || !notify_cfg.is_empty();
+    let ai_report = if let Some(ai_cfg) = ai_cfg {
         let mut md = markdown::to_markdown(&result, skip_base, lang);
         // Inline the actual ENTRYPOINT/CMD startup script(s) so the model can
         // reason about what the container really runs. Decompresses layers, so
@@ -391,14 +425,34 @@ async fn analyze(opts: AnalyzeOptions) -> Result<bool, String> {
             .map_err(|e| i18n::fill(i18n::tr(lang, "ai.fail"), &[&e]))?;
         println!("{}", i18n::tr(lang, "ai.report").bold().green());
         println!("{report}");
-        // Smart selection: with AI enabled, push the concise AI report.
-        if let Some(wecom_cfg) = wecom_cfg.as_ref() {
-            push_to_wecom(wecom_cfg, &image, verdict.as_deref(), &report, lang).await?;
-        }
-    } else if let Some(wecom_cfg) = wecom_cfg.as_ref() {
-        // WeCom push without AI: send a concise summary and skip the TUI.
-        let content = wecom_summary(&result, lang);
-        push_to_wecom(wecom_cfg, &image, verdict.as_deref(), &content, lang).await?;
+        Some(report)
+    } else {
+        None
+    };
+    if !notify_cfg.is_empty() {
+        let fail_label = i18n::tr(lang, "cli.fail");
+        let failure_lines: Vec<String> = failures
+            .iter()
+            .map(|f| f.render(lang, fail_label))
+            .collect();
+        let summary_md = wecom_summary(&result, lang);
+        let report_url = notify_cfg
+            .public_url
+            .as_deref()
+            .and_then(|base| notify::build_report_url(base, &image, &result.arch));
+        let ctx = notify::NotifyContext {
+            image: &image,
+            result: &result,
+            summary: &summary,
+            gate_passed,
+            gate_verdict_md: verdict.as_deref(),
+            gate_failures: &failure_lines,
+            ai_report: ai_report.as_deref(),
+            summary_md: &summary_md,
+            report_url: report_url.as_deref(),
+            lang,
+        };
+        push_notifications(&notify_cfg, &ctx).await?;
     }
     // Outside CI the AI report / WeCom push is the whole run. In CI the gate
     // below still applies: sending a report must not switch the checks off.
@@ -632,34 +686,28 @@ fn exit_on(outcome: Result<bool, String>, lang: i18n::Lang) {
     }
 }
 
-// 将分析结果（AI 报告或精简摘要）推送到企微机器人
-async fn push_to_wecom(
-    cfg: &wecom::WecomConfig,
-    image: &str,
-    verdict: Option<&str>,
-    content: &str,
-    lang: i18n::Lang,
+// 将分析结果（AI 报告或精简摘要）推送到所有已配置的通知渠道
+async fn push_notifications(
+    cfg: &notify::NotifyConfig,
+    ctx: &notify::NotifyContext<'_>,
 ) -> Result<(), String> {
-    eprintln!("{}", i18n::tr(lang, "wecom.sending"));
-    // The CI verdict sits right under the title: WeCom truncates long
-    // messages from the end, and the verdict is the part that must survive.
-    let verdict = verdict.map(|v| format!("{v}\n\n")).unwrap_or_default();
-    let msg = format!(
-        "## {}: {}\n\n{}{}",
-        i18n::tr(lang, "wecom.title"),
-        image,
-        verdict,
-        content
-    );
-    wecom::send_markdown(cfg, &msg)
-        .await
-        .map_err(|e| i18n::fill(i18n::tr(lang, "wecom.fail"), &[&e]))?;
-    println!("{}", i18n::tr(lang, "wecom.sent").bold().green());
+    let wecom_only = cfg.channel_names().as_slice() == ["wecom"];
+    let (sending_key, sent_key, fail_key) = if wecom_only {
+        ("wecom.sending", "wecom.sent", "wecom.fail")
+    } else {
+        ("notify.sending", "notify.sent", "notify.fail")
+    };
+    eprintln!("{}", i18n::tr(ctx.lang, sending_key));
+    notify::send_all(cfg, ctx).await.map_err(|errs| {
+        let joined = errs.join("; ");
+        i18n::fill(i18n::tr(ctx.lang, fail_key), &[&joined])
+    })?;
+    println!("{}", i18n::tr(ctx.lang, sent_key).bold().green());
     Ok(())
 }
 
-// 无 AI 时推送的精简摘要：效率分 / 浪费空间 / 优化建议
-fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> String {
+// 无 AI 时推送的精简摘要：效率分 / 浪费空间 / 镜像大小 / 优化建议
+pub(crate) fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> String {
     let summary = result.summary();
     let mut s = String::new();
     // A cached result shown because the registry was unavailable says so
@@ -671,12 +719,16 @@ fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> Strin
         ));
     }
     s.push_str(&format!(
-        "**{}:** {} %\n**{}:** {} bytes ({})\n",
+        "**{}:** {} %\n**{}:** {} bytes ({})\n**{}:** {}\n**{}:** {}\n",
         i18n::tr(lang, "md.f.eff"),
         summary.score,
         i18n::tr(lang, "md.f.wasted"),
         summary.wasted_size,
         ByteSize(summary.wasted_size),
+        i18n::tr(lang, "md.f.usize"),
+        ByteSize(result.total_size),
+        i18n::tr(lang, "md.f.csize"),
+        ByteSize(result.size),
     ));
     if !result.recommendations.is_empty() {
         s.push_str(&format!("\n### {}\n", i18n::tr(lang, "md.recs")));
@@ -703,15 +755,26 @@ fn wecom_summary(result: &image::DockerAnalyzeResult, lang: i18n::Lang) -> Strin
 pub async fn run(args: Args) {
     // 启动时确保可以读取配置
     config::must_load_config();
+    let default_lang = i18n::Lang::resolve(args.lang.as_deref());
+    let ai_cfg = ai::AiConfig::resolve(
+        args.ai_api_key.as_deref(),
+        args.ai_base_url.as_deref(),
+        args.ai_model.as_deref(),
+        args.ai_system_prompt.as_deref(),
+    );
+    let notify_cfg = notify::NotifyConfig::resolve(notify::NotifyInputs {
+        wecom_webhook: args.wecom_webhook.as_deref(),
+        feishu_webhook: args.feishu_webhook.as_deref(),
+        feishu_secret: args.feishu_secret.as_deref(),
+        dingtalk_webhook: args.dingtalk_webhook.as_deref(),
+        dingtalk_secret: args.dingtalk_secret.as_deref(),
+        slack_webhook: args.slack_webhook.as_deref(),
+        notify_webhook: args.notify_webhook.as_deref(),
+        notify_webhook_secret: args.notify_webhook_secret.as_deref(),
+        public_url: args.public_url.as_deref(),
+    });
     if args.is_terminal_type() {
-        let lang = i18n::Lang::resolve(args.lang.as_deref());
-        let ai_cfg = ai::AiConfig::resolve(
-            args.ai_api_key.as_deref(),
-            args.ai_base_url.as_deref(),
-            args.ai_model.as_deref(),
-            args.ai_system_prompt.as_deref(),
-        );
-        let wecom_cfg = wecom::WecomConfig::resolve(args.wecom_webhook.as_deref());
+        let lang = default_lang;
         // Base layers are auto-detected and hidden by default; --no-skip-base
         // opts back in.
         let skip_base = !args.no_skip_base;
@@ -751,7 +814,7 @@ pub async fn run(args: Args) {
                         no_ai_history: args.no_ai_history,
                         lang,
                         ai_cfg,
-                        wecom_cfg,
+                        notify_cfg,
                         credentials,
                     })
                     .await;
@@ -776,6 +839,38 @@ pub async fn run(args: Args) {
         if mcp_status.enabled {
             warn_if_mcp_unreachable(&args.listen, mcp_status.token_required);
             routes = routes.merge(mcp::new_router(mcp_token));
+        }
+        let webhook_token = args
+            .webhook_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                env::var("DIVING_WEBHOOK_TOKEN")
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+            })
+            .or_else(|| {
+                config::must_load_config()
+                    .webhook_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+            });
+        if !args.no_webhook {
+            let allow_public = config::get_webhook_allow_public();
+            warn_if_webhook_unauthenticated(&args.listen, webhook_token.is_some(), allow_public);
+            routes = routes.merge(webhook::new_router(webhook::WebhookConfig {
+                token: webhook_token,
+                allow_public,
+                ai_cfg,
+                no_ai_history: args.no_ai_history,
+                notify_cfg,
+                default_lang,
+            }));
         }
         // build our application with a route
         let app = Router::new()
@@ -829,6 +924,19 @@ fn warn_if_mcp_unreachable(listen: &str, has_token: bool) {
             listen,
             "/mcp only accepts loopback Host headers; set --mcp-token or \
              mcp_allowed_hosts in ~/.diving/config.yml for remote MCP clients"
+        );
+    }
+}
+
+fn warn_if_webhook_unauthenticated(listen: &str, has_token: bool, allow_public: bool) {
+    let exposed = listen
+        .parse::<SocketAddr>()
+        .is_ok_and(|addr| !addr.ip().is_loopback());
+    if exposed && !has_token && !allow_public {
+        warn!(
+            listen,
+            "/api/webhook only accepts private/loopback callers; set --webhook-token \
+             (or $DIVING_WEBHOOK_TOKEN) for authenticated remote registry webhooks"
         );
     }
 }

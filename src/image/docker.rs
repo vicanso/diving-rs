@@ -609,6 +609,27 @@ fn set_manifest_to_cache(
     }
 }
 
+/// Drop cached manifests for every architecture of `image_info` so a
+/// webhook-triggered refresh fetches the newly pushed manifest from the registry.
+pub fn invalidate_manifest_cache(image_info: &ImageInfo) {
+    let prefix = format!(
+        "{}/{}/manifests/{}:",
+        image_info.registry,
+        repository_path(&image_info.user, &image_info.name),
+        image_info.tag
+    );
+    if let Ok(mut cache) = get_manifest_cache().lock() {
+        let matched: Vec<String> = cache
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in matched {
+            cache.pop(&key);
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DockerRequestErrorResp {
@@ -2236,6 +2257,7 @@ pub async fn analyze_docker_image_or_last_known(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::parse_image_info;
 
     #[test]
     fn preview_layers_skip_empty_history_entries() {
@@ -2414,5 +2436,22 @@ mod tests {
     fn repository_path_joins_namespace() {
         assert_eq!(repository_path("org", "proj/img"), "org/proj/img");
         assert_eq!(repository_path("", "solo"), "solo");
+    }
+
+    #[test]
+    fn invalidate_manifest_cache_clears_all_arches_for_tag() {
+        let k_amd64 = "https://index.docker.io/v2/org/demo-inv/manifests/latest:amd64";
+        let k_arm64 = "https://index.docker.io/v2/org/demo-inv/manifests/latest:arm64";
+        let k_other = "https://index.docker.io/v2/org/demo-inv/manifests/v1:amd64";
+        set_manifest_to_cache(k_amd64, ImageManifest::default(), vec![], 300);
+        set_manifest_to_cache(k_arm64, ImageManifest::default(), vec![], 300);
+        set_manifest_to_cache(k_other, ImageManifest::default(), vec![], 300);
+
+        let info = parse_image_info("org/demo-inv:latest");
+        invalidate_manifest_cache(&info);
+
+        assert!(get_manifest_from_cache(k_amd64).is_none());
+        assert!(get_manifest_from_cache(k_arm64).is_none());
+        assert!(get_manifest_from_cache(k_other).is_some());
     }
 }

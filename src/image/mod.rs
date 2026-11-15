@@ -7,8 +7,9 @@ mod registry_auth;
 mod sensitive;
 
 pub use docker::{
-    analyze_docker_image, analyze_docker_image_or_last_known, preview_docker_image, AnalyzeReport,
-    DockerAnalyzeResult, DockerAnalyzeSummary, ImagePreview, SensitiveFileInfo, WasteChange,
+    analyze_docker_image, analyze_docker_image_or_last_known, invalidate_manifest_cache,
+    preview_docker_image, AnalyzeReport, DockerAnalyzeResult, DockerAnalyzeSummary, ImagePreview,
+    SensitiveFileInfo, WasteChange,
 };
 pub use elf::{RuntimeCompat, UnstrippedBinary};
 pub use image_ref::{

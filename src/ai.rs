@@ -9,7 +9,7 @@
 use crate::config;
 use crate::i18n::{self, Lang};
 use crate::image::{get_file_content_from_layer, host_arch, parse_image_info, DockerAnalyzeResult};
-use crate::store::get_blob_path;
+use crate::store::{get_blob_path, tmp_sibling_path};
 use crate::util::get_http_client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -236,8 +236,16 @@ fn write_history(image: &str, md: &str) {
         warn!(err = e.to_string(), "create ai_history dir fail");
         return;
     }
-    if let Err(e) = fs::write(dir.join(history_key(image)), md) {
+    let target = dir.join(history_key(image));
+    let tmp = tmp_sibling_path(&target);
+    if let Err(e) = fs::write(&tmp, md) {
         warn!(err = e.to_string(), "write ai_history snapshot fail");
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, &target) {
+        warn!(err = e.to_string(), "rename ai_history snapshot fail");
+        let _ = fs::remove_file(&tmp);
     }
 }
 
@@ -257,6 +265,19 @@ pub async fn analyze_with_ai(
     lang: Lang,
     skip_history: bool,
 ) -> Result<String, String> {
+    analyze_with_ai_opts(image, current_md, cfg, lang, skip_history, false).await
+}
+
+/// Variant of [`analyze_with_ai`] with `quiet` control so background webhook
+/// workers don't print progress prompts to stderr.
+pub async fn analyze_with_ai_opts(
+    image: &str,
+    current_md: &str,
+    cfg: &AiConfig,
+    lang: Lang,
+    skip_history: bool,
+    quiet: bool,
+) -> Result<String, String> {
     // Best-effort history read; the snapshot itself is only refreshed after
     // a successful AI response (see the end of this function).
     let prev = if skip_history {
@@ -267,9 +288,11 @@ pub async fn analyze_with_ai(
 
     let user_content = build_user_message(lang, prev.as_deref(), current_md);
 
-    eprintln!("{}", i18n::tr(lang, "ai.analyzing"));
-    if prev.is_some() {
-        eprintln!("{}", i18n::tr(lang, "ai.compare"));
+    if !quiet {
+        eprintln!("{}", i18n::tr(lang, "ai.analyzing"));
+        if prev.is_some() {
+            eprintln!("{}", i18n::tr(lang, "ai.compare"));
+        }
     }
 
     // User override takes precedence; otherwise pick the language-matched

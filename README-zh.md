@@ -288,35 +288,48 @@ diving redis:alpine --ai-api-key sk-xxxx --lang zh
 
 > 安全提示：API Key、接口地址与 webhook **仅支持 CLI/环境变量** —— 不会作为 web 查询参数接收，因此不会落入访问日志。
 
-## 企微推送
+## 消息推送（企微 · 飞书 · 钉钉 · Slack · 自定义 Webhook）
 
-指定企业微信群机器人 webhook，即可把结果直接推送到群里，而不进入交互式 TUI。推送内容会智能选择，确保不超过机器人 ~4096 字节的 markdown 上限：
+配置一个或多个出站通知渠道，可在命令行分析结束后直接推送结果（跳过 TUI），也可配合 Web 模式的 [`POST /api/webhook`](#post-apiwebhook) 实现**镜像推送更新 → 自动分析成功 → 推送分析结果**：
 
-- 已设置 `--ai-api-key` → 推送精简的 AI 报告
-- 未启用 AI → 推送精简摘要（效率评分、浪费空间、优化建议）
+- 已设置 `--ai-api-key`（`$OPENAI_API_KEY`）→ 推送精简的 AI 诊断报告
+- 未启用 AI → 推送精简摘要（效率评分、浪费空间、压缩/解压大小、优化建议）
 
-设置 `CI=true` 时，消息开头会带上 [CI 卡口](#ci-卡口)的结论：通过，或未通过及具体是哪几项检查没过。这样在群里就能看到结果，不用再去翻流水线。
+若配置了 `public_url`（`--public-url` / `$DIVING_PUBLIC_URL`），通知消息中会自动附带可点击的 Web 详情页链接（`/?image=…&arch=…`）。在 `CI=true` 或 Web `/api/webhook` 触发时，消息开头还会附上 [CI 卡口](#ci-卡口)判定结果。
 
 ```bash
-# 使用机器人 key（自动展开为标准 webhook 地址）
+# 企业微信（支持裸 key 自动展开，或直接填完整 webhook 地址）
 diving redis:alpine --wecom-webhook 693a91f6-7aoc-4bc4-97a0-0ec2sifa5aaa
 
-# 或使用完整 webhook 地址
-diving redis:alpine --wecom-webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY"
+# 飞书（支持裸 hook ID 自动展开，可选配置签名校验 secret）
+diving redis:alpine --feishu-webhook HOOK_ID --feishu-secret SECRET
 
-# 推送 AI 报告而非摘要
-diving redis:alpine --ai-api-key sk-xxxx --wecom-webhook KEY
+# 钉钉（支持裸 access_token 自动展开，可选配置 SEC... 加签密钥）
+diving redis:alpine --dingtalk-webhook ACCESS_TOKEN --dingtalk-secret SEC...
 
-# 也可通过环境变量提供
-export WECOM_WEBHOOK=KEY
-diving redis:alpine
+# Slack
+diving redis:alpine --slack-webhook "https://hooks.slack.com/services/T/B/X"
+
+# 通用自定义 HTTP JSON Webhook（可选通过 X-Diving-Signature 下发 HMAC-SHA256 签名）
+diving redis:alpine --notify-webhook "https://hooks.example.com/diving" --notify-webhook-secret SECRET
+
+# 推送 AI 报告，并在消息中附上 Web 详情页链接
+diving redis:alpine --ai-api-key sk-xxxx --feishu-webhook HOOK_ID --public-url https://diving.example.com
 ```
 
-| 参数 | 环境变量 | 默认值 | 说明 |
-|------|----------|--------|------|
-| `--wecom-webhook` | `WECOM_WEBHOOK` | — | 企业微信群机器人 webhook 地址，或裸 key（自动展开）。提供该参数即推送结果并跳过 TUI。 |
+| 参数 | 环境变量 | `config.yml` 字段 | 说明 |
+|------|----------|-------------------|------|
+| `--wecom-webhook` | `WECOM_WEBHOOK` | `wecom_webhook` | 企业微信群机器人 webhook 地址或裸 key（约 4096 字节上限）。 |
+| `--feishu-webhook` | `FEISHU_WEBHOOK` | `feishu_webhook` | 飞书自定义机器人 webhook 地址或裸 hook ID（发送交互卡片）。 |
+| `--feishu-secret` | `FEISHU_SECRET` | `feishu_secret` | 可选：飞书机器人签名校验 secret。 |
+| `--dingtalk-webhook` | `DINGTALK_WEBHOOK` | `dingtalk_webhook` | 钉钉自定义机器人 webhook 地址或裸 `access_token`。 |
+| `--dingtalk-secret` | `DINGTALK_SECRET` | `dingtalk_secret` | 可选：钉钉机器人加签 secret（`SEC…`）。 |
+| `--slack-webhook` | `SLACK_WEBHOOK` | `slack_webhook` | Slack Incoming Webhook 地址。 |
+| `--notify-webhook` | `NOTIFY_WEBHOOK` | `notify_webhook` | 通用 HTTP JSON 接收地址（POST 结构化报告 `event: "analysis.completed"`）。 |
+| `--notify-webhook-secret` | `NOTIFY_WEBHOOK_SECRET` | `notify_webhook_secret` | 可选：用于生成 `X-Diving-Signature: sha256=<hex>` 请求头的 HMAC-SHA256 密钥。 |
+| `--public-url` | `DIVING_PUBLIC_URL` | `public_url` | Web UI 对外访问根地址，用于在消息中生成报告直达链接。 |
 
-超长内容会截断到企微上限并附 `… (truncated)` 提示。
+优先级：CLI 参数 → 环境变量 → `~/.diving/config.yml`。超长聊天消息会自动截断并附 `… (truncated)` 标记。
 
 ## Web 模式
 
@@ -390,6 +403,37 @@ curl "http://127.0.0.1:7001/api/analyze?image=myimage:latest&format=markdown&ski
 
 ```bash
 curl "http://127.0.0.1:7001/api/diff?base=myapp:1.4&target=myapp:1.5"
+```
+
+#### `POST /api/webhook`
+
+接收镜像仓库推送事件（Webhook），立即返回 `202 Accepted` 并在后台刷新缓存、拉取分析最新镜像；分析成功后自动把结果推送至已配置的[通知渠道](#消息推送企微--飞书--钉钉--slack--自定义-webhook)（同样受 `registry_allowlist` 与 `max_concurrent_analyses` 约束）。
+
+支持自动识别以下 Payload 格式：
+
+- **通用 JSON**：`{"image": "org/app:v1"}` 或 `{"images": [...], "archs": ["amd64", "arm64"], "lang": "zh"}`
+- **Harbor**：`PUSH_ARTIFACT` / `pushImage`（读取 `event_data.resources[].resource_url`，其它事件返回 `200 {"status":"ignored"}`）
+- **Docker Hub / 阿里云 ACR / 腾讯云 TCR**：`push_data` + `repository`（含 `repository.region` 时自动拼接 `registry.<region>.aliyuncs.com/...`）
+- **Docker Registry v2 Notification**：`events[]` 中 `action: "push"` 且 `mediaType` 为 manifest/index 的事件（自动忽略层 blob 上传与 pull 事件）
+
+可选 URL 查询参数：`?token=<secret>`、`?registry=<host>`（覆盖仓库域名）、`?arch=arm64`、`?lang=zh`。
+
+安全控制：
+
+- 设置 `--webhook-token <token>`（或 `$DIVING_WEBHOOK_TOKEN`、`config.yml` 中的 `webhook_token`），支持通过 `Authorization: Bearer <token>`、裸 `Authorization: <token>`、`X-Webhook-Token`、`X-Gitlab-Token`、`X-Hub-Signature-256: sha256=<hmac>` 或 `?token=<token>` 鉴权。
+- 未配置 token 时，默认仅放行 loopback / 内网 IP 请求（若携带公网 `X-Forwarded-For` 也会拒绝），可通过 `webhook_allow_public: true` 显式放开；`--no-webhook` 可关闭该接口。
+
+```bash
+diving --mode web \
+  --listen 0.0.0.0:7001 \
+  --webhook-token "$DIVING_WEBHOOK_TOKEN" \
+  --feishu-webhook "$FEISHU_WEBHOOK" \
+  --public-url https://diving.example.com
+
+curl -X POST "http://127.0.0.1:7001/api/webhook" \
+  -H "Authorization: Bearer $DIVING_WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"ghcr.io/org/app:1.2.3"}'
 ```
 
 ### MCP
@@ -479,6 +523,10 @@ Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以�
 | `max_concurrent_analyses` | — | Web 模式：最多同时分析多少个不同的镜像，超出的请求排队等待。不配置则不限制 |
 | `max_layer_cache_size` | — | layer 缓存的总大小上限；超出时按最近访问时间从旧到新淘汰。不配置则只按 TTL 清理 |
 | `mcp_allowed_hosts` | — | Web 模式：`/mcp` 在 loopback 之外额外放行的 `Host`（配成 `"*"` 关闭校验；设置了 `--mcp-token` 时忽略） |
+| `public_url` | — | Web 服务对外可访问的根 URL，用于在推送消息中生成可点击的分析详情链接 |
+| `webhook_token` | — | Web 模式：`POST /api/webhook` 鉴权 token/secret（会被 `--webhook-token` / `$DIVING_WEBHOOK_TOKEN` 覆盖） |
+| `webhook_allow_public` | `false` | Web 模式：未设置 token 时是否允许公网来源调用 `POST /api/webhook` |
+| `wecom_webhook` / `feishu_webhook` / `feishu_secret` / `dingtalk_webhook` / `dingtalk_secret` / `slack_webhook` / `notify_webhook` / `notify_webhook_secret` | — | 未通过命令行或环境变量传入时，各通知渠道的配置文件兜底值 |
 
 ```yaml
 layer_ttl: 30d

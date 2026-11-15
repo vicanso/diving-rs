@@ -17,7 +17,9 @@ On top of the raw layer/file data, the analysis derives:
 - **ELF runtime-compat probe** (`src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS; also finds unstripped binaries (debug sections / symbol tables) in the final filesystem
 - **Image diff** (`src/diff.rs`, `diving diff <base> <target>`, `/api/diff`, MCP `diff_images`): layers aligned by `diff_id`, final-filesystem added / removed / resized files, per-directory deltas, new / resolved recommendations
 - **AI report** (`src/ai.rs`, enabled by `--ai-api-key` / `$OPENAI_API_KEY`): sends the Markdown analysis (plus the previous snapshot under `~/.diving/ai_history/` for regression comparison) to an OpenAI-compatible endpoint
-- **WeCom push** (`src/wecom.rs`, `--wecom-webhook`): sends the AI report or a concise summary to a WeCom group bot
+- **WeCom push** (`src/wecom.rs`, `--wecom-webhook`): WeCom group bot markdown sender (dispatched via `src/notify.rs`)
+- **Multi-channel notifications** (`src/notify.rs`): pushes CI/AI summaries and report links to WeCom, Feishu, DingTalk, Slack, and custom JSON webhooks
+- **Inbound registry webhook** (`src/webhook.rs`, web mode `POST /api/webhook`): parses Harbor/Docker Hub/ACR/Registry v2/generic JSON push events, invalidates tag caches, analyzes asynchronously, and triggers outbound notifications
 - **MCP endpoint** (`src/mcp.rs`, web mode `/mcp`): exposes the analysis as MCP tools to AI agents
 
 ## Build System & Common Commands
@@ -126,6 +128,8 @@ The application follows a **dual-mode runtime**: single binary, dual execution p
 - **`src/diff.rs`**: `diff_images(base, target) -> ImageDiff` (pure, like `recommend`) and `to_diff_markdown`; layers match by `ImageLayer::diff_id` (config `rootfs.diff_ids`) because a `docker save` tar names layers by path
 - **`src/ai.rs`**: OpenAI-compatible AI report + `~/.diving/ai_history/` snapshots for regression comparison
 - **`src/wecom.rs`**: WeCom group-bot markdown push
+- **`src/notify.rs`**: Multi-channel outbound notifications (WeCom, Feishu interactive card + HMAC sign, DingTalk markdown + signed URL, Slack, custom JSON webhook + `X-Diving-Signature`) and CLI/env/`config.yml` target resolution
+- **`src/webhook.rs`**: Web-mode `POST /api/webhook` inbound registry push receiver (auth/private-IP guard, Harbor/Docker Hub/ACR/Registry v2/generic JSON parsers, cache invalidation, async background analysis + `notify::send_all`)
 - **`src/markdown.rs`**: Markdown rendering of the analysis result; `to_summary_markdown` is the short PR-comment / job-summary form (`--summary`, `format=summary`)
 - **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `diff_images` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report; `read_file` on a symlink/hard link answers with the link target instead of empty content. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
 - **`src/i18n.rs`**: Rust-side en/zh string catalog (`tr` / `fill`); web has its own catalog in `web/src/i18n/`

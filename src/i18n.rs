@@ -591,7 +591,7 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "ai.script.truncated") => "… (script truncated)",
         (Lang::Zh, "ai.script.truncated") => "……（脚本已截断）",
 
-        // ---- WeCom push (wecom.rs, CLI stderr/stdout) ---------------------
+        // ---- WeCom / Multi-channel push (wecom.rs, notify.rs) -------------
         (Lang::En, "wecom.title") => "diving analysis report",
         (Lang::Zh, "wecom.title") => "diving 分析报告",
         (Lang::En, "wecom.sending") => "  > Pushing result to WeCom bot...",
@@ -600,6 +600,14 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "wecom.sent") => "结果已推送到企微机器人。",
         (Lang::En, "wecom.fail") => "WeCom push failed: {0}",
         (Lang::Zh, "wecom.fail") => "企微推送失败：{0}",
+        (Lang::En, "notify.report_link") => "Open full report",
+        (Lang::Zh, "notify.report_link") => "查看完整分析报告",
+        (Lang::En, "notify.sending") => "  > Pushing result to notification channels...",
+        (Lang::Zh, "notify.sending") => "  > 正在推送分析结果到通知渠道…",
+        (Lang::En, "notify.sent") => "Result pushed to notification channels.",
+        (Lang::Zh, "notify.sent") => "结果已推送到通知渠道。",
+        (Lang::En, "notify.fail") => "Notification push failed: {0}",
+        (Lang::Zh, "notify.fail") => "通知推送失败：{0}",
 
         // Unknown key: visible, safe marker.
         (_, _) => "<missing i18n key>",

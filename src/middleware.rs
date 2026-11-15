@@ -25,6 +25,7 @@ pub async fn access_log(
     if path != "/ping" {
         let status = resp.status().as_u16();
         let cost = Utc::now().timestamp_millis() - started_at;
+        let uri = redact_uri(&uri);
         tl_info!(
             category = "accessLog",
             ip = ip.to_string(),
@@ -37,6 +38,24 @@ pub async fn access_log(
     resp
 }
 
+/// Mask sensitive query parameters (`token`, `secret`) before writing request
+/// URIs to access logs so URL-based webhook secrets don't leak on disk.
+fn redact_uri(uri: &str) -> String {
+    let Some((path, query)) = uri.split_once('?') else {
+        return uri.to_string();
+    };
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, _)) if k.eq_ignore_ascii_case("token") || k.eq_ignore_ascii_case("secret") => {
+                format!("{k}=***")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{path}?{}", redacted.join("&"))
+}
+
 pub async fn entry(req: Request<Body>, next: Next) -> Response {
     TRACE_ID
         .scope(generate_trace_id(), async {
@@ -47,4 +66,25 @@ pub async fn entry(req: Request<Body>, next: Next) -> Response {
             resp
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_uri_masks_token_and_secret_query_params() {
+        assert_eq!(
+            redact_uri("/api/analyze?image=redis:alpine"),
+            "/api/analyze?image=redis:alpine"
+        );
+        assert_eq!(
+            redact_uri("/api/webhook?token=topsecret&arch=amd64"),
+            "/api/webhook?token=***&arch=amd64"
+        );
+        assert_eq!(
+            redact_uri("/api/webhook?lang=zh&Secret=abc123"),
+            "/api/webhook?lang=zh&Secret=***"
+        );
+    }
 }
