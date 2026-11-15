@@ -140,6 +140,7 @@ export default {
   copyButton: "Copy",
   copiedButton: "Copied",
   wrapLinesLabel: "Wrap",
+  rawLabel: "Raw",
   showMoreLines: "Show {n} more lines",
   showLessLines: "Collapse",
   compressedLabel: "Compressed",

@@ -999,19 +999,20 @@
 /* —— dockerfile —— */
 .dockerfileBlock {
   margin: 0;
-  padding: 14px 16px;
-  background: var(--bg-muted);
-  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--surface-sunken);
+  border: none;
+  border-radius: 0 0 var(--radius) var(--radius);
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.dockerfileBlock.wrap .cmdLineCode {
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--ink-secondary);
-  border: 1px solid var(--border);
-  max-height: 420px;
-  overflow-y: auto;
 }
 
 .wasteChanges {
@@ -2243,11 +2244,15 @@ html.dark .opcodePill.op-cmd {
 }
 
 .cmdLineNo {
-  width: 24px;
+  min-width: 28px;
   flex-shrink: 0;
   text-align: right;
   color: var(--text-tertiary);
   user-select: none;
+}
+
+.cmdLineCode {
+  white-space: pre;
 }
 
 .cmdExpandBtn {

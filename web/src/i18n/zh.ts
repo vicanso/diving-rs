@@ -137,6 +137,7 @@ export default {
   copyButton: "复制",
   copiedButton: "已复制",
   wrapLinesLabel: "自动换行",
+  rawLabel: "原始",
   showMoreLines: "展开其余 {n} 行",
   showLessLines: "收起",
   compressedLabel: "压缩大小",

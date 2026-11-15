@@ -28,6 +28,7 @@ import {
   buildFinalTree,
   dominantLayer,
   FileTreeRow,
+  formatDockerfile,
   FsNode,
   layerBytes,
   LayerFileCounts,
@@ -836,12 +837,63 @@ export const RecommendationsCard = memo(
 
 export const DockerfileCard = memo(
   ({ dockerfile }: { dockerfile: string; isDark?: boolean }) => {
+    const [showRaw, setShowRaw] = useState(false);
+    const [wrap, setWrap] = useState(false);
+    const [copied, setCopied] = useState(false);
+
+    const formatted = useMemo(
+      () => (dockerfile ? formatDockerfile(dockerfile) : ""),
+      [dockerfile],
+    );
+
     if (!dockerfile) {
       return null;
     }
+
+    const content = showRaw ? dockerfile : formatted;
+    const lines = content.split("\n");
+
+    const onCopy = () => {
+      navigator.clipboard?.writeText(content).then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      });
+    };
+
     return (
-      <Card className="panel span2" title={i18nGet("dockerfileTitle")}>
-        <pre className="dockerfileBlock">{dockerfile}</pre>
+      <Card
+        className="panel flushPanel span2"
+        title={i18nGet("dockerfileTitle")}
+        extra={
+          <div className="commandBoxActions">
+            <button
+              type="button"
+              className={`cmdActionBtn ${showRaw ? "active" : ""}`}
+              onClick={() => setShowRaw((r) => !r)}
+            >
+              {i18nGet("rawLabel")}
+            </button>
+            <button
+              type="button"
+              className={`cmdActionBtn ${wrap ? "active" : ""}`}
+              onClick={() => setWrap((w) => !w)}
+            >
+              {i18nGet("wrapLinesLabel")}
+            </button>
+            <button type="button" className="cmdActionBtn" onClick={onCopy}>
+              {copied ? i18nGet("copiedButton") : i18nGet("copyButton")}
+            </button>
+          </div>
+        }
+      >
+        <pre className={`dockerfileBlock ${wrap ? "wrap" : ""}`}>
+          {lines.map((line, idx) => (
+            <div key={idx} className="cmdLine">
+              <span className="cmdLineNo">{idx + 1}</span>
+              <span className="cmdLineCode">{line}</span>
+            </div>
+          ))}
+        </pre>
       </Card>
     );
   },

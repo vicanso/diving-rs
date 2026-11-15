@@ -492,58 +492,608 @@ export interface ParsedLayerCommand {
   formatted: string;
 }
 
-const formatShellBody = (body: string): string => {
+type LexFrame =
+  | { kind: "NORMAL" }
+  | { kind: "SINGLE" }
+  | { kind: "DOUBLE" }
+  | { kind: "BACKTICK" }
+  | { kind: "CMD_SUBST"; parenDepth: number };
+
+type ShellOp = ";;" | ";" | "&&" | "||" | "";
+
+interface ShellSegment {
+  code: string;
+  op: ShellOp;
+}
+
+const PIPE_OR_REDIRECT_TOKENS = new Set([
+  "|",
+  ">",
+  ">>",
+  "<",
+  ">&2",
+  "2>&1",
+  "1>&2",
+]);
+
+const splitShellSegments = (body: string): ShellSegment[] => {
   const trimmed = body.trim();
-  if (!trimmed) return "";
-  // Split chained commands on `;` or `&&` outside single/double quotes.
-  const lines: string[] = [];
+  if (!trimmed) return [];
+
+  const segments: ShellSegment[] = [];
+  const stack: LexFrame[] = [{ kind: "NORMAL" }];
+  let rootParenDepth = 0;
   let current = "";
-  let inSingle = false;
-  let inDouble = false;
-  let escape = false;
+
+  const pushSegment = (op: ShellOp) => {
+    const code = current.trim();
+    if (code) {
+      segments.push({ code, op });
+    } else if (op && segments.length > 0 && !segments[segments.length - 1].op) {
+      segments[segments.length - 1].op = op;
+    }
+    current = "";
+  };
 
   for (let idx = 0; idx < trimmed.length; idx++) {
     const ch = trimmed[idx];
-    if (escape) {
+    const frame = stack[stack.length - 1];
+
+    if (frame.kind === "SINGLE") {
       current += ch;
-      escape = false;
+      if (ch === "'") {
+        stack.pop();
+      }
       continue;
     }
-    if (ch === "\\" && !inSingle) {
-      escape = true;
-      current += ch;
-      continue;
-    }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
-      current += ch;
-      continue;
-    }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
-      current += ch;
-      continue;
-    }
-    if (!inSingle && !inDouble) {
-      if (ch === ";") {
-        current += ";";
-        if (current.trim()) lines.push(current.trim());
-        current = "";
+
+    if (frame.kind === "DOUBLE") {
+      if (ch === "\\") {
+        if (trimmed[idx + 1] === "\n") {
+          idx++;
+          continue;
+        }
+        if (trimmed[idx + 1] === "\r" && trimmed[idx + 2] === "\n") {
+          idx += 2;
+          continue;
+        }
+        if (idx + 1 < trimmed.length) {
+          current += ch + trimmed[idx + 1];
+          idx++;
+          continue;
+        }
+      }
+      if (ch === "$" && trimmed[idx + 1] === "(") {
+        current += "$(";
+        idx++;
+        stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
         continue;
       }
-      if (ch === "&" && trimmed[idx + 1] === "&") {
-        if (current.trim()) lines.push(`${current.trim()} &&`);
-        current = "";
+      if (ch === "`") {
+        current += ch;
+        stack.push({ kind: "BACKTICK" });
+        continue;
+      }
+      current += ch;
+      if (ch === '"') {
+        stack.pop();
+      }
+      continue;
+    }
+
+    if (frame.kind === "BACKTICK") {
+      if (ch === "\\" && idx + 1 < trimmed.length) {
+        current += ch + trimmed[idx + 1];
+        idx++;
+        continue;
+      }
+      current += ch;
+      if (ch === "`") {
+        stack.pop();
+      }
+      continue;
+    }
+
+    // NORMAL or CMD_SUBST
+    if (ch === "\\") {
+      if (trimmed[idx + 1] === "\n") {
+        idx++;
+        continue;
+      }
+      if (trimmed[idx + 1] === "\r" && trimmed[idx + 2] === "\n") {
+        idx += 2;
+        continue;
+      }
+      if (idx + 1 < trimmed.length) {
+        current += ch + trimmed[idx + 1];
         idx++;
         continue;
       }
     }
+
+    if (ch === "'") {
+      current += ch;
+      stack.push({ kind: "SINGLE" });
+      continue;
+    }
+    if (ch === '"') {
+      current += ch;
+      stack.push({ kind: "DOUBLE" });
+      continue;
+    }
+    if (ch === "`") {
+      current += ch;
+      stack.push({ kind: "BACKTICK" });
+      continue;
+    }
+    if (ch === "$" && trimmed[idx + 1] === "(") {
+      current += "$(";
+      idx++;
+      stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
+      continue;
+    }
+
+    if (ch === "(") {
+      if (frame.kind === "CMD_SUBST") {
+        frame.parenDepth++;
+      } else if (stack.length === 1) {
+        rootParenDepth++;
+      }
+      current += ch;
+      continue;
+    }
+
+    if (ch === ")") {
+      if (frame.kind === "CMD_SUBST") {
+        if (frame.parenDepth === 0) {
+          stack.pop();
+        } else {
+          frame.parenDepth--;
+        }
+      } else if (stack.length === 1) {
+        rootParenDepth = Math.max(0, rootParenDepth - 1);
+      }
+      current += ch;
+      continue;
+    }
+
+    if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+      if (current.length > 0 && !current.endsWith(" ")) {
+        current += " ";
+      }
+      continue;
+    }
+
+    if (
+      stack.length === 1 &&
+      frame.kind === "NORMAL" &&
+      rootParenDepth === 0
+    ) {
+      if (ch === ";" && trimmed[idx + 1] === ";") {
+        pushSegment(";;");
+        idx++;
+        rootParenDepth = 0;
+        continue;
+      }
+      if (ch === ";") {
+        pushSegment(";");
+        continue;
+      }
+      if (ch === "&" && trimmed[idx + 1] === "&") {
+        pushSegment("&&");
+        idx++;
+        continue;
+      }
+      if (ch === "|" && trimmed[idx + 1] === "|") {
+        pushSegment("||");
+        idx++;
+        continue;
+      }
+    }
+
     current += ch;
   }
-  if (current.trim()) {
-    lines.push(current.trim());
+
+  pushSegment("");
+  return segments;
+};
+
+const splitCaseHeader = (code: string): [string, string] | null => {
+  if (!/^case\s+/.test(code)) return null;
+  const stack: LexFrame[] = [{ kind: "NORMAL" }];
+
+  for (let idx = 0; idx < code.length; idx++) {
+    const ch = code[idx];
+    const frame = stack[stack.length - 1];
+    if (frame.kind === "SINGLE") {
+      if (ch === "'") stack.pop();
+      continue;
+    }
+    if (frame.kind === "DOUBLE") {
+      if (ch === "\\") {
+        idx++;
+        continue;
+      }
+      if (ch === "$" && code[idx + 1] === "(") {
+        idx++;
+        stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
+        continue;
+      }
+      if (ch === "`") {
+        stack.push({ kind: "BACKTICK" });
+        continue;
+      }
+      if (ch === '"') stack.pop();
+      continue;
+    }
+    if (frame.kind === "BACKTICK") {
+      if (ch === "\\") {
+        idx++;
+        continue;
+      }
+      if (ch === "`") stack.pop();
+      continue;
+    }
+    if (ch === "\\") {
+      idx++;
+      continue;
+    }
+    if (ch === "'") {
+      stack.push({ kind: "SINGLE" });
+      continue;
+    }
+    if (ch === '"') {
+      stack.push({ kind: "DOUBLE" });
+      continue;
+    }
+    if (ch === "`") {
+      stack.push({ kind: "BACKTICK" });
+      continue;
+    }
+    if (ch === "$" && code[idx + 1] === "(") {
+      idx++;
+      stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
+      continue;
+    }
+    if (ch === "(" && frame.kind === "CMD_SUBST") {
+      frame.parenDepth++;
+      continue;
+    }
+    if (ch === ")" && frame.kind === "CMD_SUBST") {
+      if (frame.parenDepth === 0) stack.pop();
+      else frame.parenDepth--;
+      continue;
+    }
+
+    if (
+      stack.length === 1 &&
+      frame.kind === "NORMAL" &&
+      code.slice(idx, idx + 4) === " in "
+    ) {
+      const header = code.slice(0, idx + 3).trim();
+      const rest = code.slice(idx + 4).trim();
+      if (rest) {
+        return [header, rest];
+      }
+      return null;
+    }
   }
-  return lines.join("\n");
+  return null;
+};
+
+const normalizeControlFlowSegments = (
+  rawSegments: ShellSegment[],
+): ShellSegment[] => {
+  const segs = rawSegments.map((s) => ({ ...s }));
+  const out: ShellSegment[] = [];
+  let i = 0;
+
+  while (i < segs.length) {
+    const seg = segs[i];
+
+    const caseParts = splitCaseHeader(seg.code);
+    if (caseParts) {
+      out.push({ code: caseParts[0], op: "" });
+      segs[i] = { code: caseParts[1], op: seg.op };
+      continue;
+    }
+
+    if (
+      /^(if|elif|while|until|for)\b/.test(seg.code) &&
+      seg.op === ";" &&
+      i + 1 < segs.length
+    ) {
+      const nextSeg = segs[i + 1];
+      const thenMatch = nextSeg.code.match(/^(then|do)(?:\s+([\s\S]*))?$/);
+      if (thenMatch) {
+        const kw = thenMatch[1];
+        const remainder = (thenMatch[2] || "").trim();
+        out.push({ code: `${seg.code}; ${kw}`, op: "" });
+        if (remainder) {
+          segs[i + 1] = { code: remainder, op: nextSeg.op };
+        } else {
+          segs.splice(i + 1, 1);
+        }
+        i++;
+        continue;
+      }
+    }
+
+    const elseMatch = seg.code.match(/^else\s+([\s\S]+)$/);
+    if (elseMatch) {
+      out.push({ code: "else", op: "" });
+      segs[i] = { code: elseMatch[1].trim(), op: seg.op };
+      continue;
+    }
+
+    out.push(seg);
+    i++;
+  }
+
+  if (out.length > 0 && out[out.length - 1].op === ";") {
+    out[out.length - 1].op = "";
+  }
+  return out;
+};
+
+const tokenizeShellWords = (code: string): string[] => {
+  const tokens: string[] = [];
+  const stack: LexFrame[] = [{ kind: "NORMAL" }];
+  let current = "";
+
+  for (let idx = 0; idx < code.length; idx++) {
+    const ch = code[idx];
+    const frame = stack[stack.length - 1];
+
+    if (frame.kind === "SINGLE") {
+      current += ch;
+      if (ch === "'") stack.pop();
+      continue;
+    }
+    if (frame.kind === "DOUBLE") {
+      if (ch === "\\" && idx + 1 < code.length) {
+        current += ch + code[idx + 1];
+        idx++;
+        continue;
+      }
+      if (ch === "$" && code[idx + 1] === "(") {
+        current += "$(";
+        idx++;
+        stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
+        continue;
+      }
+      if (ch === "`") {
+        current += ch;
+        stack.push({ kind: "BACKTICK" });
+        continue;
+      }
+      current += ch;
+      if (ch === '"') stack.pop();
+      continue;
+    }
+    if (frame.kind === "BACKTICK") {
+      if (ch === "\\" && idx + 1 < code.length) {
+        current += ch + code[idx + 1];
+        idx++;
+        continue;
+      }
+      current += ch;
+      if (ch === "`") stack.pop();
+      continue;
+    }
+
+    if (ch === "\\" && idx + 1 < code.length) {
+      current += ch + code[idx + 1];
+      idx++;
+      continue;
+    }
+    if (ch === "'") {
+      current += ch;
+      stack.push({ kind: "SINGLE" });
+      continue;
+    }
+    if (ch === '"') {
+      current += ch;
+      stack.push({ kind: "DOUBLE" });
+      continue;
+    }
+    if (ch === "`") {
+      current += ch;
+      stack.push({ kind: "BACKTICK" });
+      continue;
+    }
+    if (ch === "$" && code[idx + 1] === "(") {
+      current += "$(";
+      idx++;
+      stack.push({ kind: "CMD_SUBST", parenDepth: 0 });
+      continue;
+    }
+    if (ch === "(" && frame.kind === "CMD_SUBST") {
+      frame.parenDepth++;
+      current += ch;
+      continue;
+    }
+    if (ch === ")" && frame.kind === "CMD_SUBST") {
+      if (frame.parenDepth === 0) stack.pop();
+      else frame.parenDepth--;
+      current += ch;
+      continue;
+    }
+
+    if (
+      stack.length === 1 &&
+      frame.kind === "NORMAL" &&
+      (ch === " " || ch === "\t")
+    ) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens;
+};
+
+export const formatShellLines = (body: string): string[] => {
+  const normalized = normalizeControlFlowSegments(splitShellSegments(body));
+  if (normalized.length === 0) return [];
+
+  const lines: string[] = [];
+  const INDENT = "    ";
+  let indentLevel = 0;
+
+  for (const seg of normalized) {
+    if (/^(elif|else|fi|done|esac)\b/.test(seg.code)) {
+      indentLevel = Math.max(0, indentLevel - 1);
+    }
+
+    const indent = INDENT.repeat(indentLevel);
+    const opSuffix = !seg.op
+      ? ""
+      : seg.op === ";"
+        ? ";"
+        : ` ${seg.op}`;
+    const lineWithOp = `${seg.code}${opSuffix}`;
+
+    if (
+      indent.length + lineWithOp.length > 92 &&
+      seg.op !== ";;" &&
+      !/^(case|if|elif|while|until|for)\b/.test(seg.code)
+    ) {
+      const tokens = tokenizeShellWords(seg.code);
+      if (
+        tokens.length >= 4 &&
+        !tokens.some((t) => PIPE_OR_REDIRECT_TOKENS.has(t))
+      ) {
+        let curLine = `${indent}${tokens[0]} ${tokens[1]}`;
+        for (let t = 2; t < tokens.length; t++) {
+          const tok = tokens[t];
+          if (curLine.length + 1 + tok.length <= 84) {
+            curLine += ` ${tok}`;
+          } else {
+            lines.push(curLine);
+            curLine = `${indent}${INDENT}${tok}`;
+          }
+        }
+        lines.push(`${curLine}${opSuffix}`);
+      } else {
+        lines.push(`${indent}${lineWithOp}`);
+      }
+    } else {
+      lines.push(`${indent}${lineWithOp}`);
+    }
+
+    if (
+      /;\s*(then|do)$/.test(seg.code) ||
+      seg.code === "else" ||
+      /^case\b[\s\S]*\bin$/.test(seg.code)
+    ) {
+      indentLevel++;
+    }
+  }
+
+  return lines;
+};
+
+const formatShellBody = (body: string): string => {
+  const lines = formatShellLines(body);
+  if (lines.length === 0) return "";
+  return lines
+    .map((line, idx) => (idx < lines.length - 1 ? `${line} \\` : line))
+    .join("\n");
+};
+
+export const formatDockerfile = (dockerfile: string): string => {
+  if (!dockerfile) return "";
+
+  const blocks: { text: string; multiLine: boolean }[] = [];
+
+  for (const rawLine of dockerfile.split("\n")) {
+    let line = rawLine.trim();
+    if (!line) continue;
+
+    // Strip `# buildkit` trailing comment
+    line = line.replace(/\s*#\s*buildkit\s*$/i, "").trim();
+    if (!line) continue;
+
+    // Unwrap legacy `/bin/sh -c #(nop) ...`
+    line = line
+      .replace(/^(?:RUN\s+)?\/bin\/(?:sh|bash|ash)\s+-c\s+#\(nop\)\s+/i, "")
+      .trim();
+
+    // Clean Go-style `EXPOSE map[6379/tcp:{}]`
+    const exposeMatch = line.match(/^EXPOSE\s+map\[([^\]]+)\]\s*$/i);
+    if (exposeMatch) {
+      const ports = exposeMatch[1]
+        .trim()
+        .split(/\s+/)
+        .map((entry) => entry.replace(/:.*$/, ""))
+        .filter(Boolean);
+      if (ports.length > 0) {
+        line = `EXPOSE ${ports.join(" ")}`;
+      }
+    }
+
+    // Detect shell-form RUN instructions (or bare BuildKit/sh -c lines)
+    let shellRest: string | null = null;
+    const runMatch = line.match(/^RUN\s+(?!\[)([\s\S]+)$/i);
+    if (runMatch) {
+      shellRest = runMatch[1].trim();
+    } else if (
+      /^(?:\|\d+\s+[\s\S]*?)?\/bin\/(?:sh|bash|ash)\s+-c\s+/.test(line)
+    ) {
+      shellRest = line;
+    }
+
+    if (shellRest !== null) {
+      let body = shellRest;
+      if (/^\|\d+\s+/.test(body)) {
+        const shMatch = body.match(/\/bin\/(?:sh|bash|ash)\s+-c\s+([\s\S]*)$/);
+        if (shMatch) {
+          body = shMatch[1].trim();
+        }
+      } else {
+        body = body
+          .replace(/^\/bin\/(?:sh|bash|ash)\s+-c\s+/, "")
+          .trim();
+      }
+
+      const shellLines = formatShellLines(body);
+      if (shellLines.length <= 1) {
+        blocks.push({
+          text: `RUN ${shellLines[0] || body}`,
+          multiLine: false,
+        });
+      } else {
+        const outLines = [`RUN ${shellLines[0]} \\`];
+        for (let k = 1; k < shellLines.length - 1; k++) {
+          outLines.push(`    ${shellLines[k]} \\`);
+        }
+        outLines.push(`    ${shellLines[shellLines.length - 1]}`);
+        blocks.push({
+          text: outLines.join("\n"),
+          multiLine: true,
+        });
+      }
+    } else {
+      blocks.push({ text: line, multiLine: false });
+    }
+  }
+
+  let out = "";
+  for (let i = 0; i < blocks.length; i++) {
+    if (i > 0) {
+      out += blocks[i - 1].multiLine || blocks[i].multiLine ? "\n\n" : "\n";
+    }
+    out += blocks[i].text;
+  }
+  return out;
 };
 
 export const parseLayerCommand = (
@@ -634,7 +1184,7 @@ export const parseLayerCommand = (
   const firstMeaningfulLine =
     formatted
       .split("\n")
-      .map((l) => l.trim())
+      .map((l) => l.replace(/\s*\\$/, "").trim())
       .find(
         (l) =>
           l &&
