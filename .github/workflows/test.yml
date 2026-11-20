@@ -24,16 +24,19 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # Verify core library and CLI binary compile without web assets.
+      - name: check lib and cli without web assets
+        run: cargo check -p diving-core && cargo check -p diving
       # `yarn build` runs `tsc` first, so this is also the frontend
-      # type-check; the Rust build embeds the resulting dist/.
+      # type-check; the Rust web crate embeds the resulting crates/diving-web/dist/.
       - name: build-web
         run: make build-web
       - name: fmt
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test
+        run: cargo test --workspace
 
   # Windows has no test run; a release build is the smoke check that the
   # platform-specific code still compiles there.
@@ -44,15 +47,13 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: build-web
-        run: make build-web
-      - name: release
-        run: make release
+      - name: release cli
+        run: cargo build --release -p diving
+      - name: check web
+        run: cargo check -p diving-web
 
   # The GitHub Action (action.yml) end to end. It installs the latest
   # *release*, so this checks the action against what users get, not this

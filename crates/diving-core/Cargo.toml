@@ -1,0 +1,46 @@
+[package]
+name = "diving-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "Core Docker/OCI container image layer analysis engine (wasted space, secrets, duplicates, ELF compat, image diff, CI gates)."
+keywords = ["diving", "docker", "image", "oci", "layer"]
+categories = ["development-tools"]
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+goblin = { workspace = true }
+hex = { workspace = true }
+home = { workspace = true }
+http = { workspace = true }
+lru = { workspace = true }
+nanoid = { workspace = true }
+num_cpus = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_repr = { workspace = true }
+snafu = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "sync", "time"] }
+tracing = { workspace = true }
+unix_mode = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

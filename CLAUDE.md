@@ -4,42 +4,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**diving-rs** is a Rust-based tool for analyzing Docker image layers to understand space usage and inefficiencies. It provides two interfaces:
-- **Terminal mode** (default): TUI built with ratatui for interactive layer exploration
-- **Web mode**: HTTP server with React frontend for remote analysis
+**diving-rs** is a Rust-based workspace for analyzing Docker/OCI image layers to understand space usage, wasted bytes, secrets, duplicates, and runtime compatibility. It produces three deliverables across a 4-crate Cargo workspace:
+- **`diving-core`** (`crates/diving-core`, published library): pure Rust async analysis engine (`Analyzer::builder()...build()`) with isolated per-instance caches, singleflight deduplication, registry allowlist, progress callbacks, image diffing, Markdown rendering, and CI gates (no web framework, CLI, TUI, or config-file I/O).
+- **`diving-app`** (`crates/diving-app`, published internal helper crate): shared YAML `~/.diving/config.yml` loader, AI report generation, multi-channel outbound notifications (WeCom, Feishu, DingTalk, Slack, generic webhook), logging, and `Analyzer` factories.
+- **`diving`** (`crates/diving`, published binary): standalone terminal TUI (ratatui) and CLI / CI gate / `diving diff` tool. Compiles without Node/yarn or web assets.
+- **`diving-web`** (`crates/diving-web`, `publish = false`): standalone Axum HTTP server, embedded React SPA (`web/` -> `crates/diving-web/dist/`), MCP `/mcp` endpoint, and inbound `POST /api/webhook` runner packaged in the `vicanso/diving` Docker image.
 
-The tool fetches image metadata from registries (Docker Hub, private registries with credentials), a local docker/podman client, or saved images (`docker save` tar, OCI archive tar, OCI layout directory), decompresses layers, and provides detailed file-level visibility into what's consuming space.
+The core engine fetches image metadata from registries (Docker Hub, private registries with credentials), a local docker/podman client, or saved images (`docker save` tar, OCI archive tar, OCI layout directory), decompresses layers, and provides detailed file-level visibility into what's consuming space.
 
-On top of the raw layer/file data, the analysis derives:
-- **Recommendations** (`src/recommend.rs`): size / necessity / security cards (pkg caches, dev artifacts, Dockerfile lint, secrets in ENV/labels, setuid files, …), localized via `src/i18n.rs`
-- **Sensitive-file detection** (`src/image/sensitive.rs` + user patterns from `~/.diving/sensitive-files`)
-- **Cross-layer duplicate detection** (blake3 content hashing; `--no-verify-dup` skips it)
-- **ELF runtime-compat probe** (`src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS; also finds unstripped binaries (debug sections / symbol tables) in the final filesystem
-- **Image diff** (`src/diff.rs`, `diving diff <base> <target>`, `/api/diff`, MCP `diff_images`): layers aligned by `diff_id`, final-filesystem added / removed / resized files, per-directory deltas, new / resolved recommendations
-- **AI report** (`src/ai.rs`, enabled by `--ai-api-key` / `$OPENAI_API_KEY`): sends the Markdown analysis (plus the previous snapshot under `~/.diving/ai_history/` for regression comparison) to an OpenAI-compatible endpoint
-- **WeCom push** (`src/wecom.rs`, `--wecom-webhook`): WeCom group bot markdown sender (dispatched via `src/notify.rs`)
-- **Multi-channel notifications** (`src/notify.rs`): pushes CI/AI summaries and report links to WeCom, Feishu, DingTalk, Slack, and custom JSON webhooks
-- **Inbound registry webhook** (`src/webhook.rs`, web mode `POST /api/webhook`): parses Harbor/Docker Hub/ACR/Registry v2/generic JSON push events, invalidates tag caches, analyzes asynchronously, and triggers outbound notifications
-- **MCP endpoint** (`src/mcp.rs`, web mode `/mcp`): exposes the analysis as MCP tools to AI agents
+On top of the raw layer/file data, the workspace derives:
+- **Recommendations** (`diving-core/src/recommend.rs`): size / necessity / security cards (pkg caches, dev artifacts, Dockerfile lint, secrets in ENV/labels, setuid files, …), localized via `diving-core/src/i18n.rs`
+- **Sensitive-file detection** (`diving-core/src/sensitive.rs` + optional user patterns loaded by `diving-app`)
+- **Cross-layer duplicate detection** (blake3 content hashing; `--no-verify-dup` / `AnalyzeOptions::verify_dup(false)` skips it)
+- **ELF runtime-compat probe** (`diving-core/src/image/elf.rs`): entrypoint libc family / min-glibc vs. base OS; also finds unstripped binaries in the final filesystem
+- **Image diff** (`diving-core/src/diff.rs`, `diving diff <base> <target>`, `/api/diff`, MCP `diff_images`)
+- **AI report** (`diving-app/src/ai.rs`, enabled by `--ai-api-key` / `$OPENAI_API_KEY`): sends the Markdown analysis (plus previous snapshot under `~/.diving/ai_history/`) to an OpenAI-compatible endpoint
+- **Multi-channel notifications** (`diving-app/src/{wecom,notify,summary}.rs`): pushes CI/AI summaries and report links to WeCom, Feishu, DingTalk, Slack, and custom JSON webhooks
+- **Inbound registry webhook** (`diving-web/src/webhook.rs`, `POST /api/webhook`): parses Harbor/Docker Hub/ACR/Registry v2/generic JSON push events, invalidates tag caches, analyzes asynchronously, and triggers outbound notifications
+- **MCP endpoint** (`diving-web/src/mcp.rs`, `/mcp`): exposes the analysis as MCP tools to AI agents
 
 ## Build System & Common Commands
 
-Build system uses **Cargo** for Rust and **Make** for orchestration.
+Build system uses **Cargo** workspace and **Make** for orchestration.
 
 ### Key Make Targets
 
 ```bash
-# Web frontend
-make build-web          # Build React frontend (builds dist/ directory)
-make dev-web            # Watch-based dev with cargo-watch
+# Three build forms
+make build-lib          # Build diving-core release library
+make build-bin          # Build diving CLI/TUI release binary (no Node/web needed)
+make build-web-bin      # Build React frontend into crates/diving-web/dist/ + release diving-web
 
-# Rust compilation
-make lint               # Run cargo clippy
-make fmt                # Format code with cargo fmt
-make release            # Build optimized release binary
-make dev                # Run terminal mode with test image (redis:alpine)
+# Web frontend & dev
+make build-web          # Build React frontend into crates/diving-web/dist/
+make dev-web            # Watch-based dev for diving-web
+make dev                # Run CLI/TUI mode with test image (redis:alpine)
 make dev-docker         # Run with local docker client
 make dev-ci             # Run with CI mode enabled
+
+# Quality & release
+make lint               # Run cargo clippy --workspace --all-targets -- -D warnings
+make fmt                # Format workspace with cargo fmt --all
+make test               # Run cargo test --workspace
+make release            # Build both diving and diving-web release binaries
+make publish            # Publish diving-core -> diving-app -> diving
 
 # Pre-commit setup
 make hooks              # Install git hooks (runs fmt + lint before commits)
@@ -78,79 +86,50 @@ where a `use` would be misleading — keep those local and obvious.
 
 ### Core Design Pattern
 
-The application follows a **dual-mode runtime**: single binary, dual execution paths determined by the `--mode` argument (terminal or web).
+The workspace separates the reusable analysis engine (`diving-core`) from application wiring (`diving-app`) and the two independent runtime binaries (`diving` CLI/TUI and `diving-web` HTTP/MCP/webhook server):
+- **`diving-core`** owns an instance-scoped `Analyzer` built via `Analyzer::builder()`. It keeps zero global mutable state (`OnceCell`/`OnceLock`), does zero implicit `~/.diving` filesystem I/O, never prints to stdout/stderr, and defaults to a locked-down server posture (`allow_local_sources(false)`, `use_docker_config(false)`, `CacheMode::Ephemeral`).
+- **`diving`** and **`diving-web`** explicitly opt into `~/.diving/config.yml`, `~/.diving/sensitive-files`, persistent caches, local sources, and Docker credentials via `diving-app::config::{build_cli_analyzer, build_web_analyzer}`. `diving-web` still accepts legacy `--mode web` for container compatibility.
 
 ### Data Flow: Image Analysis
 
-1. **Image Source Parsing** (`src/image/image_ref.rs`)
+1. **Image Source Parsing** (`crates/diving-core/src/image/image_ref.rs`)
    - Parse image references: `redis:alpine`, `name@sha256:…`, `docker://`, `podman://`, `file://`, registry URLs, `?arch=` query (also on `file://`, for multi-platform OCI archives / layouts)
    - Determine source type: registry (default), docker / podman client (`docker save` / `podman save`), or a local `docker save` tar / OCI archive / OCI layout directory (`manifest.json` first, else `index.json`)
 
-2. **Auth & Manifest Resolution** (`src/image/registry_auth.rs` + `src/image/docker.rs` + `src/image/oci_image.rs`)
-   - Resolve credentials: CLI/env → `~/.docker/config.json` → docker credential helpers
-   - Fetch bearer token, then manifest from Docker V2 registry API (HTTPS); tokens/manifests LRU-cached in memory; 401 mid-analysis triggers one token refresh + retry
-   - Handle multi-arch images: select by architecture (`?arch=amd64` query param)
+2. **Auth & Manifest Resolution** (`image/registry_auth.rs`, `image/registry.rs`, `image/oci_image.rs`)
+   - Resolve credentials: explicit `RegistryCredentials` -> optional `~/.docker/config.json` -> docker credential helpers
+   - Fetch bearer token, then manifest from Docker V2 registry API (HTTPS); per-`Analyzer` LRU caches in memory; 401 mid-analysis triggers one token refresh + retry
    - Support both Docker Schema 2 and OCI Image Index formats
 
-3. **Layer Decompression & Caching** (`src/image/layer.rs` + `src/store/blob.rs`)
-   - Stream compressed layer blobs to disk (resumable via HTTP Range, retry on 429)
+3. **Layer Decompression & Caching** (`image/layer.rs`, `store/blob.rs`)
+   - Stream compressed layer blobs to `CacheStore`'s `layer_dir` (resumable via HTTP Range, retry on 429)
    - Blob writes are atomic (same-dir temp file + rename) and verified against the `sha256:` digest before entering the cache
-   - Cache locally in `~/.diving/layers/` with TTL (default 90 days)
-   - Decompress with gzip/zstd on-demand (streaming, headers only — file contents are not buffered)
 
-4. **File Tree Construction** (`src/image/oci_image.rs`)
+4. **File Tree Construction** (`image/oci_image.rs`, `image/scan.rs`)
    - Extract file metadata from layer tar archives (whiteout / opaque-dir aware, unsafe tar paths rejected)
-   - Build hierarchical file tree with operations (added, modified, deleted)
    - Calculate efficiency score: `(1 - wastedSize / totalSize) * 100`
 
-5. **Derived Analyses** (`src/image/docker.rs::analyze`)
+5. **Derived Analyses** (`image/pipeline.rs`, `recommend.rs`, `sensitive.rs`, `image/elf.rs`)
    - Sensitive files, heuristic tags, big modified files, base-OS fingerprint, cross-layer duplicates, ELF runtime compat, recommendations
-   - Full result cached as JSON under `~/.diving/analysis/` keyed by manifest digest, plus arch only when the digest is a multi-platform index (schema-versioned; see `src/store/analysis_cache.rs` and `cache_arch` in `docker.rs`)
+   - Full result cached as JSON in `CacheStore`'s `analysis_dir` keyed by manifest digest (+ arch when multi-platform index)
 
 6. **Output Rendering**
-   - **Terminal**: TUI interface via `src/ui/` modules (layers, files, details)
-   - **Web**: JSON API via `src/controller.rs` → React frontend in `web/src/`
-   - **Markdown** (`src/markdown.rs`): `-o report.md` / `-o -`, also the payload for AI / WeCom
+   - **Terminal**: TUI interface via `crates/diving/src/ui/`
+   - **Web**: JSON API via `crates/diving-web/src/controller.rs` → React frontend in `web/src/`
+   - **Markdown** (`crates/diving-core/src/markdown.rs`): `-o report.md` / `-o -`, also the payload for AI / outbound webhooks
 
-### Module Structure
+### Workspace Structure
 
-- **`src/main.rs`**: Thin binary entry: mimalloc, rustls `ring` provider install, tokio runtime construction
-- **`src/lib.rs`**: `Args` (clap CLI; the `diff` subcommand, with the output/config/lang/credential flags `global` so they work on either side of it), `run()` mode selection (terminal/web/diff), CI gate output, cleanup cron; all modules live here so `cargo test --lib` works
-- **`src/image/`**: Core image analysis logic
-  - `docker.rs`: Registry API client, blob download (streaming + digest verify + 401 token refresh), the `analyze` pipeline
-  - `image_ref.rs`: Image reference parsing (`ImageInfo`); platform spelling (`normalize_arch` / `platform_name`: `arm/v7`, plain `arm64`) and matching (`platform_matches`, variant-aware), shared by the registry index and local OCI index pickers
-  - `registry_auth.rs`: Credential resolution (CLI/env, docker config.json, credential helpers)
-  - `layer.rs`: Tar extraction, streaming decompress, per-file blake3 hashing, whiteout parsing
-  - `oci_image.rs`: OCI spec types, file tree building, `final_filesystem` (what a container sees, whiteout / opaque-dir aware), cross-layer duplicate detection
-  - `sensitive.rs`: Path-based secret / cache / dev-artifact heuristics (plus `has_path_frag` segment matcher). `is_pkg_cache` / `is_dev_artifact` are the single definitions behind both the risk tags (scan) and the recommendations (final filesystem)
-  - `elf.rs`: Entrypoint ELF probe (goblin): libc family, min glibc vs. base OS; `find_unstripped_binaries` (section-header scan, runs concurrently with the duplicate pass)
-- **`src/recommend.rs`**: Rule engine deriving localized recommendation cards from the analysis result (pure function of `DockerAnalyzeResult`)
-- **`src/diff.rs`**: `diff_images(base, target) -> ImageDiff` (pure, like `recommend`) and `to_diff_markdown`; layers match by `ImageLayer::diff_id` (config `rootfs.diff_ids`) because a `docker save` tar names layers by path
-- **`src/ai.rs`**: OpenAI-compatible AI report + `~/.diving/ai_history/` snapshots for regression comparison
-- **`src/wecom.rs`**: WeCom group-bot markdown push
-- **`src/notify.rs`**: Multi-channel outbound notifications (WeCom, Feishu interactive card + HMAC sign, DingTalk markdown + signed URL, Slack, custom JSON webhook + `X-Diving-Signature`) and CLI/env/`config.yml` target resolution
-- **`src/webhook.rs`**: Web-mode `POST /api/webhook` inbound registry push receiver (auth/private-IP guard, Harbor/Docker Hub/ACR/Registry v2/generic JSON parsers, cache invalidation, async background analysis + `notify::send_all`)
-- **`src/markdown.rs`**: Markdown rendering of the analysis result; `to_summary_markdown` is the short PR-comment / job-summary form (`--summary`, `format=summary`)
-- **`src/mcp.rs`**: MCP server (rmcp, Streamable HTTP, stateless) mounted at `/mcp` in web mode. Tools `analyze_image` / `get_findings` / `list_files` / `read_file` / `diff_images` / `latest_images` wrap the controller's singleflight + `registry_allowlist`; layer numbers are 1-based to match the Markdown report; `read_file` on a symlink/hard link answers with the link target instead of empty content. Access: `--mcp-token` / `$DIVING_MCP_TOKEN` bearer auth, else loopback `Host` only plus `mcp_allowed_hosts`; `--no-mcp` disables it
-- **`src/i18n.rs`**: Rust-side en/zh string catalog (`tr` / `fill`); web has its own catalog in `web/src/i18n/`
-- **`src/ui/`**: Terminal UI (ratatui-based)
-  - `mod.rs`: Main app event loop, state management
-  - `layers.rs`, `files.rs`, `layer_detail.rs`, `image_detail.rs`, `util.rs`: Widget definitions
-- **`src/controller.rs`: Web API endpoints**
-  - `/api/analyze`: Initiate image analysis (singleflight-deduplicated; `format=markdown` / `format=summary`, `includeTree=false`, `noVerifyDup` variants)
-  - `/api/manifest`: Registry image's layers from manifest + config only (`preview_docker_image` → `ImagePreview`); the web shows it when a first analysis is still running after 500 ms
-  - `/api/diff`: Compare two images (`base`, `target`, `format=markdown`); both go through the same singleflight, one after the other so shared layers download once
-  - `/api/file`: Download individual files from layers
-  - `/api/file-preview`: First bytes of a file for the web preview (text, or a hex dump for binaries)
-  - `/api/latest-images`: Return recent analyses, the version, and `mcp: {enabled, tokenRequired}` for the web UI
-  - Fallback handler serves static assets from embedded `dist/`
-- **`src/store/`**: `blob.rs` (atomic blob I/O, sha256 helpers, TTL cleanup), `analysis_cache.rs` (schema-versioned analysis-result JSON cache), `recent_cache.rs` (small TTL + LRU in-memory cache; time is passed in so expiry is testable)
-- **`src/config/`**: Configuration loading from `~/.diving/config.yml` + user sensitive patterns
-- **`src/util/`**: Shared `reqwest::Client` singleton, HTTP header helpers
-- **`src/error.rs`**: HTTP error types with snafu error handling
-- **`src/middleware.rs`**: Axum middleware (access logging, trace ID injection)
-- **`src/task_local/`**: Task-local storage for request tracing
-- **`src/dist.rs`**: Embedded static asset serving with ETag caching (`build.rs` writes a placeholder `dist/` for source-only builds)
+- **`crates/diving-core/`**: Pure analysis engine library
+  - `analyzer.rs`: `Analyzer`, `AnalyzerBuilder`, `AnalyzeOptions`, `PreviewOptions`, auth-scoped singleflight, `Weak`-ref TTL memory cache, concurrency `Semaphore`, policy enforcement
+  - `image/`: split domain modules (`model.rs`, `local.rs`, `scan.rs`, `registry.rs`, `pipeline.rs`, `image_ref.rs`, `registry_auth.rs`, `layer.rs`, `oci_image.rs`, `elf.rs`)
+  - `store/`: `CacheStore`, `CacheConfig`, `CacheMode::{Ephemeral, Persistent}`, `blob.rs`, `analysis_cache.rs`, `recent_cache.rs`
+  - `diff.rs`, `recommend.rs`, `sensitive.rs`, `markdown.rs`, `gate.rs`, `progress.rs`, `error.rs`, `i18n.rs`, `trace.rs`
+- **`crates/diving-app/`**: Shared app wiring
+  - `config.rs`: YAML `~/.diving/config.yml` loader returning `Result<LoadedConfig, String>` + `build_http_client`, `build_cli_analyzer`, `build_web_analyzer`
+  - `ai.rs`, `notify.rs`, `wecom.rs`, `summary.rs`, `logging.rs`, `env_util.rs`
+- **`crates/diving/`**: Standalone CLI / TUI / CI binary (`src/main.rs`, `src/cli.rs`, `src/ui/*`)
+- **`crates/diving-web/`**: Standalone HTTP / MCP / Webhook binary + React SPA embed (`build.rs`, `src/{main,lib,state,error,http_util,dist,middleware,controller,mcp,webhook}.rs`)
 
 ### Web Frontend (`web/`)
 
@@ -263,42 +242,35 @@ Additional user config files under `~/.diving/`:
 ## Multi-Platform Build
 
 CI/CD via GitHub Actions (`.github/workflows/publish.yml`):
-- **Linux (x86_64, aarch64)**: Built in musl Docker container
-- **macOS (x86_64, aarch64)**: Native Rust targets
-- **Windows (x86_64)**: Native build
-- **Docker**: Multi-arch image (linux/amd64, linux/arm64) pushed to Docker Hub
+- **Linux (`x86_64`, `aarch64`)**: Built in musl Docker container (`cargo build --release -p diving`, no Node/web required)
+- **macOS (`x86_64`, `aarch64`)**: Native Rust targets (`diving` CLI)
+- **Windows (`x86_64`)**: Native build (`diving` CLI)
+- **Docker**: Multi-arch `diving-web` image (`linux/amd64`, `linux/arm64`) pushed to Docker Hub (`vicanso/diving`)
 
-All targets require `make build-web` before Rust compilation.
+Only Docker web builds (`diving-web`) run `make build-web`.
 
 ## Error Handling
 
-- **snafu**: Custom error types with context (see `src/image/docker.rs`, `src/store/blob.rs`)
-- **Conversion to HTTP**: Error types implement `From<AppError> for HTTPError`
-- **Categories**: Errors tagged (e.g., "docker", "blob") for client debugging
+- **snafu**: Unified `diving_core::Error` with context and predicates (`is_registry_unavailable`, `is_unauthorized`, `is_not_found`, `is_forbidden`)
+- **Conversion to HTTP**: `From<diving_core::Error> for HTTPError` in `crates/diving-web/src/error.rs`
+- **Categories**: Errors tagged (`"registry"`, `"docker"`, `"blob"`, `"layer"`) for client debugging
 
 ## Performance Considerations
 
-- **Layer Caching**: Blobs cached locally (digest-verified, atomic writes); TTL-based cleanup cron in `src/lib.rs`
-- **Analysis Caching**: Full results cached on disk keyed by manifest digest (+ arch for a multi-platform index; a single-platform image's digest already pins it) (`src/store/analysis_cache.rs`). `parse_image_info` always gives a registry image an arch: no `?arch=` means `host_arch()`, and `x86_64` / `aarch64` normalize to `amd64` / `arm64`, so CLI, web and MCP requests for one platform share the cache, the singleflight and the in-memory results
-- **Registry-unavailable fallback**: each successful analysis records the digest its reference resolved to (`ref_*.txt` beside the analyses). `analyze_docker_image_or_last_known` (TUI, web, MCP — not the CI gate) serves that cached analysis when the registry is unreachable / 5xx / 429, with `DockerAnalyzeResult::stale_as_of` set; the TUI image panel, Markdown, the WeCom summary, the web UI and `get_findings` all surface it. Registry-returned 401/403/404 never fall back
-- **Duplicate hashing**: the second decompression pass that hashes duplicate candidates runs one layer per worker (`detect_cross_layer_duplicates`); the OS and ELF probes cost ~0 and need no such treatment
-- **Singleflight**: Concurrent web requests for the same image share one analysis (`src/controller.rs`)
-- **In-memory results**: the last few finished registry analyses stay in memory for `analysis_memory_ttl` (`recent_analyses` in `src/controller.rs`), so follow-up web/MCP requests skip the registry manifest HEAD and the on-disk cache re-parse (~0.65s → ~2ms per call). Local `file://` / `docker://` sources are never kept
-- **Analysis slots**: optional `max_concurrent_analyses` semaphore, taken inside the singleflight so waiters on one image share a slot
-- **Response compression**: `tower-http` gzip on the controller routes (API JSON ~10x, frontend JS ~3x); `/mcp` is mounted separately and left alone because it streams SSE
-- **LRU Cache**: Latest 5 analyzed image names cached in memory (`src/controller.rs`)
-- **Compression**: Embedded assets gzip-compressed via `rust-embed`
-- **Release Build**: Optimized with LTO, single codegen unit, stripped symbols
+- **Layer Caching**: Blobs cached per `Analyzer` instance (`CacheMode::Persistent` or `CacheMode::Ephemeral`); TTL cleanup via `Analyzer::cleanup_caches()`
+- **Analysis Caching**: Full results cached on disk keyed by manifest digest (+ arch for a multi-platform index) (`crates/diving-core/src/store/analysis_cache.rs`)
+- **Registry-unavailable fallback**: opt-in via `AnalyzeOptions::fallback_to_last_known(true)` (TUI, web, MCP — not CI gates), surfacing `stale_as_of` when unreachable / 5xx / 429
+- **Singleflight & In-memory results**: Built into `Analyzer` (`singleflight`, `memory_cache_ttl`, `max_concurrent_analyses`) keyed cleanly per auth credentials and image identity
+- **Response compression**: `tower-http` gzip on the controller routes in `diving-web`; `/mcp` is mounted separately because it streams SSE
+- **Release Build**: Workspace `[profile.release]` with LTO, single codegen unit, stripped symbols
 
 ## Testing & Development Patterns
 
-- Unit tests live inline (`#[cfg(test)]`) across most modules; run with `cargo test --lib`
-- CI (`.github/workflows/test.yml`) runs `make build-web`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on pushes to main and on pull requests. Its `action` job runs `action.yml` end to end on Linux and macOS (analyze, diff, and a gate that must fail) — against the latest *release* and Docker Hub images, so an action change that needs an unreleased flag fails there until it ships
-- `tests/analyze_local.rs` runs the full analyze pipeline end-to-end over a generated `file://` docker-save fixture (no network); run everything with `cargo test`
-- Integration tests start with `common::use_default_config()`, which points diving at the empty `tests/fixtures/config.yml` so the developer's `~/.diving/config.yml` cannot change or break a run
-- For terminal: `make dev` (redis:alpine), `make dev-docker` (local docker)
-- For web: `make dev-web` (Vite dev server) + backend running in another terminal
-- CI mode testing: `CI=true make dev` outputs pass/fail checks
+- Unit tests live inline (`#[cfg(test)]`) across all 4 crates (`cargo test --workspace`)
+- Integration tests in `crates/diving-core/tests/` (`analyze_local`, `offline_fallback`, `analyzer_api`) and `crates/diving-web/tests/` (`mcp_http`, `webhook_push`) run completely isolated with ephemeral `TempDir` caches (never reading/writing `~/.diving`)
+- CI (`.github/workflows/test.yml`) verifies `diving-core` & `diving` compile without web assets, then runs `make build-web`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`
+- For terminal: `make dev` (`redis:alpine`), `make dev-docker` (`docker://redis:alpine`), `CI=true make dev`
+- For web: `make dev-web` (backend) + `cd web && yarn dev` (Vite dev server)
 
 ## Dependency Notes
 

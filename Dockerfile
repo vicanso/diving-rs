@@ -7,16 +7,16 @@ RUN apk update \
   && cd /diving-rs \
   && make build-web
 
-# Stage 2: build the Rust binary against glibc (Debian). Pinned Rust
+# Stage 2: build the Rust web binary against glibc (Debian). Pinned Rust
 # version for reproducible builds; the non-slim base already ships
 # build-essential + pkg-config, so no extra apt install is needed for
 # our C dependencies (zstd-sys, blake3, mimalloc).
-FROM rust:1.98.1 AS builder
+FROM rust:1.100.0 AS builder
 
 COPY --from=webbuilder /diving-rs /diving-rs
 
 RUN cd /diving-rs \
-  && make release
+  && cargo build --release -p diving-web
 
 # Stage 3: debian-trixie-slim glibc runtime (Debian 13).
 #
@@ -33,13 +33,12 @@ EXPOSE 7001
 # Instead of `apt-get install ca-certificates` here — which permanently bakes
 # ~1.6 MiB of dpkg/debconf cruft into the layer (the rewritten
 # /var/lib/dpkg/status DB survives `rm -rf /var/lib/apt/lists/*`) — copy the
-# bundle the rust:1.98.1 builder already carries. No package manager runs in
+# bundle the rust:1.100.0 builder already carries. No package manager runs in
 # this stage, so there is no apt/dpkg waste to clean up.
 #
 # tzdata is intentionally not installed: reports and access logs render in UTC
-# (the tracing timer is pinned to UTC in main.rs; analysis timestamps are
-# chrono::Utc). The terminal UI's local-time formatting degrades to UTC when
-# /etc/localtime is absent, and is unused in `--mode web` anyway.
+# (the tracing timer is pinned to UTC in diving-app; analysis timestamps are
+# chrono::Utc).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Service-style user pinned to UID 1000 for backward compat with the
@@ -53,7 +52,7 @@ RUN useradd -u 1000 -m -s /bin/false rust \
   && chown -R rust:rust /home/rust
 
 COPY --from=builder --chown=rust:rust --chmod=755 \
-     /diving-rs/target/release/diving /usr/local/bin/diving
+     /diving-rs/target/release/diving-web /usr/local/bin/diving-web
 
 # Docker does not auto-set $HOME on USER switch — it inherits `/root`
 # from the parent image. Set it explicitly so UID 1000 can write
@@ -69,5 +68,5 @@ WORKDIR /home/rust
 # orchestrator-level probe against `GET /ping` (Kubernetes
 # livenessProbe, Docker Compose with an external `curl` sidecar, etc.),
 # or `apt-get install -y wget` above and re-enable HEALTHCHECK here.
-ENTRYPOINT ["/usr/local/bin/diving"]
-CMD ["--mode", "web", "--listen", "0.0.0.0:7001"]
+ENTRYPOINT ["/usr/local/bin/diving-web"]
+CMD ["--listen", "0.0.0.0:7001"]

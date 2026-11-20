@@ -29,14 +29,18 @@
 
 ```bash
 # 1. 安装 —— 任选其一：
-curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # 预编译二进制
-cargo install diving                                                                  # 从 crates.io 安装
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # 预编译 CLI 二进制
+cargo install diving                                                                  # 从 crates.io 安装 CLI / TUI
 
 # 2. 开始分析
 diving redis:alpine
 ```
 
-就这么简单 —— 无需 Docker daemon。Linux / macOS / Windows 的预编译二进制也可在 [release page](https://github.com/vicanso/diving-rs/releases) 下载；也可用 `cargo install --git https://github.com/vicanso/diving-rs` 从源码安装最新版。
+**diving** 提供三种使用形态：
+
+- **命令行 / TUI / CI（`diving`）** —— 通过 `install.sh`、`cargo install diving`、`cargo install --git https://github.com/vicanso/diving-rs diving` 或 [release page](https://github.com/vicanso/diving-rs/releases) 安装，无需 Docker daemon。
+- **Web 服务 / MCP / Webhook（`vicanso/diving` / `diving-web`）** —— 通过 [Docker](#web-模式) 部署，或自行编译 `cargo build --release -p diving-web`。
+- **Rust 库（`diving-core`）** —— 将核心镜像分析引擎直接嵌入其它 Rust 服务（见[作为 Rust 库使用](#作为-rust-库使用diving-core)）。
 
 TUI 内快捷键：
 
@@ -197,17 +201,18 @@ CI=true diving --config .diving.yml myimage:latest
 
 ### GitLab CI
 
-GitLab 在每个 job 里都会设置 `CI=true`，所以卡口默认生效。Docker 镜像默认以 web 模式启动 `diving`，要执行命令需先清空 entrypoint：
+GitLab 在每个 job 里都会设置 `CI=true`，所以卡口默认生效。安装独立的 `diving` CLI 二进制执行检查（`vicanso/diving` Docker 镜像运行的是 `diving-web` 服务端，CI 流水线请使用轻量的 `diving` CLI 二进制）：
 
 ```yaml
 image-check:
-  image:
-    name: vicanso/diving:latest
-    entrypoint: [""]
+  image: debian:bookworm-slim
   variables:
     # 从项目自己的镜像仓库拉取
     REGISTRY_USERNAME: $CI_REGISTRY_USER
     REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
+    - curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
   script:
     - diving "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" --summary diving-summary.md
   artifacts:
@@ -355,10 +360,10 @@ docker run -d --restart=always \
 
 容器以非 root 身份（UID `1000:1000`）运行；上方的 `chown` 让它能写入 layer 缓存（省略会导致启动失败）。镜像基于 `debian:trixie-slim`，另带 CA 证书包；不含 `tzdata`，时间一律按 UTC 显示。由于默认不含 `wget`/`curl`，未设置 in-image `HEALTHCHECK` —— 请改用编排层探针访问 `GET /ping`（Kubernetes `livenessProbe`、sidecar 等）。
 
-通过 `--listen` 修改监听地址：
+通过 `--listen` 修改监听地址（`diving-web` 二进制提供 Web UI、HTTP API、MCP 与 Webhook；为保持容器配置向后兼容，`diving-web` 仍接受旧的 `--mode web` 参数）：
 
 ```bash
-diving --mode web --listen 0.0.0.0:8080
+diving-web --listen 0.0.0.0:8080
 ```
 
 ### API
@@ -424,7 +429,7 @@ curl "http://127.0.0.1:7001/api/diff?base=myapp:1.4&target=myapp:1.5"
 - 未配置 token 时，默认仅放行 loopback / 内网 IP 请求（若携带公网 `X-Forwarded-For` 也会拒绝），可通过 `webhook_allow_public: true` 显式放开；`--no-webhook` 可关闭该接口。
 
 ```bash
-diving --mode web \
+diving-web \
   --listen 0.0.0.0:7001 \
   --webhook-token "$DIVING_WEBHOOK_TOKEN" \
   --feishu-webhook "$FEISHU_WEBHOOK" \
@@ -549,6 +554,34 @@ diving 在 `~/.diving/` 下维护两层缓存，均受 `layer_ttl` 控制并每�
 **registry 不可用时。** 如果 registry 连不上、过载（5xx）或对请求限流（429），而同一个镜像引用之前分析过，diving 会显示那次缓存的分析结果，而不是报错。终端界面、Markdown 报告、web 界面、企微推送和 JSON（`staleAsOf` 字段）都会注明这份结果的生成时间，因为这个 tag 现在可能已经指向别的镜像。registry 自己返回的错误（401、403、404）不会这样处理；CI 也不会：设置 `CI=true` 时卡口必须按镜像的当前状态判定，所以会以退出码 `2` 失败。
 
 > 由于分层数据需从镜像源（如 Docker Hub）下载，首次分析大镜像可能较慢。下载中断会自动续传。对于私有化部署的 registry，请将 diving（或其 web 镜像）运行在可访问该 registry 的主机上。
+
+## 作为 Rust 库使用（`diving-core`）
+
+可以将纯 Rust 核心分析引擎直接嵌入其它 Rust 服务中，不携带 Axum、TUI、CLI 或隐式的 `~/.diving` 文件系统读写：
+
+```toml
+[dependencies]
+diving-core = "0.12.3"
+```
+
+```rust
+use diving_core::{to_markdown, AnalyzeOptions, Analyzer, CacheConfig, Lang};
+
+#[tokio::main]
+async fn main() -> diving_core::Result<()> {
+    let analyzer = Analyzer::builder()
+        .cache(CacheConfig::ephemeral())
+        .build()?;
+
+    let result = analyzer
+        .analyze("redis:alpine", AnalyzeOptions::default().lang(Lang::Zh))
+        .await?;
+    println!("{}", to_markdown(&result, true, Lang::Zh));
+    Ok(())
+}
+```
+
+默认情况下，`Analyzer::builder()` 使用临时隔离缓存（随实例释放自动清理）、禁用本地源（`file://`、`docker://`、`podman://`）与 `~/.docker/config.json`、开启请求去重，并可通过 `.registry_allowlist(...)` 和 `.max_concurrent_analyses(...)` 进一步收紧服务侧安全策略。完整用法见 [crates/diving-core/README.md](./crates/diving-core/README.md)。
 
 ## 许可证
 

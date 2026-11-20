@@ -43,13 +43,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: build-web
-        run: make build-web
       - name: Install target
         run: |
           rustup update
@@ -57,11 +53,11 @@ jobs:
           rustup target add x86_64-apple-darwin
       - name: release
         run: |
-          cargo build --release --target=aarch64-apple-darwin
+          cargo build --release -p diving --target=aarch64-apple-darwin
           mv target/aarch64-apple-darwin/release/diving ./diving-darwin-aarch64
           ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
 
-          cargo build --release --target=x86_64-apple-darwin
+          cargo build --release -p diving --target=x86_64-apple-darwin
           mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86_64
           ./.github/workflows/upload_asset.sh ./diving-darwin-x86_64 $GITHUB_TOKEN
 
@@ -73,15 +69,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: build-web
-        run: make build-web
       - name: release
-        run: make release
+        run: cargo build --release -p diving
       - name: Upload Assets
         run: |
           mv target/release/diving.exe ./diving-windows.exe
@@ -92,17 +84,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
-      - name: build-web
-        run: make build-web
       - name: release
         uses: addnab/docker-run-action@v3
         with:
           image: messense/rust-musl-cross:x86_64-musl
           options: -v ${{ github.workspace }}:/home/rust/src
           run: |
-            make release
+            cargo build --release -p diving
             mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86_64
       - name: Upload Assets
         run: |
@@ -113,17 +101,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
-      - name: build-web
-        run: make build-web
       - name: release
         uses: addnab/docker-run-action@v3
         with:
           image: messense/rust-musl-cross:aarch64-musl
           options: -v ${{ github.workspace }}:/home/rust/src
           run: |
-            make release
+            cargo build --release -p diving
             mv target/aarch64-unknown-linux-musl/release/diving ./diving-linux-aarch64
       - name: Upload Assets
         run: |

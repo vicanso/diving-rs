@@ -1,0 +1,34 @@
+[package]
+name = "diving"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "Interactive TUI and CLI tool for exploring, diffing, and linting Docker/OCI container image layers."
+keywords = ["diving", "docker", "tui", "image", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+
+[[bin]]
+name = "diving"
+path = "src/main.rs"
+
+[dependencies]
+diving-app = { workspace = true }
+diving-core = { workspace = true }
+bytesize = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+colored = { workspace = true }
+crossterm = { workspace = true }
+mimalloc = { workspace = true }
+pad = { workspace = true }
+ratatui = { workspace = true }
+serde_json = { workspace = true }
+signal-hook = { workspace = true }
+signal-hook-registry = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+unicode-width = { workspace = true }

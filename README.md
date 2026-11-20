@@ -29,14 +29,18 @@ A single, fast Rust binary that pulls images straight from any registry and show
 
 ```bash
 # 1. install — pick one:
-curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # prebuilt binary
-cargo install diving                                                                  # from crates.io
+curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh   # prebuilt CLI binary
+cargo install diving                                                                  # CLI / TUI from crates.io
 
 # 2. dive in
 diving redis:alpine
 ```
 
-That's it — no Docker daemon required. Prebuilt binaries for Linux / macOS / Windows are also on the [release page](https://github.com/vicanso/diving-rs/releases), or build the latest from source with `cargo install --git https://github.com/vicanso/diving-rs`.
+Three ways to use **diving**:
+
+- **CLI / TUI / CI (`diving`)** — install via `install.sh`, `cargo install diving`, `cargo install --git https://github.com/vicanso/diving-rs diving`, or [prebuilt releases](https://github.com/vicanso/diving-rs/releases). No Docker daemon required.
+- **Web Server / MCP / Webhook (`vicanso/diving` / `diving-web`)** — run via [Docker](#web-mode) or build `cargo build --release -p diving-web`.
+- **Rust Library (`diving-core`)** — embed the analysis engine directly in another Rust service (see [Rust Library](#rust-library-diving-core)).
 
 Inside the TUI:
 
@@ -198,17 +202,18 @@ The step fails with diving's [exit code](#exit-codes). Its `summary-file` output
 
 ### GitLab CI
 
-GitLab sets `CI=true` in every job, so the gate is on. The Docker image starts `diving` in web mode, so clear its entrypoint to run commands:
+GitLab sets `CI=true` in every job, so the gate is on. Install the standalone `diving` CLI binary (note: `vicanso/diving` runs the `diving-web` server, whereas CI jobs use the lightweight `diving` CLI):
 
 ```yaml
 image-check:
-  image:
-    name: vicanso/diving:latest
-    entrypoint: [""]
+  image: debian:bookworm-slim
   variables:
     # pull from the project's own registry
     REGISTRY_USERNAME: $CI_REGISTRY_USER
     REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
+    - curl -fsSL https://raw.githubusercontent.com/vicanso/diving-rs/main/install.sh | sh
   script:
     - diving "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" --summary diving-summary.md
   artifacts:
@@ -356,10 +361,10 @@ Besides the layer explorer and the findings, a report has a treemap of the final
 
 The container runs as a non-root UID (`1000:1000`); the `chown` above lets it write the layer cache (without it the container fails to start). The image is based on `debian:trixie-slim` plus a CA certificate bundle. It has no `tzdata`, so timestamps are in UTC, and it ships no `wget`/`curl`, so there is no in-image `HEALTHCHECK` — probe `GET /ping` from your orchestrator (Kubernetes `livenessProbe`, a sidecar, etc.) instead.
 
-Change the listen address with `--listen`:
+Change the listen address with `--listen` (the `diving-web` binary serves Web UI, HTTP API, MCP, and Webhook; it also accepts legacy `--mode web` for backward compatibility):
 
 ```bash
-diving --mode web --listen 0.0.0.0:8080
+diving-web --listen 0.0.0.0:8080
 ```
 
 ### API
@@ -425,7 +430,7 @@ Security:
 - When no token is configured, `/api/webhook` only accepts loopback / RFC 1918 private peers (and rejects requests carrying public `X-Forwarded-For` hops) unless `webhook_allow_public: true` is set. `--no-webhook` disables the endpoint.
 
 ```bash
-diving --mode web \
+diving-web \
   --listen 0.0.0.0:7001 \
   --webhook-token "$DIVING_WEBHOOK_TOKEN" \
   --feishu-webhook "$FEISHU_WEBHOOK" \
@@ -550,6 +555,34 @@ The analysis cache is **content-addressable**, so re-pushing a mutable tag like 
 **When the registry is unavailable.** If the registry cannot be reached, is overloaded (5xx) or rate-limits the request (429), and the same image reference was analyzed before, diving shows that cached analysis instead of an error. The terminal UI, the Markdown report, the web UI, WeCom pushes and the JSON (`staleAsOf`) all say when it was made, because the tag may point at a different image by now. An error the registry itself returns (401, 403, 404) is never papered over this way, and neither is a CI run: with `CI=true` the gate has to judge the image as it is, so it fails with exit code `2`.
 
 > Because layer data is downloaded from the source (e.g. Docker Hub), the first run on a large image can take a while. Interrupted downloads resume automatically. For privately-deployed registries, run diving (or its web image) on a host that can reach the registry.
+
+## Rust Library (`diving-core`)
+
+You can embed the pure Rust analysis engine directly in another Rust service without Axum, TUI, CLI, or `~/.diving` filesystem side effects:
+
+```toml
+[dependencies]
+diving-core = "0.12.3"
+```
+
+```rust
+use diving_core::{to_markdown, AnalyzeOptions, Analyzer, CacheConfig, Lang};
+
+#[tokio::main]
+async fn main() -> diving_core::Result<()> {
+    let analyzer = Analyzer::builder()
+        .cache(CacheConfig::ephemeral())
+        .build()?;
+
+    let result = analyzer
+        .analyze("redis:alpine", AnalyzeOptions::default().lang(Lang::En))
+        .await?;
+    println!("{}", to_markdown(&result, true, Lang::En));
+    Ok(())
+}
+```
+
+By default, `Analyzer::builder()` uses an ephemeral temporary cache (cleaned up on drop), disables local sources (`file://`, `docker://`, `podman://`) and `~/.docker/config.json`, enables singleflight request deduplication, and can be locked down further with `.registry_allowlist(...)` and `.max_concurrent_analyses(...)`. See [crates/diving-core/README.md](./crates/diving-core/README.md) for the full library guide.
 
 ## License
 
