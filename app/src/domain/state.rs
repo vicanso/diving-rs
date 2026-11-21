@@ -2,17 +2,16 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fs;
 use std::future::Future;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::Local;
 use diving_core::{
     DockerAnalyzeResult, DockerAnalyzeSummary, ImageDiff, ImagePreview, LocalContainerImage,
-    LocalRuntime, ProgressEvent, diff_images, to_diff_markdown, to_markdown,
+    LocalRuntime, ProgressEvent, diff_images,
 };
 use nsh_core::element::Owner;
 use nsh_core::file_dialog::{OpenDialog, SaveDialog};
@@ -21,11 +20,13 @@ use nsh_core::storage::Storage;
 
 use crate::domain::model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, InspectorTab,
-    LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes, upsert_recent,
+    LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes, remove_recent,
+    upsert_recent,
 };
 use crate::domain::service::{
     AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
 };
+use crate::domain::treemap::FsNode;
 use crate::i18n::{UiLang, t, tf};
 
 const KEY_LANG: &str = "diving.lang";
@@ -92,6 +93,7 @@ pub struct AppState {
     pub analyze_error: Signal<Option<String>>,
     pub result: Signal<Option<Arc<DockerAnalyzeResult>>>,
     pub summary: Signal<Option<SharedRef<DockerAnalyzeSummary>>>,
+    pub final_tree: Signal<Option<SharedRef<FsNode>>>,
     pub active_tab: Signal<InspectorTab>,
     pub layer_filter: Signal<LayerFilterMode>,
     pub selected_layer: Signal<usize>,
@@ -114,6 +116,7 @@ pub struct AppState {
     pub preview_error: Signal<Option<String>>,
     pub dockerfile_wrap: Signal<bool>,
     pub status_notice: Signal<Option<String>>,
+    notice_seq: Signal<u64>,
     pub search_input_ref: ElementRef,
     pub tree_filter_ref: ElementRef,
     pub treemap_path: Signal<Vec<String>>,
@@ -212,6 +215,7 @@ impl AppState {
             analyze_error: signal(None),
             result: signal(None),
             summary: signal(None),
+            final_tree: signal(None),
             active_tab: signal(InspectorTab::FileTree),
             layer_filter: signal(LayerFilterMode::All),
             selected_layer: signal(0),
@@ -234,6 +238,7 @@ impl AppState {
             preview_error: signal(None),
             dockerfile_wrap: signal(false),
             status_notice: signal(None),
+            notice_seq: signal(0),
             search_input_ref: element_ref(),
             tree_filter_ref: element_ref(),
             treemap_path: signal(Vec::new()),
@@ -318,6 +323,32 @@ impl AppState {
         let next = !self.app_sidebar_open.get_untracked();
         self.app_sidebar_open.set(next);
         let _ = Storage::set_item(KEY_APP_SIDEBAR_OPEN, if next { "true" } else { "false" });
+    }
+
+    pub fn show_status_notice(&self, msg: String) {
+        let seq = self.notice_seq.get_untracked().wrapping_add(1);
+        self.notice_seq.set(seq);
+        self.status_notice.set(Some(msg));
+        let timer_state = self.clone();
+        self.schedule_app_timeout(Duration::from_secs(5), move || {
+            if timer_state.notice_seq.get_untracked() == seq {
+                timer_state.status_notice.set(None);
+            }
+        });
+    }
+
+    pub fn remove_recent_entry(&self, image: &str, arch: &str) {
+        let mut updated = self.recent_images.get_untracked();
+        remove_recent(&mut updated, image, arch);
+        if let Ok(json) = serde_json::to_string(&updated) {
+            let _ = Storage::set_item(KEY_RECENT_IMAGES, json);
+        }
+        self.recent_images.set(updated);
+    }
+
+    pub fn clear_recent_images(&self) {
+        let _ = Storage::set_item(KEY_RECENT_IMAGES, "[]");
+        self.recent_images.set(Vec::new());
     }
 
     pub fn dismiss_config_warning(&self) {
@@ -497,6 +528,9 @@ impl AppState {
                 self.progress_ratio.set(0.05);
             }
             ProgressEvent::DownloadingLayer { .. } | ProgressEvent::LayerCacheHit { .. } => {
+                // Do not advance completion ratio on download start; wait for LayerCompleted.
+            }
+            ProgressEvent::LayerCompleted { .. } => {
                 *finished_layers += 1;
                 if *total_layers > 0 {
                     let ratio =
@@ -533,6 +567,7 @@ impl AppState {
 
         let score = summary.score;
         let total_size = res.total_size;
+        let is_stale = res.stale_as_of.is_some();
 
         self.activate_result(image, summary, res);
 
@@ -541,7 +576,8 @@ impl AppState {
             arch: resolved_arch,
             score,
             total_size,
-            analyzed_at: Utc::now().format("%Y-%m-%d %H:%M").to_string(),
+            analyzed_at: Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            stale: is_stale,
         };
         let mut updated = self.recent_images.get_untracked();
         upsert_recent(&mut updated, entry, MAX_RECENT_IMAGES);
@@ -561,14 +597,31 @@ impl AppState {
         self.pending_image.set(None);
         self.current_image.set(image.to_owned());
         self.image_input.set(image.to_owned());
-        self.result.set(Some(res));
+        self.result.set(Some(Arc::clone(&res)));
         self.summary.set(Some(summary));
+        self.final_tree.set(None);
         self.is_loading.set(false);
         self.show_preview_card.set(false);
         self.preview.set(None);
         self.progress_text.set(None);
         self.progress_ratio.set(1.0);
         self.analyze_error.set(None);
+
+        // Precompute the merged final filesystem tree off the UI thread for instant Treemap tab switches.
+        let res_for_tree = Arc::clone(&res);
+        let tree_rx = self.service.build_final_tree_async(res);
+        let tree_state = self.clone();
+        self.spawn_app_task(async move {
+            if let Ok(tree) = tree_rx.await {
+                let still_current = tree_state
+                    .result
+                    .get_untracked()
+                    .is_some_and(|cur| Arc::ptr_eq(&cur, &res_for_tree));
+                if still_current {
+                    tree_state.final_tree.set(Some(SharedRef(tree)));
+                }
+            }
+        });
 
         // Reset per-image inspector state
         self.active_tab.set(InspectorTab::FileTree);
@@ -702,7 +755,7 @@ impl AppState {
         self.spawn_app_task(async move {
             let outcome = match rx.await {
                 Ok(res) => res,
-                Err(_) => Err("Preview worker cancelled".to_owned()),
+                Err(_) => Err(t(state.lang.get_untracked(), "error.preview_cancelled").to_owned()),
             };
             if state.preview_request_id.get_untracked() != req_id {
                 return;
@@ -763,9 +816,9 @@ impl AppState {
             match rx.await {
                 Ok(Ok(_bytes)) => {
                     let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
-                    state.status_notice.set(Some(msg));
+                    state.show_status_notice(msg);
                 }
-                Ok(Err(err)) => state.status_notice.set(Some(err)),
+                Ok(Err(err)) => state.show_status_notice(err),
                 Err(_) => {}
             }
         });
@@ -791,30 +844,72 @@ impl AppState {
             return;
         };
         let lang = self.lang.get_untracked();
-        let md = to_markdown(&res, false, lang.to_core_lang());
-        self.save_markdown_document("diving-report.md", "menu.export_markdown", md);
-    }
-
-    fn save_markdown_document(
-        &self,
-        default_file_name: &str,
-        title_key: &'static str,
-        body: String,
-    ) {
-        let lang = self.lang.get_untracked();
-        let title = t(lang, title_key).to_owned();
-        let default_name = default_file_name.to_owned();
+        let title = t(lang, "menu.export_markdown").to_owned();
         let state = self.clone();
         self.spawn_app_task(async move {
             let picked =
-                pick_save_path(SaveDialog::new().file_name(default_name).title(title)).await;
+                pick_save_path(SaveDialog::new().file_name("diving-report.md").title(title)).await;
             if let Ok(Some(dest)) = picked {
-                match fs::write(&dest, body) {
-                    Ok(()) => {
+                let rx =
+                    state
+                        .service
+                        .export_markdown_report(res, lang.to_core_lang(), dest.clone());
+                match rx.await {
+                    Ok(Ok(())) => {
                         let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
-                        state.status_notice.set(Some(msg));
+                        state.show_status_notice(msg);
                     }
-                    Err(err) => state.status_notice.set(Some(err.to_string())),
+                    Ok(Err(err)) => state.show_status_notice(err),
+                    Err(_) => {}
+                }
+            }
+        });
+    }
+
+    pub fn export_json_report(&self) {
+        let Some(res) = self.result.get_untracked() else {
+            return;
+        };
+        let lang = self.lang.get_untracked();
+        let title = t(lang, "menu.export_json").to_owned();
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let picked = pick_save_path(
+                SaveDialog::new()
+                    .file_name("diving-report.json")
+                    .title(title),
+            )
+            .await;
+            if let Ok(Some(dest)) = picked {
+                let rx = state.service.export_json_report(res, dest.clone());
+                match rx.await {
+                    Ok(Ok(())) => {
+                        let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
+                        state.show_status_notice(msg);
+                    }
+                    Ok(Err(err)) => state.show_status_notice(err),
+                    Err(_) => {}
+                }
+            }
+        });
+    }
+
+    pub fn export_dockerfile(&self, body: String) {
+        let lang = self.lang.get_untracked();
+        let title = t(lang, "dockerfile.export").to_owned();
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let picked =
+                pick_save_path(SaveDialog::new().file_name("Dockerfile").title(title)).await;
+            if let Ok(Some(dest)) = picked {
+                let rx = state.service.write_text_file(dest.clone(), body);
+                match rx.await {
+                    Ok(Ok(())) => {
+                        let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
+                        state.show_status_notice(msg);
+                    }
+                    Ok(Err(err)) => state.show_status_notice(err),
+                    Err(_) => {}
                 }
             }
         });
@@ -825,11 +920,15 @@ impl AppState {
         let rx = self.service.cleanup_caches();
         let state = self.clone();
         self.spawn_app_task(async move {
-            if let Ok(Ok(stats)) = rx.await {
-                let removed = (stats.removed_blobs + stats.removed_analyses).to_string();
-                let freed = format_bytes(stats.freed_bytes);
-                let msg = tf(lang, "notice.cache_cleaned", &[&removed, &freed]);
-                state.status_notice.set(Some(msg));
+            match rx.await {
+                Ok(Ok(stats)) => {
+                    let removed = (stats.removed_blobs + stats.removed_analyses).to_string();
+                    let freed = format_bytes(stats.freed_bytes);
+                    let msg = tf(lang, "notice.cache_cleaned", &[&removed, &freed]);
+                    state.show_status_notice(msg);
+                }
+                Ok(Err(err)) => state.show_status_notice(err),
+                Err(_) => {}
             }
         });
     }
@@ -1093,8 +1192,26 @@ impl AppState {
             return;
         };
         let lang = self.lang.get_untracked();
-        let md = to_diff_markdown(&diff.0, lang.to_core_lang(), None);
-        self.save_markdown_document("diving-diff.md", "diff.export_md", md);
+        let title = t(lang, "diff.export_md").to_owned();
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let picked =
+                pick_save_path(SaveDialog::new().file_name("diving-diff.md").title(title)).await;
+            if let Ok(Some(dest)) = picked {
+                let rx =
+                    state
+                        .service
+                        .export_diff_markdown(diff.0, lang.to_core_lang(), dest.clone());
+                match rx.await {
+                    Ok(Ok(())) => {
+                        let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
+                        state.show_status_notice(msg);
+                    }
+                    Ok(Err(err)) => state.show_status_notice(err),
+                    Err(_) => {}
+                }
+            }
+        });
     }
 
     pub fn open_local_picker(&self) {
@@ -1123,7 +1240,9 @@ impl AppState {
         self.spawn_app_task(async move {
             let outcome = match rx.await {
                 Ok(res) => res,
-                Err(_) => Err("Local image listing worker cancelled".to_owned()),
+                Err(_) => {
+                    Err(t(state.lang.get_untracked(), "error.local_list_cancelled").to_owned())
+                }
             };
             if state.local_request_id.get_untracked() != req_id {
                 return;
@@ -1176,6 +1295,14 @@ fn format_progress_event_text(lang: UiLang, ev: &ProgressEvent) -> String {
             tf(
                 lang,
                 "progress.layer_cached",
+                &[&format!("{short} · {}", format_bytes(*size))],
+            )
+        }
+        ProgressEvent::LayerCompleted { digest, size } => {
+            let short = short_digest(digest);
+            tf(
+                lang,
+                "progress.layer_done",
                 &[&format!("{short} · {}", format_bytes(*size))],
             )
         }

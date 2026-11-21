@@ -23,19 +23,19 @@
 
 ---
 
-## Phase 2：Desktop 顺手度与基础功能对齐
+## Phase 2：Desktop 顺手度与基础功能对齐（已完成 ✅）
 
 ### 性能与交互
-- [ ] **文件树搜索提速**（[file_tree.rs:36-45](../app/src/features/inspector/file_tree.rs#L36-L45)、[model.rs:342-359](../app/src/domain/model.rs#L342-L359)）：关键字输入防抖，每层预计算 lowercase 路径与子树标记，避免每键 O(n·depth) 分配与全量克隆 key。
-- [ ] **Treemap 缓存与异步导出**（[treemap.rs:28](../app/src/features/inspector/treemap.rs#L28)、[service.rs:316-322](../app/src/domain/service.rs#L316-L322)、[state.rs:749](../app/src/domain/state.rs#L749)）：每个结果只构建一次 final tree（放到 Tokio 算）；Markdown 导出异步化、层文件导出流式写入；统一错误/成功 toast 通知。
-- [ ] **真实进度事件**（[state.rs:461-490](../app/src/domain/state.rs#L461-L490)）：`diving-core` 增加层完成/字节进度事件，解决并发下载时进度条瞬间跳到 ~95%。
-- [ ] **键盘导航与 i18n 补全**（[file_tree.rs:389-415](../app/src/features/inspector/file_tree.rs#L389-L415)、[layer_timeline.rs:132-150](../app/src/features/inspector/layer_timeline.rs#L132-L150)）：文件树与层列表支持方向键、Enter/Space 展开与预览；清理硬编码英文与未翻译文案。
+- [x] **文件树搜索提速**（[file_tree.rs:36-45](../app/src/features/inspector/file_tree.rs#L36-L45)、[model.rs:342-359](../app/src/domain/model.rs#L342-L359)）：关键字输入防抖，每层预计算 lowercase 路径与子树标记，避免每键 O(n·depth) 分配与全量克隆 key。
+- [x] **Treemap 缓存与异步导出**（[treemap.rs:28](../app/src/features/inspector/treemap.rs#L28)、[service.rs:316-322](../app/src/domain/service.rs#L316-L322)、[state.rs:749](../app/src/domain/state.rs#L749)）：每个结果只构建一次 final tree（放到 Tokio 算）；Markdown 导出异步化、层文件导出流式写入；统一错误/成功 toast 通知。
+- [x] **真实进度事件**（[state.rs:461-490](../app/src/domain/state.rs#L461-L490)）：`diving-core` 增加层完成/字节进度事件，解决并发下载时进度条瞬间跳到 ~95%。
+- [x] **键盘导航与 i18n 补全**（[file_tree.rs:389-415](../app/src/features/inspector/file_tree.rs#L389-L415)、[layer_timeline.rs:132-150](../app/src/features/inspector/layer_timeline.rs#L132-L150)）：文件树与层列表支持方向键、Enter/Space 展开与预览；清理硬编码英文与未翻译文案。
 
 ### 基础功能对齐
-- [ ] **真实多平台选择**（[title_bar.rs:404](../app/src/features/title_bar.rs#L404)）：Inspector 平台选择器基于 `res.supported_archs` 动态生成。
-- [ ] **展示已有分析数据**：展示 `envs`、`labels`、`unstripped_binaries` 与推荐项 `heuristic` 标记；Findings 取消 `.take(40)` 静默截断，提供"显示全部"。
-- [ ] **Recents 管理**：支持单条删除、清空列表，并标出 stale 记录；修复 `analyzed_at` 时区显示。
-- [ ] **JSON 报告导出**：与 Markdown 导出并列，输出标准 `AnalyzeReport` JSON。
+- [x] **真实多平台选择**（[title_bar.rs:404](../app/src/features/title_bar.rs#L404)）：Inspector 平台选择器基于 `res.supported_archs` 动态生成。
+- [x] **展示已有分析数据**：展示 `envs`、`labels`、`unstripped_binaries` 与推荐项 `heuristic` 标记；Findings 取消 `.take(40)` 静默截断，提供"显示全部"。
+- [x] **Recents 管理**：支持单条删除、清空列表，并标出 stale 记录；修复 `analyzed_at` 时区显示。
+- [x] **JSON 报告导出**：与 Markdown 导出并列，输出标准 `AnalyzeReport` JSON。
 
 > 工程原则：`state.rs`、`diff.rs`、`model.rs` 随改随拆，不单独停下来做大重构。
 

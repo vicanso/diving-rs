@@ -811,14 +811,23 @@ impl RegistryClient {
                 .unwrap_or(layer.size)
         };
         let media_type = layer.media_type.clone();
-        tokio::task::spawn_blocking(move || {
+        let digest = layer.digest.clone();
+        let info = tokio::task::spawn_blocking(move || {
             let file = File::open(&path).context(IoSnafu {})?;
             get_files_from_layer(BufReader::new(file), &media_type, compressed_size)
         })
         .await
         .map_err(|_| Error::Other {
             message: "decompression task join error".to_string(),
-        })?
+        })??;
+        emit_progress(
+            params.on_progress.as_ref(),
+            ProgressEvent::LayerCompleted {
+                digest,
+                size: compressed_size,
+            },
+        );
+        Ok(info)
     }
 
     pub(crate) async fn get_all_layer_info(

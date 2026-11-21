@@ -28,6 +28,10 @@ pub enum ProgressEvent {
         size: u64,
         compression: &'static str,
     },
+    LayerCompleted {
+        digest: String,
+        size: u64,
+    },
     UsingStaleCache {
         as_of: String,
     },

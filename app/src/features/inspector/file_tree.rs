@@ -7,8 +7,9 @@ use diving_core::DockerAnalyzeResult;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, FileTreeRow, classify_layer_opcode, count_layer_file_ops, flatten_file_tree,
-    format_bytes, format_command_lines,
+    AppState, FileTreeFilter, FileTreeRow, IndexedTree, SharedRef, build_indexed_tree,
+    classify_layer_opcode, count_layer_file_ops, flatten_indexed_tree, format_bytes,
+    format_command_lines,
 };
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
@@ -30,18 +31,51 @@ fn min_size_items(lang: UiLang) -> Vec<SelectItem> {
 /// Renders `CommandInspector`, the filter toolbar, column header, and virtualized file tree.
 pub fn file_tree_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
     let selected_layer = state.selected_layer;
-    let res_for_rows = res.clone();
-    let filter_state = state.clone();
+    let res_for_index = res.clone();
 
-    let rows: Memo<Vec<FileTreeRow>> = computed(move || {
+    // Build precomputed lowercase/flag index once per layer instead of per keystroke.
+    let indexed_layer: Memo<Option<SharedRef<IndexedTree>>> = computed(move || {
         let layer_idx = selected_layer.get();
-        let Some(layer_items) = res_for_rows.file_tree_list.get(layer_idx) else {
+        res_for_index
+            .file_tree_list
+            .get(layer_idx)
+            .map(|items| SharedRef::new(build_indexed_tree(items)))
+    });
+
+    // Debounce keyword typing by 120ms so fast typing stays responsive on large trees.
+    let raw_keyword = state.tree_keyword;
+    let debounced_keyword = signal(raw_keyword.get_untracked());
+    let debounce_seq = signal(0_u64);
+    effect(move || {
+        let kw = raw_keyword.get();
+        let next_seq = debounce_seq.get_untracked().wrapping_add(1);
+        debounce_seq.set(next_seq);
+        if kw.trim().is_empty() {
+            debounced_keyword.set(kw);
+        } else {
+            set_timeout(Duration::from_millis(120), move || {
+                if debounce_seq.get_untracked() == next_seq {
+                    debounced_keyword.set(kw);
+                }
+            });
+        }
+    });
+
+    let filter_state = state.clone();
+    let rows: Memo<Vec<FileTreeRow>> = computed(move || {
+        let Some(indexed) = indexed_layer.get() else {
             return Vec::new();
         };
-        let filter = filter_state.current_tree_filter();
+        let filter = FileTreeFilter {
+            keyword: debounced_keyword.get(),
+            only_modified_removed: filter_state.tree_modifications_only.get(),
+            min_size_bytes: filter_state.tree_min_size.get(),
+            compact_paths: filter_state.tree_compact_paths.get(),
+            expand_all: filter_state.tree_expand_all.get(),
+        };
         let expanded = filter_state.tree_expanded.get();
         let collapsed = filter_state.tree_collapsed.get();
-        flatten_file_tree(layer_items, &filter, &expanded, &collapsed)
+        flatten_indexed_tree(&indexed, &filter, &expanded, &collapsed)
     });
 
     view()
@@ -381,6 +415,7 @@ fn virtual_tree(
         move || rows.with(Vec::len),
         move |at| {
             let press_state = state.clone();
+            let key_state = state.clone();
             let preview_btn_state = state.clone();
             let ctx_preview_state = state.clone();
             let ctx_save_state = state.clone();
@@ -393,6 +428,8 @@ fn virtual_tree(
                 .items_center()
                 .gap_2()
                 .px_4()
+                .focusable(true)
+                .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
                 .bg(move || {
                     let current_key = rows.with(|r| r.get(at.index()).map(|item| item.key.clone()));
                     if current_key.is_some() && current_key == selected_file.get() {
@@ -402,6 +439,44 @@ fn virtual_tree(
                     }
                 })
                 .hover(|s| s.bg(move || theme().accent))
+                .on_key_down(move |ev: &KeyEvent| {
+                    let idx = at.index();
+                    let Some(row) = rows.with(|r| r.get(idx).cloned()) else {
+                        return;
+                    };
+                    match ev.key.as_str() {
+                        "Enter" | " " => {
+                            if row.is_dir {
+                                key_state.toggle_tree_dir(&row.key, row.expanded);
+                            } else if row.is_previewable() {
+                                key_state.open_file_preview(&row);
+                            } else {
+                                key_state.selected_file_path.set(Some(row.key));
+                            }
+                        }
+                        "ArrowRight" if row.is_dir && !row.expanded => {
+                            key_state.toggle_tree_dir(&row.key, false);
+                        }
+                        "ArrowLeft" if row.is_dir && row.expanded => {
+                            key_state.toggle_tree_dir(&row.key, true);
+                        }
+                        "ArrowDown" => {
+                            if let Some(next_key) =
+                                rows.with(|r| r.get(idx + 1).map(|n| n.key.clone()))
+                            {
+                                key_state.selected_file_path.set(Some(next_key));
+                            }
+                        }
+                        "ArrowUp" if idx > 0 => {
+                            if let Some(prev_key) =
+                                rows.with(|r| r.get(idx - 1).map(|n| n.key.clone()))
+                            {
+                                key_state.selected_file_path.set(Some(prev_key));
+                            }
+                        }
+                        _ => {}
+                    }
+                })
                 .on_press(move || {
                     if let Some(row) = rows.with(|r| r.get(at.index()).cloned()) {
                         if row.is_dir {

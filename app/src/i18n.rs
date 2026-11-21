@@ -167,6 +167,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "命中本地缓存镜像层（{0}）",
     ),
     (
+        "progress.layer_done",
+        "Processed layer ({0})",
+        "已解析镜像层（{0}）",
+    ),
+    (
         "progress.cache_hit",
         "Loaded analysis from cache",
         "命中本地分析缓存",
@@ -377,8 +382,39 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "No large upper-layer file additions detected.",
         "未发现较大的上层新增或修改文件。",
     ),
+    ("findings.heuristic", "heuristic", "启发式"),
+    ("findings.show_all", "Show all ({0})", "显示全部（{0}）"),
+    ("findings.show_less", "Show fewer", "收起"),
+    (
+        "findings.unstripped",
+        "Unstripped Binaries",
+        "未剥离符号的二进制",
+    ),
+    (
+        "findings.unstripped_empty",
+        "No unstripped binaries detected.",
+        "未检测到未剥离符号的二进制文件。",
+    ),
     ("dockerfile.wrap", "Wrap lines", "自动换行"),
     ("dockerfile.export", "Export…", "导出…"),
+    ("dockerfile.metadata", "Image Metadata", "镜像元数据"),
+    ("dockerfile.envs", "Environment Variables", "环境变量"),
+    ("dockerfile.labels", "Labels", "标签"),
+    ("menu.export_json", "Export JSON Report…", "导出 JSON 报告…"),
+    ("recent.clear_all", "Clear all", "清空"),
+    ("recent.remove", "Remove", "移除"),
+    ("recent.stale_badge", "stale", "快照"),
+    ("common.image_placeholder", "Image", "镜像"),
+    (
+        "error.preview_cancelled",
+        "Preview worker cancelled",
+        "文件预览任务已取消",
+    ),
+    (
+        "error.local_list_cancelled",
+        "Local image listing worker cancelled",
+        "本地镜像列表加载已取消",
+    ),
     // Status bar & notices
     (
         "status.hints_files",

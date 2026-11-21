@@ -1,6 +1,7 @@
 //! Async analysis bridge running `diving-core` pipelines on a multi-threaded Tokio runtime.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,9 +9,10 @@ use std::time::Duration;
 
 use diving_app::config::{build_desktop_analyzer, build_http_client, load_config};
 use diving_core::{
-    AnalyzeOptions, Analyzer, CleanupStats, DockerAnalyzeResult, ImageDiff, ImagePreview, Lang,
-    LocalContainerImage, LocalRuntime, PreviewOptions, ProgressEvent, REGISTRY_LOCAL_FILE,
-    diff_images, list_local_images, parse_image_info,
+    AnalyzeOptions, Analyzer, CleanupStats, DockerAnalyzeResult, Error as CoreError, ImageDiff,
+    ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions, ProgressEvent,
+    REGISTRY_LOCAL_FILE, diff_images, list_local_images, parse_image_info, to_diff_markdown,
+    to_markdown,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
@@ -19,6 +21,7 @@ use tokio::task::AbortHandle;
 use crate::domain::model::{
     FilePreviewContent, ImageSourceKind, classify_file_preview, image_source_kind,
 };
+use crate::domain::treemap::{FsNode, build_final_tree};
 
 const FILE_PREVIEW_LIMIT: u64 = 128 * 1024;
 const FILE_EXPORT_LIMIT: u64 = 100 * 1024 * 1024;
@@ -332,6 +335,7 @@ impl DivingService {
     }
 
     /// Exports an entire file (up to 100 MiB) from a cached layer blob or local archive to `dest`.
+    /// Streams registry blobs in 64 KiB chunks to avoid buffering large files in memory.
     pub fn export_layer_file(
         &self,
         image_ref: String,
@@ -344,24 +348,140 @@ impl DivingService {
         let analyzer = self.inner.analyzer.clone();
         self.inner.rt.spawn_blocking(move || {
             let info = parse_image_info(&image_ref);
-            let outcome = if info.registry == REGISTRY_LOCAL_FILE {
-                analyzer.read_local_file(
-                    &info.name,
+            let result = if info.registry == REGISTRY_LOCAL_FILE {
+                analyzer
+                    .read_local_file(
+                        &info.name,
+                        &layer_digest,
+                        &media_type,
+                        &file_path,
+                        FILE_EXPORT_LIMIT,
+                    )
+                    .map_err(|err| err.to_string())
+                    .and_then(|bytes| {
+                        let len = bytes.len() as u64;
+                        fs::write(&dest, &bytes)
+                            .map(|()| len)
+                            .map_err(|err| err.to_string())
+                    })
+            } else {
+                let mut writer: Option<BufWriter<File>> = None;
+                let mut written: u64 = 0;
+                let stream_res = analyzer.stream_file(
                     &layer_digest,
                     &media_type,
                     &file_path,
                     FILE_EXPORT_LIMIT,
-                )
-            } else {
-                analyzer.read_file(&layer_digest, &media_type, &file_path, FILE_EXPORT_LIMIT)
+                    |chunk| {
+                        let w = match writer.as_mut() {
+                            Some(w) => w,
+                            None => {
+                                let file = File::create(&dest).map_err(|e| CoreError::Other {
+                                    message: e.to_string(),
+                                })?;
+                                writer.insert(BufWriter::new(file))
+                            }
+                        };
+                        w.write_all(chunk).map_err(|e| CoreError::Other {
+                            message: e.to_string(),
+                        })?;
+                        written = written.saturating_add(chunk.len() as u64);
+                        Ok(())
+                    },
+                );
+                match stream_res {
+                    Ok(()) => {
+                        if let Some(mut w) = writer {
+                            w.flush().map(|()| written).map_err(|e| e.to_string())
+                        } else {
+                            // Empty file
+                            fs::write(&dest, []).map(|()| 0).map_err(|e| e.to_string())
+                        }
+                    }
+                    Err(err) => {
+                        drop(writer);
+                        let _ = fs::remove_file(&dest);
+                        Err(err.to_string())
+                    }
+                }
             };
-            let result = outcome.map_err(|err| err.to_string()).and_then(|bytes| {
-                let len = bytes.len() as u64;
-                fs::write(&dest, &bytes)
-                    .map(|()| len)
-                    .map_err(|err| err.to_string())
-            });
             let _ = tx.send(result);
+        });
+        rx
+    }
+
+    /// Computes the final merged filesystem tree on the Tokio blocking pool for `Treemap`.
+    pub fn build_final_tree_async(
+        &self,
+        res: Arc<DockerAnalyzeResult>,
+    ) -> oneshot::Receiver<Arc<FsNode>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn_blocking(move || {
+            let tree = Arc::new(build_final_tree(&res.file_tree_list));
+            let _ = tx.send(tree);
+        });
+        rx
+    }
+
+    /// Renders and writes a Markdown analysis report off the UI thread.
+    pub fn export_markdown_report(
+        &self,
+        res: Arc<DockerAnalyzeResult>,
+        lang: Lang,
+        dest: PathBuf,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn_blocking(move || {
+            let md = to_markdown(&res, false, lang);
+            let outcome = fs::write(&dest, md).map_err(|e| e.to_string());
+            let _ = tx.send(outcome);
+        });
+        rx
+    }
+
+    /// Serializes and writes an `AnalyzeReport` JSON document off the UI thread.
+    pub fn export_json_report(
+        &self,
+        res: Arc<DockerAnalyzeResult>,
+        dest: PathBuf,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn_blocking(move || {
+            let summary = res.summary();
+            let outcome = serde_json::to_string_pretty(&res.report(&summary))
+                .map_err(|e| e.to_string())
+                .and_then(|json| fs::write(&dest, json).map_err(|e| e.to_string()));
+            let _ = tx.send(outcome);
+        });
+        rx
+    }
+
+    /// Renders and writes a Markdown diff report off the UI thread.
+    pub fn export_diff_markdown(
+        &self,
+        diff: Arc<ImageDiff>,
+        lang: Lang,
+        dest: PathBuf,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn_blocking(move || {
+            let md = to_diff_markdown(&diff, lang, None);
+            let outcome = fs::write(&dest, md).map_err(|e| e.to_string());
+            let _ = tx.send(outcome);
+        });
+        rx
+    }
+
+    /// Writes a text document (such as reconstructed Dockerfile) off the UI thread.
+    pub fn write_text_file(
+        &self,
+        dest: PathBuf,
+        body: String,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn_blocking(move || {
+            let outcome = fs::write(&dest, body).map_err(|e| e.to_string());
+            let _ = tx.send(outcome);
         });
         rx
     }

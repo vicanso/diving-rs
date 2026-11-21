@@ -129,6 +129,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                             let cmd_for_copy = layer.cmd.clone();
                             let digest_for_copy = layer.digest.clone();
 
+                            let key_state = click_state.clone();
                             let row = view()
                                 .w_full()
                                 .min_h(px(30.0))
@@ -139,6 +140,10 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                 .gap_1p5()
                                 .rounded(radius_inset)
                                 .overflow_hidden()
+                                .focusable(true)
+                                .focus_visible(|s| {
+                                    s.outline(px(2.0)).outline_color(move || theme().ring)
+                                })
                                 .bg(move || {
                                     if selected_layer.get() == orig_idx {
                                         surface_active()
@@ -147,6 +152,11 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                     }
                                 })
                                 .hover(|s| s.bg(move || theme().accent))
+                                .on_key_down(move |ev: &KeyEvent| {
+                                    if matches!(ev.key.as_str(), "Enter" | " ") {
+                                        key_state.select_layer(orig_idx);
+                                    }
+                                })
                                 .on_press(move || click_state.select_layer(orig_idx))
                                 .child(
                                     text(format!("{:02}", orig_idx + 1))

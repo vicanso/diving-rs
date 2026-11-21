@@ -1,31 +1,33 @@
-//! Tab 4 (`Dockerfile`): reconstructed Dockerfile viewer with Copy, Wrap, and Export actions.
+//! Tab 4 (`Dockerfile`): reconstructed Dockerfile viewer with Copy, Wrap, Export, and image metadata.
 
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
 use diving_core::DockerAnalyzeResult;
-use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
 
 use crate::domain::AppState;
-use crate::i18n::{t, tf};
+use crate::i18n::{UiLang, t};
 use crate::ui::{
-    BadgeTone, ButtonVariant, IconName, UiSize, theme, ui_badge, ui_button, ui_code_viewer,
-    ui_switch,
+    BadgeTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme, ui_badge,
+    ui_button, ui_code_viewer, ui_switch,
 };
 
-/// Renders the `Dockerfile` toolbar + full-height syntax-highlighted read-only viewer.
+/// Renders the `Dockerfile` toolbar, image metadata (`ENV` / `LABEL`), and read-only viewer.
 pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
     let lang = state.lang;
     let wrap = state.dockerfile_wrap;
     let copied = signal(false);
+    let show_meta = signal(false);
 
     let dockerfile_for_copy = res.dockerfile.clone();
     let dockerfile_for_export = res.dockerfile.clone();
     let dockerfile_for_view = res.dockerfile.clone();
     let user = res.user.clone();
-    let export_state = state.clone();
+    let envs = res.envs.clone();
+    let labels = res.labels.clone();
+    let meta_count = envs.len() + labels.len();
+    let export_state = state;
 
     view()
         .flex_1()
@@ -56,6 +58,22 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                                     ))
                                 },
                                 BadgeTone::Neutral,
+                            ))
+                        })
+                        .when(meta_count > 0, |r| {
+                            r.child(ui_button(
+                                move || {
+                                    SharedString::from(format!(
+                                        "{} ({meta_count})",
+                                        t(lang.get(), "dockerfile.metadata")
+                                    ))
+                                },
+                                ButtonVariant::Ghost,
+                                UiSize::Xs,
+                                None,
+                                false,
+                                false,
+                                move || show_meta.set(!show_meta.get_untracked()),
                             ))
                         })
                         .child(ui_switch(
@@ -106,39 +124,97 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                             Some(IconName::Download),
                             false,
                             false,
-                            move || {
-                                let body = dockerfile_for_export.clone();
-                                let cur_lang = export_state.lang.get_untracked();
-                                let s = export_state.clone();
-                                spawn(async move {
-                                    let picked = pick_save_path(
-                                        SaveDialog::new()
-                                            .file_name("Dockerfile")
-                                            .title(t(cur_lang, "dockerfile.export")),
-                                    )
-                                    .await;
-                                    if let Ok(Some(dest)) = picked {
-                                        match fs::write(&dest, body) {
-                                            Ok(()) => {
-                                                let msg = tf(
-                                                    cur_lang,
-                                                    "notice.exported_to",
-                                                    &[&dest.display().to_string()],
-                                                );
-                                                s.status_notice.set(Some(msg));
-                                            }
-                                            Err(err) => s.status_notice.set(Some(err.to_string())),
-                                        }
-                                    }
-                                });
-                            },
+                            move || export_state.export_dockerfile(dockerfile_for_export.clone()),
                         )),
                 ),
         )
+        .child(when(
+            move || show_meta.get() && meta_count > 0,
+            move || metadata_panel(envs.clone(), labels.clone(), lang),
+        ))
         .child(view().flex_1().min_h(px(0.0)).p_4().child(ui_code_viewer(
             Some(SharedString::from(dockerfile_for_view)),
             Some(SharedString::from("Dockerfile")),
             wrap,
             "Reconstructed Dockerfile viewer",
         )))
+}
+
+fn metadata_panel(
+    envs: Vec<String>,
+    labels: Vec<String>,
+    lang: Signal<UiLang>,
+) -> impl IntoElement {
+    scroll()
+        .max_h(px(220.0))
+        .w_full()
+        .bg(move || theme().background)
+        .border_b_1()
+        .border_color(move || theme().border)
+        .child(
+            view()
+                .w_full()
+                .px_4()
+                .py_3()
+                .flex_col()
+                .gap_3()
+                .when(!envs.is_empty(), |col| {
+                    let count = envs.len();
+                    col.child(
+                        view()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                text(move || {
+                                    format!("{} ({count})", t(lang.get(), "dockerfile.envs"))
+                                })
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(move || theme().muted_foreground),
+                            )
+                            .children(envs.into_iter().map(|entry| {
+                                view()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(radius_inset)
+                                    .bg(move || theme().muted)
+                                    .child(
+                                        text(entry)
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .text_color(move || theme().foreground),
+                                    )
+                            })),
+                    )
+                })
+                .when(!labels.is_empty(), |col| {
+                    let count = labels.len();
+                    col.child(
+                        view()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                text(move || {
+                                    format!("{} ({count})", t(lang.get(), "dockerfile.labels"))
+                                })
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(move || theme().muted_foreground),
+                            )
+                            .children(labels.into_iter().map(|entry| {
+                                view()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(radius_inset)
+                                    .bg(move || theme().muted)
+                                    .child(
+                                        text(entry)
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .text_color(move || theme().foreground),
+                                    )
+                            })),
+                    )
+                }),
+        )
 }

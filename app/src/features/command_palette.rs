@@ -65,6 +65,10 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
             .keywords(["export", "markdown", "report"])
             .shortcut("mod+e")
             .disabled(!has_result),
+        CommandItem::new("action:export_json", t(lang, "menu.export_json"))
+            .group(group_actions)
+            .keywords(["export", "json", "report"])
+            .disabled(!has_result),
         CommandItem::new("action:clear_cache", t(lang, "cmd.clear_cache"))
             .group(group_actions)
             .keywords(["clean", "cache", "gc"]),
@@ -164,6 +168,7 @@ fn execute_command(state: &AppState, id: &str) {
                 state.export_markdown_report();
             }
         }
+        "action:export_json" => state.export_json_report(),
         "action:clear_cache" => state.clear_cache(),
         "action:home" => state.navigate_home(),
         "action:toggle_sidebar" => state.toggle_app_sidebar(),

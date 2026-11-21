@@ -317,6 +317,7 @@ pub fn findings_total_count(res: &DockerAnalyzeResult, summary: &DockerAnalyzeSu
         + res.duplicate_groups.len()
         + usize::from(!summary.wasted_list.is_empty())
         + usize::from(!res.big_modified_file_list.is_empty())
+        + usize::from(!res.unstripped_binaries.is_empty())
 }
 
 /// Counts leaf file operations across one layer's hierarchical file tree.
@@ -339,41 +340,29 @@ pub fn count_layer_file_ops(items: &[FileTreeItem]) -> LayerFileCounts {
     counts
 }
 
-fn has_modified_or_removed(item: &FileTreeItem) -> bool {
-    if matches!(item.op, Op::Modified | Op::Removed) {
-        return true;
-    }
-    item.children.iter().any(has_modified_or_removed)
+/// Precomputed per-layer file tree index avoiding repeated `to_ascii_lowercase`
+/// allocations and recursive subtree scans on every filter keystroke.
+#[derive(Debug, Clone)]
+pub struct IndexedTree {
+    pub roots: Vec<IndexedTreeNode>,
+    pub max_size: u64,
 }
 
-fn matches_keyword(item: &FileTreeItem, key: &str, keyword_lower: &str) -> bool {
-    if key.to_ascii_lowercase().contains(keyword_lower)
-        || item.name.to_ascii_lowercase().contains(keyword_lower)
-    {
-        return true;
-    }
-    item.children.iter().any(|child| {
-        let child_key = join_tree_key(key, &child.name);
-        matches_keyword(child, &child_key, keyword_lower)
-    })
-}
-
-fn matches_filter(
-    item: &FileTreeItem,
-    key: &str,
-    filter: &FileTreeFilter,
-    keyword_lower: &str,
-) -> bool {
-    if filter.min_size_bytes > 0 && item.size < filter.min_size_bytes {
-        return false;
-    }
-    if filter.only_modified_removed && !has_modified_or_removed(item) {
-        return false;
-    }
-    if !keyword_lower.is_empty() && !matches_keyword(item, key, keyword_lower) {
-        return false;
-    }
-    true
+/// Precomputed node in an [`IndexedTree`].
+#[derive(Debug, Clone)]
+pub struct IndexedTreeNode {
+    pub key: String,
+    pub key_lower: String,
+    pub name: String,
+    pub name_lower: String,
+    pub link: String,
+    pub mode: String,
+    pub uid: u64,
+    pub gid: u64,
+    pub size: u64,
+    pub op: Op,
+    pub has_modified_or_removed: bool,
+    pub children: Vec<IndexedTreeNode>,
 }
 
 fn join_tree_key(prefix: &str, name: &str) -> String {
@@ -384,32 +373,86 @@ fn join_tree_key(prefix: &str, name: &str) -> String {
     }
 }
 
-fn max_entry_size(items: &[FileTreeItem]) -> u64 {
-    let mut max_sz = 0_u64;
-    for item in items {
-        max_sz = max_sz.max(item.size);
-        if !item.children.is_empty() {
-            max_sz = max_sz.max(max_entry_size(&item.children));
+/// Builds a reusable [`IndexedTree`] once per layer so keyword/filter updates stay O(n).
+pub fn build_indexed_tree(roots: &[FileTreeItem]) -> IndexedTree {
+    fn index_nodes(
+        items: &[FileTreeItem],
+        prefix: &str,
+        max_size: &mut u64,
+    ) -> Vec<IndexedTreeNode> {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            *max_size = (*max_size).max(item.size);
+            let key = join_tree_key(prefix, &item.name);
+            let key_lower = key.to_ascii_lowercase();
+            let name_lower = item.name.to_ascii_lowercase();
+            let children = index_nodes(&item.children, &key, max_size);
+            let has_mod = matches!(item.op, Op::Modified | Op::Removed)
+                || children.iter().any(|c| c.has_modified_or_removed);
+            out.push(IndexedTreeNode {
+                key,
+                key_lower,
+                name: item.name.clone(),
+                name_lower,
+                link: item.link.clone(),
+                mode: item.mode.clone(),
+                uid: item.uid,
+                gid: item.gid,
+                size: item.size,
+                op: item.op.clone(),
+                has_modified_or_removed: has_mod,
+                children,
+            });
         }
+        out
     }
-    max_sz
+    let mut max_size = 0_u64;
+    let indexed_roots = index_nodes(roots, "", &mut max_size);
+    IndexedTree {
+        roots: indexed_roots,
+        max_size: max_size.max(1),
+    }
 }
 
-/// Flattens a hierarchical layer file tree into virtualizable rows honoring filter & expand sets.
-pub fn flatten_file_tree(
-    roots: &[FileTreeItem],
+fn indexed_matches_keyword(node: &IndexedTreeNode, keyword_lower: &str) -> bool {
+    if node.key_lower.contains(keyword_lower) || node.name_lower.contains(keyword_lower) {
+        return true;
+    }
+    node.children
+        .iter()
+        .any(|child| indexed_matches_keyword(child, keyword_lower))
+}
+
+fn indexed_matches_filter(
+    node: &IndexedTreeNode,
+    filter: &FileTreeFilter,
+    keyword_lower: &str,
+) -> bool {
+    if filter.min_size_bytes > 0 && node.size < filter.min_size_bytes {
+        return false;
+    }
+    if filter.only_modified_removed && !node.has_modified_or_removed {
+        return false;
+    }
+    if !keyword_lower.is_empty() && !indexed_matches_keyword(node, keyword_lower) {
+        return false;
+    }
+    true
+}
+
+/// Flattens a precomputed [`IndexedTree`] into virtualizable rows honoring filter & expand sets.
+pub fn flatten_indexed_tree(
+    tree: &IndexedTree,
     filter: &FileTreeFilter,
     expanded: &HashSet<String>,
     collapsed: &HashSet<String>,
 ) -> Vec<FileTreeRow> {
-    let max_size = max_entry_size(roots).max(1);
     let keyword_lower = filter.keyword.trim().to_ascii_lowercase();
     let mut out = Vec::new();
 
     #[allow(clippy::too_many_arguments)]
     fn walk(
-        items: &[FileTreeItem],
-        prefix: &str,
+        items: &[IndexedTreeNode],
         depth: usize,
         filter: &FileTreeFilter,
         keyword_lower: &str,
@@ -419,8 +462,7 @@ pub fn flatten_file_tree(
         out: &mut Vec<FileTreeRow>,
     ) {
         for raw_item in items {
-            let mut key = join_tree_key(prefix, &raw_item.name);
-            if !matches_filter(raw_item, &key, filter, keyword_lower) {
+            if !indexed_matches_filter(raw_item, filter, keyword_lower) {
                 continue;
             }
             let mut item = raw_item;
@@ -430,28 +472,28 @@ pub fn flatten_file_tree(
             if filter.compact_paths && is_dir && display_name != "." {
                 while item.children.len() == 1 {
                     let only_child = &item.children[0];
-                    let child_key = join_tree_key(&key, &only_child.name);
                     if only_child.children.is_empty()
                         || !only_child.link.is_empty()
-                        || !matches_filter(only_child, &child_key, filter, keyword_lower)
+                        || !indexed_matches_filter(only_child, filter, keyword_lower)
                     {
                         break;
                     }
                     display_name = format!("{display_name}/{}", only_child.name);
-                    key = child_key;
                     item = only_child;
                 }
                 is_dir = !item.children.is_empty();
             }
 
             let is_expanded = is_dir
-                && !collapsed_set.contains(&key)
-                && (!keyword_lower.is_empty() || filter.expand_all || expanded_set.contains(&key));
+                && !collapsed_set.contains(&item.key)
+                && (!keyword_lower.is_empty()
+                    || filter.expand_all
+                    || expanded_set.contains(&item.key));
 
             let ratio = ((item.size as f64) / (max_size as f64)).clamp(0.0, 1.0) as f32;
             let insert_idx = out.len();
             out.push(FileTreeRow {
-                key: key.clone(),
+                key: item.key.clone(),
                 name: display_name,
                 link: item.link.clone(),
                 mode: item.mode.clone(),
@@ -469,7 +511,6 @@ pub fn flatten_file_tree(
                 let before_children = out.len();
                 walk(
                     &item.children,
-                    &key,
                     depth + 1,
                     filter,
                     keyword_lower,
@@ -486,17 +527,27 @@ pub fn flatten_file_tree(
     }
 
     walk(
-        roots,
-        "",
+        &tree.roots,
         0,
         filter,
         &keyword_lower,
         expanded,
         collapsed,
-        max_size,
+        tree.max_size,
         &mut out,
     );
     out
+}
+
+/// Flattens a hierarchical layer file tree into virtualizable rows honoring filter & expand sets.
+pub fn flatten_file_tree(
+    roots: &[FileTreeItem],
+    filter: &FileTreeFilter,
+    expanded: &HashSet<String>,
+    collapsed: &HashSet<String>,
+) -> Vec<FileTreeRow> {
+    let indexed = build_indexed_tree(roots);
+    flatten_indexed_tree(&indexed, filter, expanded, collapsed)
 }
 
 /// Decoded file preview body shown in the File Preview Sheet.
@@ -621,6 +672,8 @@ pub struct RecentImageEntry {
     pub score: u64,
     pub total_size: u64,
     pub analyzed_at: String,
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// Inserts or promotes a recent image entry to the front, bounded at `max_items`.
@@ -630,6 +683,11 @@ pub fn upsert_recent(list: &mut Vec<RecentImageEntry>, entry: RecentImageEntry, 
     if list.len() > max_items {
         list.truncate(max_items);
     }
+}
+
+/// Removes a single recent image entry matching `(image, arch)`.
+pub fn remove_recent(list: &mut Vec<RecentImageEntry>, image: &str, arch: &str) {
+    list.retain(|existing| !(existing.image == image && existing.arch == arch));
 }
 
 /// Formats `RuntimeCompat` for KPI strip display with semantic badge tone.
@@ -825,6 +883,7 @@ mod tests {
                 score: 99,
                 total_size: 8_000_000,
                 analyzed_at: "t1".into(),
+                stale: false,
             },
             RecentImageEntry {
                 image: "nginx:alpine".into(),
@@ -832,6 +891,7 @@ mod tests {
                 score: 97,
                 total_size: 40_000_000,
                 analyzed_at: "t2".into(),
+                stale: false,
             },
         ];
         upsert_recent(
@@ -842,6 +902,7 @@ mod tests {
                 score: 98,
                 total_size: 41_000_000,
                 analyzed_at: "t3".into(),
+                stale: false,
             },
             2,
         );
@@ -857,11 +918,16 @@ mod tests {
                 score: 95,
                 total_size: 30_000_000,
                 analyzed_at: "t4".into(),
+                stale: true,
             },
             2,
         );
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].image, "redis:alpine");
         assert_eq!(recent[1].image, "nginx:alpine");
+
+        remove_recent(&mut recent, "redis:alpine", "arm64");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].image, "nginx:alpine");
     }
 }

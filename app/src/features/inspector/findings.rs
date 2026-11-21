@@ -8,8 +8,8 @@ use nsh_core::prelude::*;
 use crate::domain::{AppState, format_bytes};
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
-    BadgeTone, IconName, font_mono_family, radius_inset, theme, ui_badge, ui_empty_state,
-    ui_panel_titled, ui_separator,
+    BadgeTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme, ui_badge,
+    ui_button, ui_empty_state, ui_panel_titled, ui_separator,
 };
 
 fn severity_badge_tone(severity: &str) -> BadgeTone {
@@ -29,6 +29,7 @@ pub fn findings_tab(
 ) -> impl IntoElement {
     let lang = state.lang;
     let wide_layout = computed(move || window().width >= px(1100.0));
+    let res_unstripped = res.clone();
 
     scroll().flex_1().min_h(px(0.0)).child(
         view()
@@ -93,7 +94,10 @@ pub fn findings_tab(
                         .child(big_files_panel(res.clone(), lang))
                         .into_element()
                 }
-            })),
+            }))
+            .when(!res_unstripped.unstripped_binaries.is_empty(), |col| {
+                col.child(unstripped_panel(res_unstripped, lang))
+            }),
     )
 }
 
@@ -128,6 +132,7 @@ fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) ->
                     let hint = rec.dockerfile_hint.clone();
                     let paths = rec.paths.clone();
                     let est_saved = rec.est_saved_bytes;
+                    let is_heuristic = rec.heuristic;
 
                     view()
                         .flex_col()
@@ -150,6 +155,17 @@ fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) ->
                                         .gap_2()
                                         .child(ui_badge(severity, tone))
                                         .child(ui_badge(category, BadgeTone::Neutral))
+                                        .when(is_heuristic, |r| {
+                                            r.child(ui_badge(
+                                                move || {
+                                                    SharedString::from(t(
+                                                        lang.get(),
+                                                        "findings.heuristic",
+                                                    ))
+                                                },
+                                                BadgeTone::Neutral,
+                                            ))
+                                        })
                                         .child(
                                             text(title)
                                                 .text_sm()
@@ -202,6 +218,7 @@ fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) ->
 
 fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> impl IntoElement {
     let count = summary.wasted_list.len();
+    let show_all = signal(false);
     ui_panel_titled(
         move || SharedString::from(format!("{} ({count})", t(lang.get(), "findings.wasted"))),
         Some(
@@ -224,16 +241,13 @@ fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> imp
             )
             .into_element()
         } else {
-            view()
-                .flex_col()
-                .gap_2()
-                .children(
-                    summary
-                        .wasted_list
-                        .iter()
-                        .take(40)
-                        .enumerate()
-                        .map(|(idx, item)| {
+            dynamic(move || {
+                let limit = if show_all.get() { count } else { 40 };
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .children(summary.wasted_list.iter().take(limit).enumerate().map(
+                        |(idx, item)| {
                             let path = item.path.clone();
                             let size = format_bytes(item.total_size);
                             let changes = item.changes.clone();
@@ -300,9 +314,32 @@ fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> imp
                                     .text_xs()
                                     .text_color(move || theme().muted_foreground),
                                 )
-                        }),
-                )
-                .into_element()
+                        },
+                    ))
+                    .when(count > 40, |col| {
+                        col.child(view().pt_2().child(ui_button(
+                            move || {
+                                if show_all.get() {
+                                    SharedString::from(t(lang.get(), "findings.show_less"))
+                                } else {
+                                    SharedString::from(tf(
+                                        lang.get(),
+                                        "findings.show_all",
+                                        &[&count.to_string()],
+                                    ))
+                                }
+                            },
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            None,
+                            false,
+                            false,
+                            move || show_all.set(!show_all.get_untracked()),
+                        )))
+                    })
+                    .into_element()
+            })
+            .into_element()
         },
     )
 }
@@ -448,6 +485,7 @@ fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
 
 fn big_files_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
     let count = res.big_modified_file_list.len();
+    let show_all = signal(false);
     ui_panel_titled(
         move || SharedString::from(format!("{} ({count})", t(lang.get(), "findings.big_files"))),
         None,
@@ -460,14 +498,101 @@ fn big_files_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
             )
             .into_element()
         } else {
-            view()
-                .flex_col()
-                .gap_2()
-                .children(res.big_modified_file_list.iter().take(40).enumerate().map(
-                    |(idx, item)| {
-                        let path = item.path.clone();
-                        let size = format_bytes(item.size);
-                        let mode = item.mode.clone();
+            dynamic(move || {
+                let limit = if show_all.get() { count } else { 40 };
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .children(
+                        res.big_modified_file_list
+                            .iter()
+                            .take(limit)
+                            .enumerate()
+                            .map(|(idx, item)| {
+                                let path = item.path.clone();
+                                let size = format_bytes(item.size);
+                                let mode = item.mode.clone();
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .when(idx > 0, |v| {
+                                        v.pt_2().border_t_1().border_color(move || theme().border)
+                                    })
+                                    .child(
+                                        text(path)
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .text_color(move || theme().foreground),
+                                    )
+                                    .when(!mode.is_empty(), |r| {
+                                        r.child(ui_badge(mode, BadgeTone::Neutral))
+                                    })
+                                    .child(
+                                        text(size)
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .tabular_nums()
+                                            .text_color(move || theme().foreground),
+                                    )
+                            }),
+                    )
+                    .when(count > 40, |col| {
+                        col.child(view().pt_2().child(ui_button(
+                            move || {
+                                if show_all.get() {
+                                    SharedString::from(t(lang.get(), "findings.show_less"))
+                                } else {
+                                    SharedString::from(tf(
+                                        lang.get(),
+                                        "findings.show_all",
+                                        &[&count.to_string()],
+                                    ))
+                                }
+                            },
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            None,
+                            false,
+                            false,
+                            move || show_all.set(!show_all.get_untracked()),
+                        )))
+                    })
+                    .into_element()
+            })
+            .into_element()
+        },
+    )
+}
+
+fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
+    let count = res.unstripped_binaries.len();
+    let total_debug: u64 = res.unstripped_binaries.iter().map(|b| b.debug_bytes).sum();
+    ui_panel_titled(
+        move || {
+            SharedString::from(format!(
+                "{} ({count})",
+                t(lang.get(), "findings.unstripped")
+            ))
+        },
+        Some(ui_badge(format_bytes(total_debug), BadgeTone::Info).into_element()),
+        view()
+            .flex_col()
+            .gap_2()
+            .children(
+                res.unstripped_binaries
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, bin)| {
+                        let path = bin.path.clone();
+                        let detail = format!(
+                            "{} (debug {})",
+                            format_bytes(bin.size),
+                            format_bytes(bin.debug_bytes)
+                        );
                         view()
                             .flex_row()
                             .items_center()
@@ -484,19 +609,15 @@ fn big_files_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
                                     .font_family(font_mono_family())
                                     .text_color(move || theme().foreground),
                             )
-                            .when(!mode.is_empty(), |r| {
-                                r.child(ui_badge(mode, BadgeTone::Neutral))
-                            })
                             .child(
-                                text(size)
+                                text(detail)
                                     .text_xs()
                                     .font_family(font_mono_family())
                                     .tabular_nums()
-                                    .text_color(move || theme().foreground),
+                                    .text_color(move || theme().muted_foreground),
                             )
-                    },
-                ))
-                .into_element()
-        },
+                    }),
+            )
+            .into_element(),
     )
 }

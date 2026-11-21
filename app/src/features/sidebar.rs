@@ -8,7 +8,8 @@ use crate::features::title_bar::more_actions_menu;
 use crate::i18n::{UiLang, t};
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, text_tertiary, theme,
-    ui_icon, ui_icon_button, ui_recent_item, ui_segmented, ui_sidebar_item,
+    ui_button, ui_context_menu, ui_icon, ui_icon_button, ui_menu_item, ui_recent_item,
+    ui_segmented, ui_sidebar_item,
 };
 
 fn appearance_icon(appearance: Appearance) -> IconName {
@@ -150,15 +151,38 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
     let recent = state.recent_images;
     let route = state.route;
     let current_image = state.current_image;
+    let clear_state = state.clone();
 
     view()
         .flex_1()
         .min_h(px(0.0))
         .flex_col()
         .pt_2()
-        .child(view().px_2p5().child(section_heading(move || {
-            SharedString::from(t(lang.get(), "sidebar.section_recent"))
-        })))
+        .child(
+            view()
+                .px_2p5()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(section_heading(move || {
+                    SharedString::from(t(lang.get(), "sidebar.section_recent"))
+                }))
+                .child(when(
+                    move || !recent.get().is_empty(),
+                    move || {
+                        let s = clear_state.clone();
+                        ui_button(
+                            move || SharedString::from(t(lang.get(), "recent.clear_all")),
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            None,
+                            false,
+                            false,
+                            move || s.clear_recent_images(),
+                        )
+                    },
+                )),
+        )
         .child(
             scroll().flex_1().min_h(px(0.0)).child(
                 view()
@@ -181,31 +205,53 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
                         |entry: &RecentImageEntry| format!("{}@{}", entry.image, entry.arch),
                         move |entry, _| {
                             let click_state = state.clone();
+                            let remove_state = state.clone();
                             let snap = entry.get_untracked();
                             let click_entry = snap.clone();
+                            let remove_img = snap.image.clone();
+                            let remove_arch = snap.arch.clone();
                             let entry_name = snap.image.clone();
-                            let meta = if snap.arch.is_empty() {
-                                format_bytes(snap.total_size)
+                            let stale_suffix = if snap.stale {
+                                format!(" · {}", t(lang.get_untracked(), "recent.stale_badge"))
                             } else {
-                                format!("{} · {}", snap.arch, format_bytes(snap.total_size))
+                                String::new()
+                            };
+                            let meta = if snap.arch.is_empty() {
+                                format!("{}{stale_suffix}", format_bytes(snap.total_size))
+                            } else {
+                                format!(
+                                    "{} · {}{stale_suffix}",
+                                    snap.arch,
+                                    format_bytes(snap.total_size)
+                                )
                             };
                             let score_label = format!("{}%", snap.score);
 
-                            ui_recent_item(
-                                SharedString::from(snap.image),
-                                SharedString::from(meta),
-                                SharedString::from(score_label),
-                                snap.score,
-                                move || {
-                                    route.get() == AppRoute::Inspector
-                                        && current_image.get() == entry_name
-                                },
-                                move || {
-                                    let arch = (!click_entry.arch.is_empty())
-                                        .then(|| click_entry.arch.clone());
-                                    click_state.analyze(click_entry.image.clone(), arch);
-                                },
+                            ui_context_menu(
+                                ui_recent_item(
+                                    SharedString::from(snap.image),
+                                    SharedString::from(meta),
+                                    SharedString::from(score_label),
+                                    snap.score,
+                                    move || {
+                                        route.get() == AppRoute::Inspector
+                                            && current_image.get() == entry_name
+                                    },
+                                    move || {
+                                        let arch = (!click_entry.arch.is_empty())
+                                            .then(|| click_entry.arch.clone());
+                                        click_state.analyze(click_entry.image.clone(), arch);
+                                    },
+                                ),
+                                |_| {},
                             )
+                            .child(ui_menu_item(
+                                move || SharedString::from(t(lang.get(), "recent.remove")),
+                                Some(IconName::Close),
+                                None,
+                                false,
+                                move || remove_state.remove_recent_entry(&remove_img, &remove_arch),
+                            ))
                         },
                     )),
             ),

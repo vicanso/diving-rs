@@ -197,6 +197,7 @@ fn cli_progress_callback(lang: Lang) -> ProgressCallback {
                 )
             );
         }
+        ProgressEvent::LayerCompleted { .. } => {}
         ProgressEvent::UsingStaleCache { as_of } => {
             eprintln!("{}", fill(tr(lang, "prog.cache.stale"), &[&as_of]));
         }

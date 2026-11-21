@@ -7,7 +7,7 @@ use crate::domain::{AppRoute, AppState, InspectorTab, count_layer_file_ops, find
 use crate::features::arch_select_items;
 use crate::i18n::{UiLang, t};
 use crate::ui::{
-    ButtonVariant, IconName, SegmentOption, TabOption, UiSize, radius_control, theme,
+    ButtonVariant, IconName, SegmentOption, SelectItem, TabOption, UiSize, radius_control, theme,
     ui_bare_input_with_ref, ui_borderless_select, ui_button, ui_icon_button, ui_image_pill_button,
     ui_menu, ui_menu_item, ui_menu_separator, ui_segmented, ui_tabs,
 };
@@ -30,6 +30,7 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let local_state = state.clone();
     let cmp_menu_state = state.clone();
     let export_state = state.clone();
+    let export_json_state = state.clone();
     let clean_state = state.clone();
     let gallery_state = state;
 
@@ -82,6 +83,13 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
                 export_state.export_markdown_report();
             }
         },
+    ))
+    .child(ui_menu_item(
+        move || SharedString::from(t(lang.get(), "menu.export_json")),
+        Some(IconName::Download),
+        None,
+        move || has_result.get().is_none(),
+        move || export_json_state.export_json_report(),
     ))
     .child(ui_menu_item(
         move || SharedString::from(t(lang.get(), "menu.clear_cache")),
@@ -277,7 +285,7 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
                             move || {
                                 let name = cur_img.get();
                                 if name.is_empty() {
-                                    SharedString::from("Image")
+                                    SharedString::from(t(lang.get(), "common.image_placeholder"))
                                 } else {
                                     SharedString::from(name)
                                 }
@@ -403,7 +411,24 @@ fn inline_header_search_bar(state: AppState) -> impl IntoElement {
                 .w(px(108.0))
                 .flex_shrink_0()
                 .child(ui_borderless_select(
-                    move || arch_select_items(lang.get()),
+                    {
+                        let res_sig = state.result;
+                        move || {
+                            let ui_lang = lang.get();
+                            if let Some(res) = res_sig.get()
+                                && !res.supported_archs.is_empty()
+                            {
+                                let mut items = Vec::with_capacity(res.supported_archs.len() + 1);
+                                items.push(SelectItem::new("", t(ui_lang, "landing.arch_auto")));
+                                for arch in &res.supported_archs {
+                                    items.push(SelectItem::new(arch.clone(), arch.clone()));
+                                }
+                                items
+                            } else {
+                                arch_select_items(ui_lang)
+                            }
+                        }
+                    },
                     state.arch_input,
                     move || SharedString::from(t(lang.get(), "landing.arch_auto")),
                     "Header target architecture",

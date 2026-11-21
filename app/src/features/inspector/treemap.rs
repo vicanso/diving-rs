@@ -25,7 +25,10 @@ const MIN_SIZE_LABEL_H: f32 = 38.0;
 
 /// Renders the `Treemap` workspace tab with Map/Table toggle, drill-down breadcrumbs, and Top-3 layer legend.
 pub fn treemap_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
-    let root_node = SharedRef::new(build_final_tree(&res.file_tree_list));
+    let root_node = state
+        .final_tree
+        .get_untracked()
+        .unwrap_or_else(|| SharedRef::new(build_final_tree(&res.file_tree_list)));
     let top_layers = top_three_layers(&root_node.0);
 
     view()
