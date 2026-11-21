@@ -257,6 +257,7 @@ CI/CD via GitHub Actions (`.github/workflows/publish.yml`):
 - **macOS (`x86_64`, `aarch64`)**: Native Rust targets (`diving` CLI)
 - **Windows (`x86_64`)**: Native build (`diving` CLI)
 - **Docker**: Multi-arch `diving-web` image (`linux/amd64`, `linux/arm64`) pushed to Docker Hub (`vicanso/diving`)
+- **Nightly** (`.github/workflows/nightly.yml`): Daily scheduled (plus manual `workflow_dispatch`) change-gated rolling `nightly` pre-release publishing CLI binaries, Diving Desktop packages (macOS universal, Linux `x86_64`/`aarch64`, Windows `x86_64`), and multi-arch `vicanso/diving:nightly` whenever `main` advances past the `nightly` tag
 
 Only Docker web builds (`diving-web`) run `make build-web`.
 

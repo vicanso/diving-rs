@@ -1,0 +1,707 @@
+name: "nightly"
+
+on:
+  schedule:
+    # Run once a day at 19:00 UTC (03:00 CST).
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force rebuild even if main has not changed since the last nightly"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: vicanso/diving
+  NSH_VERSION: v0.6.1
+
+jobs:
+  # Gate the build by comparing main HEAD against the commit recorded on the
+  # `nightly` tag, so runs stay idempotent when no commits landed since the
+  # last successful nightly (and catch up automatically if an earlier run failed).
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      head_sha: ${{ steps.check.outputs.head_sha }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+      previous_sha: ${{ steps.check.outputs.previous_sha }}
+      build_date: ${{ steps.check.outputs.build_date }}
+      build_stamp: ${{ steps.check.outputs.build_stamp }}
+      app_version: ${{ steps.check.outputs.app_version }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check for changes since last nightly
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_REBUILD: ${{ inputs.force == true }}
+        run: |
+          set -euo pipefail
+
+          head_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          build_date="$(date -u +%Y-%m-%d)"
+          build_stamp="$(date -u +%Y%m%d)"
+          base_version="$(python3 -c 'import json; print(json.load(open("app/nsh.json"))["version"])')"
+          app_version="${base_version}-nightly.${build_stamp}"
+
+          # Handle both annotated (`refs/tags/nightly^{}`) and lightweight tags.
+          peeled="$(git ls-remote --tags origin 'refs/tags/nightly^{}' | awk '{print $1}')"
+          direct="$(git ls-remote --tags origin 'refs/tags/nightly' | awk '{print $1}')"
+          nightly_sha="${peeled:-$direct}"
+
+          release_exists="false"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" >/dev/null 2>&1; then
+            release_exists="true"
+          fi
+
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            should_build="true"
+            reason="forced via workflow_dispatch"
+          elif [ -z "$nightly_sha" ]; then
+            should_build="true"
+            reason="no previous nightly tag found"
+          elif [ "$release_exists" != "true" ]; then
+            should_build="true"
+            reason="nightly release missing"
+          elif [ "$head_sha" != "$nightly_sha" ]; then
+            should_build="true"
+            reason="main advanced (${nightly_sha:0:7} -> ${short_sha})"
+          else
+            should_build="false"
+            reason="main unchanged since last nightly (${short_sha})"
+          fi
+
+          {
+            echo "should_build=${should_build}"
+            echo "head_sha=${head_sha}"
+            echo "short_sha=${short_sha}"
+            echo "previous_sha=${nightly_sha}"
+            echo "build_date=${build_date}"
+            echo "build_stamp=${build_stamp}"
+            echo "app_version=${app_version}"
+            echo "reason=${reason}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Nightly build check"
+            echo ""
+            echo "- **Build:** \`${should_build}\` (${reason})"
+            echo "- **main HEAD:** \`${short_sha}\` (\`${head_sha}\`)"
+            if [ -n "$nightly_sha" ]; then
+              echo "- **Previous nightly:** \`${nightly_sha:0:7}\` (\`${nightly_sha}\`)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cli-macos:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-cli-macos
+          cache-on-failure: true
+
+      - name: Build CLI binaries (macOS aarch64 + x86_64)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cargo build --release -p diving --target=aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/diving dist/diving-darwin-aarch64
+          cargo build --release -p diving --target=x86_64-apple-darwin
+          cp target/x86_64-apple-darwin/release/diving dist/diving-darwin-x86_64
+
+      - name: Upload CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-cli-macos
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  cli-windows:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-cli-windows
+          cache-on-failure: true
+
+      - name: Build CLI binary (Windows)
+        run: |
+          set -euo pipefail
+          cargo build --release -p diving
+          mkdir -p dist
+          cp target/release/diving.exe dist/diving-windows.exe
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-cli-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  cli-linux:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+            image: messense/rust-musl-cross:x86_64-musl
+            rust_target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            image: messense/rust-musl-cross:aarch64-musl
+            rust_target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - name: Build CLI binary (Linux ${{ matrix.target.arch }})
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.target.image }}
+          options: -v ${{ github.workspace }}:/home/rust/src
+          run: |
+            cargo build --release -p diving
+            mkdir -p dist
+            cp "target/${{ matrix.target.rust_target }}/release/diving" "dist/diving-linux-${{ matrix.target.arch }}"
+            chmod 755 "dist/diving-linux-${{ matrix.target.arch }}"
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-cli-linux-${{ matrix.target.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  app-macos:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    runs-on: macos-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: nightly-app-macos
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: macos-arm64
+        run: |
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && shasum -a 256 -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
+
+      - name: Package Diving Desktop (macOS universal)
+        working-directory: app
+        env:
+          APP_VERSION: ${{ needs.check.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/diving-app-out"
+          stage_dir="${RUNNER_TEMP}/diving-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+          nsh package --target macos --arch universal \
+            --app-version "$APP_VERSION" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+          codesign --verify --deep --strict --verbose=2 "${out_dir}/Diving.app"
+          lipo -archs "${out_dir}/Diving.app/Contents/MacOS/Diving"
+          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
+          if [ -n "$archive" ]; then
+            cp "$archive" "${stage_dir}/Diving-nightly-macos-universal.tar.gz"
+          else
+            COPYFILE_DISABLE=1 tar -czf "${stage_dir}/Diving-nightly-macos-universal.tar.gz" -C "$out_dir" Diving.app
+          fi
+
+      - name: Upload Diving Desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-app-macos
+          path: ${{ runner.temp }}/diving-app-stage/*
+          if-no-files-found: error
+          retention-days: 1
+
+  app-linux:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            nsh_platform: linux-x86_64
+            runs_on: ubuntu-24.04
+          - arch: aarch64
+            nsh_platform: linux-arm64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runs_on }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - name: Install GTK 4 and GStreamer dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: nightly-app-linux-${{ matrix.platform.arch }}
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
+        run: |
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && sha256sum -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
+
+      - name: Package Diving Desktop (Linux ${{ matrix.platform.arch }})
+        working-directory: app
+        env:
+          APP_VERSION: ${{ needs.check.outputs.app_version }}
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/diving-app-out"
+          stage_dir="${RUNNER_TEMP}/diving-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+          nsh package --target linux \
+            --app-version "$APP_VERSION" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
+          if [ -z "$archive" ]; then
+            echo "::error::Expected a .tar.gz package from nsh package --target linux"
+            ls -la "$out_dir"
+            exit 1
+          fi
+          cp "$archive" "${stage_dir}/Diving-nightly-linux-${TARGET_ARCH}.tar.gz"
+
+      - name: Upload Diving Desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-app-linux-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/diving-app-stage/*
+          if-no-files-found: error
+          retention-days: 1
+
+  app-windows:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 60
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: nightly-app-windows
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'nsh-windows-x86_64.zip'
+          $baseUrl = "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION"
+          $dlDir = Join-Path $env:RUNNER_TEMP 'nsh-dl'
+          $nshDir = Join-Path $env:RUNNER_TEMP 'nsh'
+          Remove-Item -Recurse -Force $dlDir, $nshDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $dlDir | Out-Null
+
+          $zip = Join-Path $dlDir $asset
+          $shaFile = "$zip.sha256"
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset" -OutFile $zip
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset.sha256" -OutFile $shaFile
+
+          $expected = ((Get-Content $shaFile -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch for ${asset}: expected $expected, got $actual"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          Remove-Item -Recurse -Force $dlDir
+          $binDir = Join-Path $nshDir 'bin'
+          $nshExe = Join-Path $binDir 'nsh.exe'
+          if (-not (Test-Path $nshExe)) {
+            throw "Missing $nshExe after extracting $asset"
+          }
+          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nshExe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh.exe --version failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package Diving Desktop (Windows x86_64)
+        working-directory: app
+        env:
+          APP_VERSION: ${{ needs.check.outputs.app_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'
+          $stageDir = Join-Path $env:RUNNER_TEMP 'diving-app-stage'
+          Remove-Item -Recurse -Force $outDir, $stageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $outDir, $stageDir | Out-Null
+
+          & nsh.exe package --target windows `
+            --app-version $env:APP_VERSION `
+            --build $env:GITHUB_RUN_NUMBER `
+            --out $outDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh package --target windows failed with exit code $LASTEXITCODE"
+          }
+
+          $zip = Get-ChildItem -Path $outDir -File -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) {
+            Get-ChildItem -Path $outDir | Format-Table Name, Length
+            throw 'Expected a .zip package from nsh package --target windows'
+          }
+          Copy-Item $zip.FullName (Join-Path $stageDir 'Diving-nightly-windows-x86_64.zip')
+
+          $setup = Get-ChildItem -Path $outDir -File -Filter '*-setup.exe' | Select-Object -First 1
+          if ($setup) {
+            Copy-Item $setup.FullName (Join-Path $stageDir 'Diving-nightly-windows-x86_64-setup.exe')
+          }
+
+      - name: Upload Diving Desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-app-windows
+          path: ${{ runner.temp }}/diving-app-stage/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-build:
+    needs: [check]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 90
+    runs-on: ${{ matrix.platform.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: linux/amd64
+            tag: amd64
+            runs_on: ubuntu-24.04
+          - arch: linux/arm64
+            tag: arm64
+            runs_on: ubuntu-24.04-arm
+    steps:
+      - name: Expand swap space
+        run: |
+          set -euo pipefail
+          df -lh
+          if [ -d /usr/local/lib/android ]; then
+            du -sh /usr/local/lib/android
+            sudo rm -rf /usr/local/lib/android
+          fi
+          existing_swap="$(swapon --show=NAME --noheadings | tail -n 1 || true)"
+          if [ -n "$existing_swap" ]; then
+            sudo swapoff "$existing_swap"
+            sudo rm -f "$existing_swap"
+          fi
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          swapon --show
+          df -lh
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Build and push by digest
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform.arch }}
+          cache-from: type=gha,scope=nightly-${{ matrix.platform.tag }}
+          cache-to: type=gha,mode=max,scope=nightly-${{ matrix.platform.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.check.outputs.head_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          IMAGE_DIGEST: ${{ steps.docker_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${IMAGE_DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Gate :nightly tag update on every binary & desktop package succeeding so
+  # Docker Hub and the GitHub `nightly` release always stay on the same commit.
+  docker-merge:
+    needs: [check, cli-macos, cli-windows, cli-linux, app-macos, app-windows, app-linux, docker-build]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Create and push multi-arch nightly manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          sources=()
+          for f in *; do
+            [ -f "$f" ] || continue
+            sources+=("${IMAGE_NAME}@sha256:${f}")
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "::error::No image digests found to merge"
+            exit 1
+          fi
+          docker buildx imagetools create -t "${IMAGE_NAME}:nightly" "${sources[@]}"
+          docker buildx imagetools inspect "${IMAGE_NAME}:nightly"
+
+  publish-release:
+    needs: [check, cli-macos, cli-windows, cli-linux, app-macos, app-windows, app-linux, docker-merge]
+    if: needs.check.outputs.should_build == 'true'
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: nightly-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          (cd release-assets && sha256sum ./* | sed 's|  \./|  |' > "${RUNNER_TEMP}/SHA256SUMS.txt")
+          mv "${RUNNER_TEMP}/SHA256SUMS.txt" release-assets/SHA256SUMS.txt
+          ls -lh release-assets
+
+      - name: Build release notes
+        env:
+          HEAD_SHA: ${{ needs.check.outputs.head_sha }}
+          SHORT_SHA: ${{ needs.check.outputs.short_sha }}
+          PREVIOUS_SHA: ${{ needs.check.outputs.previous_sha }}
+          BUILD_DATE: ${{ needs.check.outputs.build_date }}
+          APP_VERSION: ${{ needs.check.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          {
+            printf "Automated rolling nightly build from \`main\`.\n\n"
+            printf "> **Note:** This pre-release is overwritten daily whenever \`main\` has new commits.\n\n"
+            printf -- '- **Build date (UTC):** %s\n' "$BUILD_DATE"
+            printf -- "- **Commit:** \`%s\` (%s)\n" "$SHORT_SHA" "$HEAD_SHA"
+            printf -- "- **Desktop version:** \`%s\` (build \`%s\`)\n" "$APP_VERSION" "$GITHUB_RUN_NUMBER"
+            printf -- "- **Docker image:** \`docker pull %s:nightly\` (\`linux/amd64\`, \`linux/arm64\`)\n" "$IMAGE_NAME"
+            if [ -n "$PREVIOUS_SHA" ] && [ "$PREVIOUS_SHA" != "$HEAD_SHA" ]; then
+              if git merge-base --is-ancestor "$PREVIOUS_SHA" "$HEAD_SHA" 2>/dev/null; then
+                changes="$(git log --no-merges --max-count=50 --pretty=format:'- %h %s' "${PREVIOUS_SHA}..${HEAD_SHA}")"
+                total_count="$(git rev-list --no-merges --count "${PREVIOUS_SHA}..${HEAD_SHA}")"
+                if [ -n "$changes" ]; then
+                  printf "\n### Changes since \`%s\`\n\n%s\n" "${PREVIOUS_SHA:0:7}" "$changes"
+                  if [ "$total_count" -gt 50 ]; then
+                    printf '\n_…and %s more commits._\n' "$((total_count - 50))"
+                  fi
+                fi
+              fi
+            fi
+          } > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
+
+      - name: Publish rolling nightly Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ needs.check.outputs.head_sha }}
+          SHORT_SHA: ${{ needs.check.outputs.short_sha }}
+          BUILD_DATE: ${{ needs.check.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          if gh release view nightly -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload nightly release-assets/* -R "$GITHUB_REPOSITORY" --clobber
+            existing_assets="$(gh release view nightly -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
+            while IFS= read -r asset; do
+              [ -n "$asset" ] || continue
+              if [ ! -f "release-assets/${asset}" ]; then
+                echo "Removing stale asset: ${asset}"
+                gh release delete-asset nightly "$asset" -R "$GITHUB_REPOSITORY" --yes
+              fi
+            done <<< "$existing_assets"
+            # Advance the nightly tag only after all uploads succeed so failed runs re-trigger next day.
+            git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            gh release edit nightly -R "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --latest=false \
+              --target "$HEAD_SHA" \
+              --title "Nightly (${BUILD_DATE} · ${SHORT_SHA})" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          else
+            git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            gh release create nightly release-assets/* -R "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --latest=false \
+              --target "$HEAD_SHA" \
+              --title "Nightly (${BUILD_DATE} · ${SHORT_SHA})" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          fi
+
+          {
+            echo "### Published nightly pre-release"
+            echo ""
+            echo "- **URL:** https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly"
+            echo "- **Commit:** \`${SHORT_SHA}\` (\`${HEAD_SHA}\`)"
+            echo "- **Docker:** \`${IMAGE_NAME}:nightly\`"
+            echo ""
+            echo "#### Assets"
+            for f in release-assets/*; do
+              printf -- "- \`%s\`\n" "$(basename "$f")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
