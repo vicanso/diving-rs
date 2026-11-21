@@ -266,15 +266,33 @@ fn diff_loading_view(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let base = state.diff_base_ref.get_untracked();
     let target = state.diff_target_ref.get_untracked();
+    let base_progress = state.diff_base_progress;
+    let target_progress = state.diff_target_progress;
+    let cancel_state = state;
 
     view().flex_1().p_6().items_center().justify_center().child(
         view().w_full().max_w(px(620.0)).child(ui_panel_titled(
             move || SharedString::from(t(lang.get(), "diff.title")),
             Some(
-                text(format!("{base} → {target}"))
-                    .text_xs()
-                    .font_family(font_mono_family())
-                    .text_color(move || theme().muted_foreground)
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        text(format!("{base} → {target}"))
+                            .text_xs()
+                            .font_family(font_mono_family())
+                            .text_color(move || theme().muted_foreground),
+                    )
+                    .child(ui_button(
+                        move || SharedString::from(t(lang.get(), "landing.cancel")),
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        Some(IconName::Close),
+                        false,
+                        false,
+                        move || cancel_state.cancel_diff(),
+                    ))
                     .into_element(),
             ),
             view()
@@ -285,6 +303,30 @@ fn diff_loading_view(state: AppState) -> impl IntoElement {
                         .text_sm()
                         .text_color(move || theme().muted_foreground),
                 )
+                .child(when(
+                    move || base_progress.get().is_some(),
+                    move || {
+                        text(move || {
+                            let msg = base_progress.get().unwrap_or_default();
+                            tf(lang.get(), "diff.base_progress", &[&msg])
+                        })
+                        .text_xs()
+                        .font_family(font_mono_family())
+                        .text_color(move || theme().muted_foreground)
+                    },
+                ))
+                .child(when(
+                    move || target_progress.get().is_some(),
+                    move || {
+                        text(move || {
+                            let msg = target_progress.get().unwrap_or_default();
+                            tf(lang.get(), "diff.target_progress", &[&msg])
+                        })
+                        .text_xs()
+                        .font_family(font_mono_family())
+                        .text_color(move || theme().muted_foreground)
+                    },
+                ))
                 .child(ui_skeleton(px(480.0), px(16.0)))
                 .child(ui_skeleton(px(380.0), px(16.0)))
                 .child(ui_skeleton(px(420.0), px(16.0))),

@@ -16,7 +16,11 @@ use crate::features::{
     file_preview_sheet, inspector_workspace, install_desktop_menus_and_keys, landing_view,
     local_picker_dialog,
 };
-use crate::ui::{UiGallery, register_fonts, theme, ui_gallery};
+use crate::i18n::{t, tf};
+use crate::ui::{
+    BannerTone, ButtonVariant, IconName, UiGallery, UiSize, font_mono_family, register_fonts,
+    theme, ui_banner, ui_button, ui_gallery, ui_progress_bar,
+};
 
 /// The app's UI set (`nsh.json` `"rust"`): what a TSX entry may import from
 /// `diving/native` (`README.md`, "Adding a TSX entry").
@@ -50,6 +54,8 @@ pub fn App() -> impl IntoElement {
     let sidebar_open = state.app_sidebar_open;
     let sidebar_state = state.clone();
     let route_state = state.clone();
+    let config_state = state.clone();
+    let progress_state = state.clone();
 
     view()
         .relative()
@@ -69,6 +75,17 @@ pub fn App() -> impl IntoElement {
                 .flex_col()
                 .bg(move || theme().background)
                 .child(content_header_bar(state.clone()))
+                .child(when(
+                    move || config_state.config_warning.get().is_some(),
+                    move || config_warning_banner(config_state.clone()),
+                ))
+                .child(when(
+                    move || {
+                        progress_state.is_loading.get()
+                            && progress_state.route.get() != AppRoute::Landing
+                    },
+                    move || global_progress_strip(progress_state.clone()),
+                ))
                 .child(
                     view()
                         .flex_1()
@@ -88,4 +105,103 @@ pub fn App() -> impl IntoElement {
         .child(compare_dialog(state.clone()))
         .child(local_picker_dialog(state.clone()))
         .child(command_palette_overlay(state))
+}
+
+fn config_warning_banner(state: AppState) -> impl IntoElement {
+    let lang = state.lang;
+    let warning = state.config_warning;
+    let dismiss_state = state;
+
+    view().px_4().pt_2().child(ui_banner(
+        BannerTone::Warning,
+        move || {
+            let err = warning.get().unwrap_or_default();
+            SharedString::from(tf(lang.get(), "config.fallback_warning", &[&err]))
+        },
+        Some(
+            ui_button(
+                move || SharedString::from(t(lang.get(), "common.close")),
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                Some(IconName::Close),
+                false,
+                false,
+                move || dismiss_state.dismiss_config_warning(),
+            )
+            .into_element(),
+        ),
+    ))
+}
+
+fn global_progress_strip(state: AppState) -> impl IntoElement {
+    let lang = state.lang;
+    let pending = state.pending_image;
+    let progress_text = state.progress_text;
+    let cancel_state = state.clone();
+
+    view()
+        .w_full()
+        .px_4()
+        .py_2()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .bg(move || theme().muted)
+        .border_b_1()
+        .border_color(move || theme().border)
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_col()
+                .gap_1()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            text(move || {
+                                let img = pending.get().unwrap_or_default();
+                                if img.is_empty() {
+                                    SharedString::from(t(lang.get(), "landing.analyzing"))
+                                } else {
+                                    SharedString::from(tf(
+                                        lang.get(),
+                                        "progress.analyzing_image",
+                                        &[&img],
+                                    ))
+                                }
+                            })
+                            .text_xs()
+                            .font_family(font_mono_family())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || theme().foreground),
+                        )
+                        .child(
+                            text(move || {
+                                progress_text.get().unwrap_or_else(|| {
+                                    t(lang.get(), "landing.analyzing").to_owned()
+                                })
+                            })
+                            .text_xs()
+                            .text_color(move || theme().muted_foreground),
+                        ),
+                )
+                .child(ui_progress_bar(
+                    state.progress_ratio,
+                    state.progress_indeterminate,
+                    "Image analysis progress",
+                )),
+        )
+        .child(ui_button(
+            move || SharedString::from(t(lang.get(), "landing.cancel")),
+            ButtonVariant::Outline,
+            UiSize::Xs,
+            Some(IconName::Close),
+            false,
+            false,
+            move || cancel_state.cancel_analysis(),
+        ))
 }

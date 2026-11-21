@@ -23,7 +23,9 @@ use crate::domain::model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, InspectorTab,
     LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes, upsert_recent,
 };
-use crate::domain::service::{AnalyzeMessage, AnalyzeTaskHandle, DiffRunResult, DivingService};
+use crate::domain::service::{
+    AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
+};
 use crate::i18n::{UiLang, t, tf};
 
 const KEY_LANG: &str = "diving.lang";
@@ -36,6 +38,7 @@ const MAX_RECENT_IMAGES: usize = 12;
 /// Metadata identifying the currently inspected file in `FilePreviewSheet`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewTarget {
+    pub image_ref: String,
     pub layer_index: usize,
     pub layer_digest: String,
     pub media_type: String,
@@ -77,6 +80,8 @@ pub struct AppState {
     pub arch_input: Signal<Option<SharedString>>,
     pub header_search_open: Signal<bool>,
     pub current_image: Signal<String>,
+    pub pending_image: Signal<Option<String>>,
+    pub config_warning: Signal<Option<String>>,
     pub request_id: Signal<u64>,
     pub is_loading: Signal<bool>,
     pub show_preview_card: Signal<bool>,
@@ -120,6 +125,8 @@ pub struct AppState {
     pub compare_target_input: Signal<String>,
     pub compare_target_arch: Signal<Option<SharedString>>,
     pub diff_loading: Signal<bool>,
+    pub diff_base_progress: Signal<Option<String>>,
+    pub diff_target_progress: Signal<Option<String>>,
     pub diff_error: Signal<Option<DiffErrorState>>,
     pub diff_result: Signal<Option<SharedRef<ImageDiff>>>,
     pub diff_base_ref: Signal<String>,
@@ -179,6 +186,8 @@ impl AppState {
                 .unwrap_or(true)
         };
 
+        let config_warning = service.config_warning().map(str::to_owned);
+
         Self {
             service,
             route: signal(AppRoute::Landing),
@@ -191,6 +200,8 @@ impl AppState {
             arch_input: signal(None),
             header_search_open: signal(false),
             current_image: signal(String::new()),
+            pending_image: signal(None),
+            config_warning: signal(config_warning),
             request_id: signal(0),
             is_loading: signal(false),
             show_preview_card: signal(false),
@@ -234,6 +245,8 @@ impl AppState {
             compare_target_input: signal(String::new()),
             compare_target_arch: signal(None),
             diff_loading: signal(false),
+            diff_base_progress: signal(None),
+            diff_target_progress: signal(None),
             diff_error: signal(None),
             diff_result: signal(None),
             diff_base_ref: signal(String::new()),
@@ -307,7 +320,18 @@ impl AppState {
         let _ = Storage::set_item(KEY_APP_SIDEBAR_OPEN, if next { "true" } else { "false" });
     }
 
+    pub fn dismiss_config_warning(&self) {
+        self.config_warning.set(None);
+    }
+
+    pub fn dismiss_analyze_error(&self) {
+        self.analyze_error.set(None);
+    }
+
     pub fn navigate_home(&self) {
+        if self.diff_loading.get_untracked() {
+            self.cancel_diff();
+        }
         self.preview_sheet_open.set(false);
         self.header_search_open.set(false);
         self.route.set(AppRoute::Landing);
@@ -356,6 +380,30 @@ impl AppState {
         arch: Option<String>,
         skip_memory_cache: bool,
     ) {
+        self.analyze_internal(image, arch, skip_memory_cache, true);
+    }
+
+    /// Retries the currently loaded stale image directly against the registry without offline fallback.
+    pub fn retry_stale_image(&self) {
+        let img = self.current_image.get_untracked();
+        if img.is_empty() {
+            return;
+        }
+        let arch = self
+            .result
+            .get_untracked()
+            .map(|r| r.arch.clone())
+            .filter(|a| !a.is_empty());
+        self.analyze_internal(img, arch, true, false);
+    }
+
+    fn analyze_internal(
+        &self,
+        image: String,
+        arch: Option<String>,
+        skip_memory_cache: bool,
+        fallback_to_last_known: bool,
+    ) {
         let trimmed = image.trim().to_owned();
         if trimmed.is_empty() {
             return;
@@ -365,7 +413,7 @@ impl AppState {
         let next_id = self.request_id.get_untracked().wrapping_add(1);
         self.request_id.set(next_id);
         self.image_input.set(trimmed.clone());
-        self.current_image.set(trimmed.clone());
+        self.pending_image.set(Some(trimmed.clone()));
         self.analyze_error.set(None);
         self.preview.set(None);
         self.show_preview_card.set(false);
@@ -385,6 +433,7 @@ impl AppState {
             lang.to_core_lang(),
             true,
             skip_memory_cache,
+            fallback_to_last_known,
         );
         *self.active_task.borrow_mut() = Some(handle);
 
@@ -419,6 +468,7 @@ impl AppState {
                     }
                     AnalyzeMessage::Failed(err) => {
                         state.is_loading.set(false);
+                        state.pending_image.set(None);
                         state.show_preview_card.set(false);
                         state.progress_text.set(None);
                         state.analyze_error.set(Some(err));
@@ -437,28 +487,16 @@ impl AppState {
     ) {
         let lang = self.lang.get_untracked();
         match ev {
-            ProgressEvent::Authenticating { registry } => {
+            ProgressEvent::Authenticating { .. } | ProgressEvent::FetchingManifest => {
                 self.progress_indeterminate.set(true);
-                self.progress_text
-                    .set(Some(tf(lang, "progress.auth", &[registry])));
             }
-            ProgressEvent::FetchingManifest => {
-                self.progress_indeterminate.set(true);
-                self.progress_text
-                    .set(Some(t(lang, "progress.manifest").to_owned()));
-            }
-            ProgressEvent::LayersDiscovered { count, total_bytes } => {
+            ProgressEvent::LayersDiscovered { count, .. } => {
                 *total_layers = (*count).max(1);
                 *finished_layers = 0;
                 self.progress_indeterminate.set(false);
                 self.progress_ratio.set(0.05);
-                self.progress_text.set(Some(tf(
-                    lang,
-                    "progress.layers_discovered",
-                    &[&count.to_string(), &format_bytes(*total_bytes)],
-                )));
             }
-            ProgressEvent::DownloadingLayer { digest, size, .. } => {
+            ProgressEvent::DownloadingLayer { .. } | ProgressEvent::LayerCacheHit { .. } => {
                 *finished_layers += 1;
                 if *total_layers > 0 {
                     let ratio =
@@ -466,39 +504,15 @@ impl AppState {
                     self.progress_indeterminate.set(false);
                     self.progress_ratio.set(ratio);
                 }
-                let short = short_digest(digest);
-                self.progress_text.set(Some(tf(
-                    lang,
-                    "progress.downloading",
-                    &[&format!("{short} · {}", format_bytes(*size))],
-                )));
-            }
-            ProgressEvent::LayerCacheHit { digest, size, .. } => {
-                *finished_layers += 1;
-                if *total_layers > 0 {
-                    let ratio =
-                        ((*finished_layers as f32) / (*total_layers as f32)).clamp(0.05, 0.95);
-                    self.progress_indeterminate.set(false);
-                    self.progress_ratio.set(ratio);
-                }
-                let short = short_digest(digest);
-                self.progress_text.set(Some(tf(
-                    lang,
-                    "progress.layer_cached",
-                    &[&format!("{short} · {}", format_bytes(*size))],
-                )));
             }
             ProgressEvent::AnalysisCacheHit { .. } => {
                 self.progress_indeterminate.set(false);
                 self.progress_ratio.set(1.0);
-                self.progress_text
-                    .set(Some(t(lang, "progress.cache_hit").to_owned()));
             }
-            ProgressEvent::UsingStaleCache { as_of } => {
-                self.progress_text
-                    .set(Some(tf(lang, "stale.banner", &[as_of])));
-            }
+            ProgressEvent::UsingStaleCache { .. } => {}
         }
+        self.progress_text
+            .set(Some(format_progress_event_text(lang, ev)));
     }
 
     fn finish_analysis(
@@ -544,6 +558,7 @@ impl AppState {
         res: Arc<DockerAnalyzeResult>,
     ) {
         let first_non_empty = res.layers.iter().position(|l| !l.empty).unwrap_or(0);
+        self.pending_image.set(None);
         self.current_image.set(image.to_owned());
         self.image_input.set(image.to_owned());
         self.result.set(Some(res));
@@ -578,8 +593,20 @@ impl AppState {
         self.request_id
             .set(self.request_id.get_untracked().wrapping_add(1));
         self.is_loading.set(false);
+        self.pending_image.set(None);
         self.show_preview_card.set(false);
         self.progress_text.set(None);
+    }
+
+    pub fn cancel_diff(&self) {
+        if let Some(handle) = self.active_diff_task.borrow_mut().take() {
+            handle.abort();
+        }
+        self.diff_request_id
+            .set(self.diff_request_id.get_untracked().wrapping_add(1));
+        self.diff_loading.set(false);
+        self.diff_base_progress.set(None);
+        self.diff_target_progress.set(None);
     }
 
     fn abort_active_task(&self) {
@@ -645,10 +672,12 @@ impl AppState {
             return;
         };
 
+        let image_ref = self.current_image.get_untracked();
         self.selected_file_path.set(Some(row.key.clone()));
         let req_id = self.preview_request_id.get_untracked().wrapping_add(1);
         self.preview_request_id.set(req_id);
         self.preview_target.set(Some(PreviewTarget {
+            image_ref: image_ref.clone(),
             layer_index: layer_idx,
             layer_digest: layer.digest.clone(),
             media_type: layer.media_type.clone(),
@@ -664,7 +693,7 @@ impl AppState {
         self.preview_sheet_open.set(true);
 
         let rx = self.service.load_file_preview(
-            self.current_image.get_untracked(),
+            image_ref,
             layer.digest.clone(),
             layer.media_type.clone(),
             row.key.clone(),
@@ -690,10 +719,26 @@ impl AppState {
         let Some(target) = self.preview_target.get_untracked() else {
             return;
         };
-        self.save_layer_file_at(target.layer_digest, target.media_type, target.path);
+        self.save_layer_file_for_image(
+            target.image_ref,
+            target.layer_digest,
+            target.media_type,
+            target.path,
+        );
     }
 
     pub fn save_layer_file_at(&self, layer_digest: String, media_type: String, file_path: String) {
+        let image_ref = self.current_image.get_untracked();
+        self.save_layer_file_for_image(image_ref, layer_digest, media_type, file_path);
+    }
+
+    fn save_layer_file_for_image(
+        &self,
+        image_ref: String,
+        layer_digest: String,
+        media_type: String,
+        file_path: String,
+    ) {
         let default_name = Path::new(&file_path)
             .file_name()
             .and_then(|s| s.to_str())
@@ -709,7 +754,7 @@ impl AppState {
                 return;
             };
             let rx = state.service.export_layer_file(
-                state.current_image.get_untracked(),
+                image_ref,
                 layer_digest,
                 media_type,
                 file_path,
@@ -818,7 +863,7 @@ impl AppState {
                 let base = self.diff_base_ref.get_untracked();
                 let target = self.diff_target_ref.get_untracked();
                 if !base.is_empty() && !target.is_empty() {
-                    self.start_compare_pair(
+                    self.start_compare_pair_with_options(
                         base,
                         self.compare_base_arch
                             .get_untracked()
@@ -827,11 +872,19 @@ impl AppState {
                         self.compare_target_arch
                             .get_untracked()
                             .map(|s| s.as_str().to_owned()),
+                        true,
                     );
                 }
             }
             AppRoute::Inspector | AppRoute::Landing => {
-                let img = self.current_image.get_untracked();
+                let img = {
+                    let cur = self.current_image.get_untracked();
+                    if !cur.is_empty() {
+                        cur
+                    } else {
+                        self.image_input.get_untracked().trim().to_owned()
+                    }
+                };
                 if !img.is_empty() {
                     let arch = self
                         .arch_input
@@ -881,6 +934,17 @@ impl AppState {
         target: String,
         target_arch: Option<String>,
     ) {
+        self.start_compare_pair_with_options(base, base_arch, target, target_arch, false);
+    }
+
+    pub fn start_compare_pair_with_options(
+        &self,
+        base: String,
+        base_arch: Option<String>,
+        target: String,
+        target_arch: Option<String>,
+        skip_memory_cache: bool,
+    ) {
         let base = base.trim().to_owned();
         let target = target.trim().to_owned();
         if base.is_empty() || target.is_empty() {
@@ -906,6 +970,8 @@ impl AppState {
         self.diff_base_ref.set(base.clone());
         self.diff_target_ref.set(target.clone());
         self.diff_error.set(None);
+        self.diff_base_progress.set(None);
+        self.diff_target_progress.set(None);
         self.diff_loading.set(true);
         self.diff_file_tab.set(DiffFileTab::Added);
         self.compare_dialog_open.set(false);
@@ -913,44 +979,67 @@ impl AppState {
         self.route.set(AppRoute::Diff);
 
         let lang = self.lang.get_untracked().to_core_lang();
-        let (handle, rx) = self
-            .service
-            .start_diff(base, base_arch, target, target_arch, lang);
+        let (handle, mut rx) = self.service.start_diff(
+            base,
+            base_arch,
+            target,
+            target_arch,
+            lang,
+            skip_memory_cache,
+        );
         *self.active_diff_task.borrow_mut() = Some(handle);
 
         let state = self.clone();
         self.spawn_app_task(async move {
-            let Ok(outcome) = rx.await else {
-                return;
-            };
-            if state.diff_request_id.get_untracked() != req_id {
-                return;
-            }
-            state.diff_loading.set(false);
-            match outcome {
-                DiffRunResult::Ready { diff, base, target } => {
-                    state.diff_base_result.set(Some(base));
-                    state.diff_target_result.set(Some(target));
-                    state.diff_result.set(Some(SharedRef(diff)));
-                    state.diff_error.set(None);
+            while let Some(msg) = rx.recv().await {
+                if state.diff_request_id.get_untracked() != req_id {
+                    break;
                 }
-                DiffRunResult::BaseFailed(err) => {
-                    state.diff_error.set(Some(DiffErrorState {
-                        base: Some(err),
-                        target: None,
-                    }));
-                }
-                DiffRunResult::TargetFailed(err) => {
-                    state.diff_error.set(Some(DiffErrorState {
-                        base: None,
-                        target: Some(err),
-                    }));
-                }
-                DiffRunResult::BothFailed { base, target } => {
-                    state.diff_error.set(Some(DiffErrorState {
-                        base: Some(base),
-                        target: Some(target),
-                    }));
+                match msg {
+                    DiffMessage::BaseProgress(ev) => {
+                        let ui_lang = state.lang.get_untracked();
+                        state
+                            .diff_base_progress
+                            .set(Some(format_progress_event_text(ui_lang, &ev)));
+                    }
+                    DiffMessage::TargetProgress(ev) => {
+                        let ui_lang = state.lang.get_untracked();
+                        state
+                            .diff_target_progress
+                            .set(Some(format_progress_event_text(ui_lang, &ev)));
+                    }
+                    DiffMessage::Finished(outcome) => {
+                        state.diff_loading.set(false);
+                        state.diff_base_progress.set(None);
+                        state.diff_target_progress.set(None);
+                        match outcome {
+                            DiffRunResult::Ready { diff, base, target } => {
+                                state.diff_base_result.set(Some(base));
+                                state.diff_target_result.set(Some(target));
+                                state.diff_result.set(Some(SharedRef(diff)));
+                                state.diff_error.set(None);
+                            }
+                            DiffRunResult::BaseFailed(err) => {
+                                state.diff_error.set(Some(DiffErrorState {
+                                    base: Some(err),
+                                    target: None,
+                                }));
+                            }
+                            DiffRunResult::TargetFailed(err) => {
+                                state.diff_error.set(Some(DiffErrorState {
+                                    base: None,
+                                    target: Some(err),
+                                }));
+                            }
+                            DiffRunResult::BothFailed { base, target } => {
+                                state.diff_error.set(Some(DiffErrorState {
+                                    base: Some(base),
+                                    target: Some(target),
+                                }));
+                            }
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -1062,6 +1151,36 @@ impl AppState {
         };
         self.local_picker_open.set(false);
         self.analyze(selected, None);
+    }
+}
+
+fn format_progress_event_text(lang: UiLang, ev: &ProgressEvent) -> String {
+    match ev {
+        ProgressEvent::Authenticating { registry } => tf(lang, "progress.auth", &[registry]),
+        ProgressEvent::FetchingManifest => t(lang, "progress.manifest").to_owned(),
+        ProgressEvent::LayersDiscovered { count, total_bytes } => tf(
+            lang,
+            "progress.layers_discovered",
+            &[&count.to_string(), &format_bytes(*total_bytes)],
+        ),
+        ProgressEvent::DownloadingLayer { digest, size, .. } => {
+            let short = short_digest(digest);
+            tf(
+                lang,
+                "progress.downloading",
+                &[&format!("{short} · {}", format_bytes(*size))],
+            )
+        }
+        ProgressEvent::LayerCacheHit { digest, size, .. } => {
+            let short = short_digest(digest);
+            tf(
+                lang,
+                "progress.layer_cached",
+                &[&format!("{short} · {}", format_bytes(*size))],
+            )
+        }
+        ProgressEvent::AnalysisCacheHit { .. } => t(lang, "progress.cache_hit").to_owned(),
+        ProgressEvent::UsingStaleCache { as_of } => tf(lang, "stale.banner", &[as_of]),
     }
 }
 

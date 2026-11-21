@@ -15,7 +15,7 @@ pub use image_ref::{
     REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 pub(crate) use layer::TarIndex;
-pub use layer::{get_file_content_from_layer, get_file_head_from_layer};
+pub use layer::{get_file_content_from_layer, get_file_head_from_layer, stream_file_from_layer};
 pub use local::{list_local_images, parse_local_images_output, LocalContainerImage, LocalRuntime};
 pub use model::{
     AnalyzeReport, BigModifiedFileInfo, DockerAnalyzeResult, DockerAnalyzeSummary,
@@ -28,6 +28,7 @@ pub use oci_image::{
 pub(crate) use pipeline::{
     analyze_once, analyze_or_last_known, preview_image, PipelineContext, PipelineOptions,
 };
+pub use registry::is_private_or_loopback_host;
 pub(crate) use registry::RegistryCaches;
 pub(crate) use registry_auth::{load_docker_config, DockerConfig};
 pub use registry_auth::{registry_host, resolve_explicit, RegistryCredentials};

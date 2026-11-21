@@ -35,6 +35,7 @@ pub(crate) struct PipelineContext {
     pub(crate) docker_config: Option<Arc<DockerConfig>>,
     pub(crate) sensitive_patterns: Arc<SensitivePatterns>,
     pub(crate) layer_concurrency: Option<usize>,
+    pub(crate) block_private_hosts: bool,
 }
 
 pub(crate) struct PipelineOptions {
@@ -56,6 +57,7 @@ fn new_client(ctx: &PipelineContext, registry: &str) -> RegistryClient {
         caches: ctx.registry_caches.clone(),
         docker_config: ctx.docker_config.clone(),
         layer_concurrency: ctx.layer_concurrency,
+        block_private_hosts: ctx.block_private_hosts,
         local_index: Arc::new(TokioOnceCell::new()),
     }
 }

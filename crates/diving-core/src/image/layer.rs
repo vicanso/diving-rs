@@ -9,6 +9,9 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Take};
 use std::path::Path;
 use tar::{Archive, EntryType};
 
+const MAX_TAR_ENTRIES: usize = 500_000;
+const MAX_LAYER_UNPACK_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Wraps any `Read` and counts the total bytes read, letting us measure the
 /// decompressed size without buffering the full output.
 struct CountingReader<R: Read> {
@@ -25,7 +28,15 @@ impl<R: Read> CountingReader<R> {
 impl<R: Read> Read for CountingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.count += n as u64;
+        self.count = self.count.saturating_add(n as u64);
+        if self.count > MAX_LAYER_UNPACK_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "layer decompressed size exceeds safety limit ({MAX_LAYER_UNPACK_BYTES} bytes)"
+                ),
+            ));
+        }
         Ok(n)
     }
 }
@@ -106,6 +117,11 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
         }
         let mode =
             (header.mode().context(TarSnafu {})? & 0o7777) | file_type_bits(header.entry_type());
+        if files.len() >= MAX_TAR_ENTRIES {
+            return Err(Error::Other {
+                message: format!("layer exceeds maximum tar entry count ({MAX_TAR_ENTRIES})"),
+            });
+        }
         files.push(ImageFileInfo {
             path,
             link,
@@ -349,6 +365,46 @@ pub fn get_file_content_from_layer<R: Read>(
         let mut content = Vec::with_capacity(size as usize);
         entry.read_to_end(&mut content).context(IoSnafu {})?;
         Ok(content)
+    })
+}
+
+/// Stream a file out of a layer in chunks without buffering the entire file in RAM.
+pub fn stream_file_from_layer<R: Read, F>(
+    reader: R,
+    media_type: &str,
+    filename: &str,
+    max_bytes: u64,
+    mut on_chunk: F,
+) -> Result<()>
+where
+    F: FnMut(&[u8]) -> Result<()>,
+{
+    with_layer_entry(reader, media_type, filename, |entry, size| {
+        if size > max_bytes {
+            return Err(Error::FileTooLarge {
+                file: filename.trim_start_matches("./").to_string(),
+                size,
+                limit: max_bytes,
+            });
+        }
+        let mut buf = [0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let n = entry.read(&mut buf).context(IoSnafu {})?;
+            if n == 0 {
+                break;
+            }
+            total = total.saturating_add(n as u64);
+            if total > max_bytes {
+                return Err(Error::FileTooLarge {
+                    file: filename.trim_start_matches("./").to_string(),
+                    size: total,
+                    limit: max_bytes,
+                });
+            }
+            on_chunk(&buf[..n])?;
+        }
+        Ok(())
     })
 }
 

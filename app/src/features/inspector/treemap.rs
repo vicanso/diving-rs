@@ -195,6 +195,21 @@ fn treemap_body(
     top_layers: Vec<(usize, u64)>,
 ) -> impl IntoElement {
     let top_layer_ids: Vec<usize> = top_layers.into_iter().map(|(id, _)| id).collect();
+    let size_state = state.clone();
+    let canvas_size = computed(move || {
+        let win = window();
+        let app_sidebar_w = if size_state.app_sidebar_open.get() {
+            APP_SIDEBAR_WIDTH
+        } else {
+            0.0
+        };
+        let raw_w = (win.width.0 - app_sidebar_w - size_state.sidebar_width.get().0 - 40.0)
+            .clamp(320.0, 1280.0);
+        let raw_h = (win.height.0 - 216.0).clamp(260.0, 680.0);
+        let w = ((raw_w / 24.0).floor() * 24.0).max(320.0) as u32;
+        let h = ((raw_h / 24.0).floor() * 24.0).max(260.0) as u32;
+        (w, h)
+    });
 
     view()
         .flex_1()
@@ -222,8 +237,16 @@ fn treemap_body(
 
             match state.treemap_mode.get() {
                 TreemapViewMode::Map => {
-                    treemap_canvas_view(state.clone(), res.clone(), current, &top_layer_ids)
-                        .into_element()
+                    let (w, h) = canvas_size.get();
+                    treemap_canvas_view(
+                        state.clone(),
+                        res.clone(),
+                        current,
+                        &top_layer_ids,
+                        w as f32,
+                        h as f32,
+                    )
+                    .into_element()
                 }
                 TreemapViewMode::Table => {
                     treemap_table_view(state.clone(), res.clone(), current).into_element()
@@ -237,15 +260,9 @@ fn treemap_canvas_view(
     res: Arc<DockerAnalyzeResult>,
     node: &FsNode,
     top_layer_ids: &[usize],
+    w: f32,
+    h: f32,
 ) -> impl IntoElement {
-    let win = window();
-    let app_sidebar_w = if state.app_sidebar_open.get() {
-        APP_SIDEBAR_WIDTH
-    } else {
-        0.0
-    };
-    let w = (win.width.0 - app_sidebar_w - state.sidebar_width.get().0 - 40.0).clamp(320.0, 1280.0);
-    let h = (win.height.0 - 216.0).clamp(260.0, 680.0);
     let tiles = layout_treemap_tiles(node, w, h, top_layer_ids);
     let parent_size = node.size.max(1);
     let leave_state = state.clone();

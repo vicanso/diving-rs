@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 use crate::error::HTTPError;
@@ -33,6 +34,7 @@ use crate::state::{with_arch, WebState};
 
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const MAX_IMAGES_PER_WEBHOOK: usize = 16;
+const MAX_CONCURRENT_WEBHOOK_JOBS: usize = 16;
 
 /// Configuration for the inbound `POST /api/webhook` endpoint.
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ struct WebhookState {
     no_ai_history: bool,
     notify_cfg: NotifyConfig,
     default_lang: Lang,
+    job_slots: Arc<Semaphore>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +94,7 @@ pub fn new_router(web: Arc<WebState>, cfg: WebhookConfig) -> Router {
         no_ai_history: cfg.no_ai_history,
         notify_cfg: cfg.notify_cfg,
         default_lang: cfg.default_lang,
+        job_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_WEBHOOK_JOBS)),
     });
     Router::new()
         .route("/api/webhook", post(handle_webhook))
@@ -314,10 +318,19 @@ async fn handle_webhook(
         .clone()
         .or_else(|| infer_report_base_url(&headers));
 
+    let Ok(permit) = state.job_slots.clone().try_acquire_owned() else {
+        return json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "webhook",
+            "too many concurrent webhook jobs in progress",
+        );
+    };
+
     let response_images = images.clone();
     let channels = state.notify_cfg.channel_names();
     let worker_state = state.clone();
     tokio::spawn(TRACE_ID.scope(generate_trace_id(), async move {
+        let _permit = permit;
         for image in images {
             process_webhook_image(&worker_state, &image, lang, report_base_url.as_deref()).await;
         }

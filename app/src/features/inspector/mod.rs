@@ -24,11 +24,35 @@ use crate::ui::{
 /// Renders the full Inspector view once an analysis result is present.
 pub fn inspector_workspace(state: AppState) -> impl IntoElement {
     let lang = state.lang;
+    let error_state = state.clone();
 
     view()
         .flex_1()
         .min_h(px(0.0))
         .flex_col()
+        .child(when(
+            move || error_state.analyze_error.get().is_some(),
+            move || {
+                let dismiss = error_state.clone();
+                let err_sig = error_state.analyze_error;
+                view().px_4().pt_2().child(ui_banner(
+                    BannerTone::Danger,
+                    move || SharedString::from(err_sig.get().unwrap_or_default()),
+                    Some(
+                        ui_button(
+                            move || SharedString::from(t(lang.get(), "common.close")),
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            Some(IconName::Close),
+                            false,
+                            false,
+                            move || dismiss.dismiss_analyze_error(),
+                        )
+                        .into_element(),
+                    ),
+                ))
+            },
+        ))
         .child(dynamic(move || {
             let nav_state = state.clone();
             let Some(res) = state.result.get() else {
@@ -63,8 +87,7 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
             let retry_state = state.clone();
             let split_state = state.clone();
             let resize_state = state.clone();
-            let compact = window().width < px(1100.0);
-            let left_max = if compact { px(320.0) } else { px(480.0) };
+            let left_max = px(480.0);
             let left_initial = px(state
                 .sidebar_width
                 .get_untracked()
@@ -91,19 +114,11 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                                     Some(IconName::Refresh),
                                     false,
                                     false,
-                                    move || s.submit_current_input(),
+                                    move || s.retry_stale_image(),
                                 )
                                 .into_element(),
                             ),
                         )),
-                    )
-                })
-                .when_some(state.analyze_error.get(), |col, err| {
-                    col.child(
-                        view()
-                            .px_4()
-                            .pt_2()
-                            .child(ui_banner(BannerTone::Danger, err, None)),
                     )
                 })
                 .child(metric_ribbon(&res, &summary, lang))

@@ -1,5 +1,7 @@
 use clap::Parser;
-use diving_app::config::{build_http_client, build_web_analyzer, load_config};
+use diving_app::config::{
+    build_http_client, build_web_analyzer, build_web_http_client, load_config,
+};
 use diving_app::logging::{init_logger, install_crypto_provider, EXIT_ERROR};
 use mimalloc::MiMalloc;
 use tracing::error;
@@ -40,7 +42,15 @@ fn main() {
             std::process::exit(EXIT_ERROR);
         }
     };
-    let analyzer = match build_web_analyzer(&loaded, http_client.clone()) {
+    let web_http_client = match build_web_http_client(loaded.config.registry_allowlist().is_empty())
+    {
+        Ok(client) => client,
+        Err(err) => {
+            error!(err, "build web http client fail");
+            std::process::exit(EXIT_ERROR);
+        }
+    };
+    let analyzer = match build_web_analyzer(&loaded, web_http_client) {
         Ok(analyzer) => analyzer,
         Err(err) => {
             error!(err = err.to_string(), "build analyzer fail");

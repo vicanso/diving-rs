@@ -28,6 +28,7 @@ pub fn findings_tab(
     summary: Arc<DockerAnalyzeSummary>,
 ) -> impl IntoElement {
     let lang = state.lang;
+    let wide_layout = computed(move || window().width >= px(1100.0));
 
     scroll().flex_1().min_h(px(0.0)).child(
         view()
@@ -37,7 +38,7 @@ pub fn findings_tab(
             .gap_6()
             .child(recommendations_panel(res.clone(), lang))
             .child(dynamic(move || {
-                if window().width >= px(1100.0) {
+                if wide_layout.get() {
                     view()
                         .w_full()
                         .flex_col()

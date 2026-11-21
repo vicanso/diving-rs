@@ -25,6 +25,7 @@ axum-client-ip = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+futures = { workspace = true }
 hex = { workspace = true }
 http = { workspace = true }
 lru = { workspace = true }

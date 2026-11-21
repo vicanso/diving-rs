@@ -1,37 +1,76 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Query, Request, State};
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
 use diving_core::{
     resolve_explicit_credentials, to_diff_markdown, to_markdown, to_summary_markdown,
-    AnalyzeOptions, ImagePreview, Lang, PreviewOptions,
+    AnalyzeOptions, Error as CoreError, ImagePreview, Lang, PreviewOptions,
 };
-use http::{header, Uri};
+use futures::stream;
+use http::{header, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tower_http::compression::CompressionLayer;
 
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
+use crate::http_util::{digests_equal, token_fingerprint};
 use crate::state::{McpStatus, WebState};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 type JSONResult<T> = HTTPResult<Json<T>>;
 
 pub fn new_router(state: Arc<WebState>) -> Router {
-    Router::new()
-        .route("/ping", get(ping))
+    let api_routes = Router::new()
         .route("/api/analyze", get(analyze))
         .route("/api/diff", get(diff))
         .route("/api/manifest", get(manifest))
         .route("/api/file", get(get_file))
         .route("/api/file-preview", get(preview_file))
         .route("/api/latest-images", get(get_latest_images))
+        .layer(from_fn_with_state(state.clone(), require_api_token));
+
+    Router::new()
+        .route("/ping", get(ping))
+        .merge(api_routes)
         .fallback(get(serve))
         // gzip when the client accepts it. Only these routes: `/mcp` is
         // mounted separately and streams SSE, which must not be buffered.
         .layer(CompressionLayer::new())
         .with_state(state)
+}
+
+async fn require_api_token(
+    State(state): State<Arc<WebState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(expected) = state.api_token_fingerprint.as_deref() else {
+        return next.run(req).await;
+    };
+    let supplied = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match supplied {
+        Some(token) if digests_equal(&token_fingerprint(token), expected) => next.run(req).await,
+        _ => {
+            let mut err = HTTPError::new_with_category("missing or invalid API token", "auth");
+            err.status = StatusCode::UNAUTHORIZED.as_u16();
+            err.into_response()
+        }
+    }
 }
 
 async fn ping() -> &'static str {
@@ -167,28 +206,6 @@ struct GetFileParams {
     file: String,
 }
 
-struct DownloadFile {
-    name: String,
-    content: Vec<u8>,
-}
-
-impl IntoResponse for DownloadFile {
-    fn into_response(self) -> Response {
-        let disposition = format!("attachment; filename=\"{}\"", self.name);
-        (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    mime::APPLICATION_OCTET_STREAM.as_ref(),
-                ),
-                (header::CONTENT_DISPOSITION, disposition.as_str()),
-            ],
-            self.content,
-        )
-            .into_response()
-    }
-}
-
 /// Text shown by the web preview; longer files are cut, not refused.
 const PREVIEW_TEXT_BYTES: u64 = 256 * 1024;
 /// A NUL byte in this prefix marks the file as binary.
@@ -279,27 +296,65 @@ async fn preview_file(
 async fn get_file(
     State(state): State<Arc<WebState>>,
     Query(params): Query<GetFileParams>,
-) -> HTTPResult<DownloadFile> {
+) -> HTTPResult<Response> {
     let analyzer = state.analyzer.clone();
     let max_bytes = state.max_download_file_size;
     let digest = params.digest;
     let media_type = params.media_type;
     let file_path = params.file;
-    // Decompression runs on the blocking pool so request-serving async
-    // workers stay free even while extracting from a large layer.
-    let (name, content) = tokio::task::spawn_blocking(move || -> HTTPResult<(String, Vec<u8>)> {
-        let content = analyzer.read_file(&digest, &media_type, &file_path, max_bytes)?;
-        let raw_name = file_path.split('/').next_back().unwrap_or_default();
-        // Strip characters that would break the Content-Disposition header value
-        let name = raw_name
-            .chars()
-            .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
-            .collect::<String>();
-        Ok((name, content))
-    })
-    .await
-    .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))??;
-    Ok(DownloadFile { name, content })
+    let raw_name = file_path.split('/').next_back().unwrap_or_default();
+    // Strip characters that would break the Content-Disposition header value
+    let name: String = raw_name
+        .chars()
+        .filter(|c| *c != '"' && *c != '\\' && *c != '\n' && *c != '\r')
+        .collect();
+
+    // Stream file chunks from a blocking task over a bounded channel so large
+    // downloads (up to 100 MiB) never buffer the whole payload in RAM.
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, CoreError>>(8);
+    tokio::task::spawn_blocking(move || {
+        let res = analyzer.stream_file(&digest, &media_type, &file_path, max_bytes, |chunk| {
+            tx.blocking_send(Ok(Bytes::copy_from_slice(chunk)))
+                .map_err(|_| CoreError::Other {
+                    message: "download client disconnected".to_string(),
+                })
+        });
+        if let Err(err) = res {
+            let _ = tx.blocking_send(Err(err));
+        }
+    });
+
+    // Await the first chunk (or immediate error) before committing 200 OK so
+    // invalid digest / not-found / FileTooLarge still return proper 4xx codes.
+    let first = match rx.recv().await {
+        Some(Ok(chunk)) => Some(chunk),
+        Some(Err(err)) => return Err(err.into()),
+        None => None,
+    };
+
+    let body_stream = stream::unfold((first, rx), |(pending, mut rx)| async move {
+        if let Some(chunk) = pending {
+            return Some((Ok::<Bytes, std::io::Error>(chunk), (None, rx)));
+        }
+        match rx.recv().await {
+            Some(Ok(chunk)) => Some((Ok(chunk), (None, rx))),
+            Some(Err(err)) => Some((Err(std::io::Error::other(err.to_string())), (None, rx))),
+            None => None,
+        }
+    });
+
+    let disposition = format!(r#"attachment; filename="{name}""#);
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                mime::APPLICATION_OCTET_STREAM.as_ref(),
+            ),
+            (header::CONTENT_DISPOSITION, disposition.as_str()),
+        ],
+        Body::from_stream(body_stream),
+    )
+        .into_response())
 }
 
 async fn serve(uri: Uri) -> StaticFile {
@@ -329,5 +384,74 @@ mod tests {
             "00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|\n\
              00000010  03 00 3e 00                                       |..>.|\n"
         );
+    }
+
+    #[tokio::test]
+    async fn api_token_protects_api_routes_while_keeping_ping_open() {
+        use diving_core::{Analyzer, GateConfig};
+        use tower::ServiceExt;
+
+        let analyzer = Analyzer::builder().build().unwrap();
+        let state = Arc::new(
+            WebState::new(
+                analyzer,
+                reqwest::Client::new(),
+                std::path::PathBuf::new(),
+                GateConfig::default(),
+                1024 * 1024,
+                McpStatus::default(),
+                vec![],
+            )
+            .with_api_token(Some("super-secret-token")),
+        );
+        let app = new_router(state);
+
+        // /ping stays open
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/ping").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // /api/* without token -> 401
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/latest-images")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // /api/* with Bearer token -> 200
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/latest-images")
+                    .header(header::AUTHORIZATION, "Bearer super-secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // /api/* with X-API-Key -> 200
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/latest-images")
+                    .header("x-api-key", "super-secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

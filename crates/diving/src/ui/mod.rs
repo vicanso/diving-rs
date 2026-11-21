@@ -161,9 +161,8 @@ pub fn run_app(result: DockerAnalyzeResult, lang: Lang) -> Result<(), Box<dyn Er
     #[cfg(not(windows))]
     let signal = Some(unsafe {
         signal_hook_registry::register(signal_hook::consts::SIGCONT, move || {
-            // 事件触发失败则直接退出
-            // 因此使用unwrap
-            tx.send(true).unwrap();
+            // Never block or panic inside a signal handler.
+            let _ = tx.try_send(true);
         })
     }?);
     #[cfg(windows)]
@@ -171,9 +170,9 @@ pub fn run_app(result: DockerAnalyzeResult, lang: Lang) -> Result<(), Box<dyn Er
 
     loop {
         if hidden.load(atomic::Ordering::Relaxed) {
-            // 等待fg事件，出错直接退出
-            // 因此使用unwrap
-            rx.recv().unwrap();
+            if rx.recv().is_err() {
+                break;
+            }
             enable_raw_mode()?;
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.hide_cursor()?;
@@ -253,10 +252,12 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
             lang: state.lang,
         },
     );
+    let fallback_layer = ImageLayer::default();
     let layer = state
         .layers
         .get(state.selected_layer)
-        .unwrap_or_else(|| &state.layers[0]);
+        .or_else(|| state.layers.first())
+        .unwrap_or(&fallback_layer);
     let detail_widget = layer_detail::new_layer_detail_widget(
         layer,
         layer_detail::DetailWidgetOption {

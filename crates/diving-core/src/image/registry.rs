@@ -21,6 +21,7 @@ use snafu::ResultExt;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, SeekFrom};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
@@ -69,6 +70,74 @@ struct ImageManifestCacheInfo {
 }
 
 const REGISTRY_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(100).unwrap();
+const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LAYERS_PER_IMAGE: usize = 512;
+
+/// Returns `true` if `host` (with optional `:port` or IPv6 `[...]` brackets)
+/// refers to localhost, a private/link-local/loopback IP, or an internal domain.
+pub fn is_private_or_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return true;
+    }
+    let bare = if let Some(rest) = trimmed.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if trimmed.matches(':').count() == 1 {
+        trimmed.split(':').next().unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    let lower = bare.to_ascii_lowercase();
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+    {
+        return true;
+    }
+    if let Ok(ip) = lower.parse::<IpAddr>() {
+        return is_non_public_ip(ip);
+    }
+    false
+}
+
+fn is_non_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_non_public_v4(v4),
+        IpAddr::V6(v6) => is_non_public_v6(v6),
+    }
+}
+
+fn is_non_public_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || (a == 100 && (64..=127).contains(&b)) // RFC 6598 CGNAT
+        || a == 0
+}
+
+fn is_non_public_v6(v6: Ipv6Addr) -> bool {
+    if let Some(mapped) = v6.to_ipv4_mapped() {
+        return is_non_public_v4(mapped);
+    }
+    let seg0 = v6.segments()[0];
+    v6.is_loopback()
+        || v6.is_unspecified()
+        || v6.is_multicast()
+        || (seg0 & 0xfe00) == 0xfc00 // unique local fc00::/7
+        || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+}
+
+fn extract_url_host(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    Some((scheme, host_port))
+}
 
 /// Per-`Analyzer` in-memory LRU caches for registry bearer tokens and manifests.
 #[derive(Debug)]
@@ -271,6 +340,7 @@ pub(crate) struct RegistryClient {
     pub(crate) caches: Arc<RegistryCaches>,
     pub(crate) docker_config: Option<Arc<DockerConfig>>,
     pub(crate) layer_concurrency: Option<usize>,
+    pub(crate) block_private_hosts: bool,
     pub(crate) local_index: Arc<TokioOnceCell<Arc<TarIndex>>>,
 }
 
@@ -403,8 +473,32 @@ impl RegistryClient {
         url: String,
         headers: HashMap<String, String>,
     ) -> Result<bytes::Bytes> {
-        let resp = self.send_request(url.clone(), headers).await?;
-        resp.bytes().await.context(ResponseJsonSnafu { url })
+        let mut resp = self.send_request(url.clone(), headers).await?;
+        if let Some(len) = resp.content_length() {
+            if len > MAX_JSON_RESPONSE_BYTES as u64 {
+                return Err(Error::Other {
+                    message: format!(
+                        "response body from {url} exceeds safety limit ({len} > {MAX_JSON_RESPONSE_BYTES} bytes)"
+                    ),
+                });
+            }
+        }
+        let mut buf = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .context(ResponseJsonSnafu { url: url.clone() })?
+        {
+            if buf.len().saturating_add(chunk.len()) > MAX_JSON_RESPONSE_BYTES {
+                return Err(Error::Other {
+                    message: format!(
+                        "response body from {url} exceeds safety limit ({MAX_JSON_RESPONSE_BYTES} bytes)"
+                    ),
+                });
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(bytes::Bytes::from(buf))
     }
 
     async fn get<T: DeserializeOwned>(
@@ -732,6 +826,14 @@ impl RegistryClient {
         params: &DockerImageParams,
         layers: Vec<ImageManifestLayer>,
     ) -> Result<Vec<ImageLayerInfo>> {
+        if layers.len() > MAX_LAYERS_PER_IMAGE {
+            return Err(Error::Other {
+                message: format!(
+                    "image exceeds maximum layer count ({} > {MAX_LAYERS_PER_IMAGE})",
+                    layers.len()
+                ),
+            });
+        }
         let trace_id = TRACE_ID
             .try_with(clone_value_from_task_local)
             .unwrap_or_default();
@@ -790,6 +892,23 @@ impl RegistryClient {
         if resp.status().as_u16() == StatusCode::UNAUTHORIZED.as_u16() {
             if let Some(value) = resp.headers().get("www-authenticate") {
                 let auth_info = parse_auth_info(value.to_str().unwrap_or_default());
+                if self.block_private_hosts {
+                    match extract_url_host(&auth_info.auth) {
+                        Some((scheme, host))
+                            if scheme.eq_ignore_ascii_case("https")
+                                && !is_private_or_loopback_host(host) => {}
+                        Some((_, host)) => {
+                            return Err(Error::DisallowedRegistry {
+                                registry: host.to_string(),
+                            });
+                        }
+                        None => {
+                            return Err(Error::DisallowedRegistry {
+                                registry: auth_info.auth.clone(),
+                            });
+                        }
+                    }
+                }
                 let url = format!(
                     "{}?service={}&scope={}",
                     auth_info.auth, auth_info.service, auth_info.scope

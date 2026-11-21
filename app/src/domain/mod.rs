@@ -12,7 +12,7 @@ pub use model::{
     flatten_file_tree, format_bytes, format_command_lines, format_runtime_compat,
     image_source_kind, upsert_recent,
 };
-pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffRunResult, DivingService};
+pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
 pub use state::{AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo};
 pub use treemap::{
     FsNode, TreemapChildTile, TreemapRect, TreemapTile, build_final_tree, dominant_layer,

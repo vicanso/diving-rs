@@ -248,7 +248,7 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
     let inline_state = state.clone();
     let pill_state = state.clone();
     let tabs_state = state;
-    let compact = window().width < px(1120.0);
+    let compact = computed(move || window().width < px(1120.0));
 
     view()
         .flex_1()
@@ -305,32 +305,34 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
                 .gap_1p5()
                 .flex_shrink_0()
                 .window_drag(false)
-                .child(if compact {
-                    let s = cmp_state.clone();
-                    ui_icon_button(
-                        IconName::Compare,
-                        "Compare with…",
-                        Some(move || SharedString::from(t(lang.get(), "diff.compare_with"))),
-                        ButtonVariant::Ghost,
-                        UiSize::Sm,
-                        false,
-                        false,
-                        move || s.open_compare_dialog(),
-                    )
-                    .into_element()
-                } else {
-                    let s = cmp_state.clone();
-                    ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.compare_with")),
-                        ButtonVariant::Outline,
-                        UiSize::Sm,
-                        Some(IconName::Compare),
-                        false,
-                        false,
-                        move || s.open_compare_dialog(),
-                    )
-                    .into_element()
-                })
+                .child(dynamic(move || {
+                    if compact.get() {
+                        let s = cmp_state.clone();
+                        ui_icon_button(
+                            IconName::Compare,
+                            "Compare with…",
+                            Some(move || SharedString::from(t(lang.get(), "diff.compare_with"))),
+                            ButtonVariant::Ghost,
+                            UiSize::Sm,
+                            false,
+                            false,
+                            move || s.open_compare_dialog(),
+                        )
+                        .into_element()
+                    } else {
+                        let s = cmp_state.clone();
+                        ui_button(
+                            move || SharedString::from(t(lang.get(), "diff.compare_with")),
+                            ButtonVariant::Outline,
+                            UiSize::Sm,
+                            Some(IconName::Compare),
+                            false,
+                            false,
+                            move || s.open_compare_dialog(),
+                        )
+                        .into_element()
+                    }
+                }))
                 .child(ui_icon_button(
                     IconName::Refresh,
                     "Re-analyze current image",

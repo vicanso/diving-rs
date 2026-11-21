@@ -831,6 +831,7 @@ dependencies = [
  "clap",
  "diving-app",
  "diving-core",
+ "futures",
  "hex",
  "http",
  "lru 0.19.0",

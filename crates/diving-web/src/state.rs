@@ -1,3 +1,4 @@
+use crate::http_util::token_fingerprint;
 use diving_core::{
     parse_image_info, Analyzer, GateConfig, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_PODMAN,
 };
@@ -26,6 +27,7 @@ pub struct WebState {
     pub max_download_file_size: u64,
     pub mcp_status: McpStatus,
     pub mcp_allowed_hosts: Vec<String>,
+    pub api_token_fingerprint: Option<Vec<u8>>,
     latest_images: StdMutex<LruCache<String, ()>>,
 }
 
@@ -48,10 +50,19 @@ impl WebState {
             max_download_file_size,
             mcp_status,
             mcp_allowed_hosts,
+            api_token_fingerprint: None,
             latest_images: StdMutex::new(LruCache::new(
                 NonZeroUsize::new(LATEST_IMAGES_CAP).expect("non-zero cache capacity"),
             )),
         }
+    }
+
+    pub fn with_api_token(mut self, token: Option<&str>) -> Self {
+        self.api_token_fingerprint = token
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(token_fingerprint);
+        self
     }
 
     pub fn add_latest_image(&self, image: &str) {

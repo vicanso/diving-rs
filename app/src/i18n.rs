@@ -171,6 +171,14 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "Loaded analysis from cache",
         "命中本地分析缓存",
     ),
+    ("progress.analyzing_image", "Analyzing {0}", "正在分析 {0}"),
+    (
+        "config.fallback_warning",
+        "Config load failed ({0}); using default settings with Docker credentials.",
+        "配置加载失败（{0}），已回退默认配置并保留 Docker 凭证。",
+    ),
+    ("diff.base_progress", "Base: {0}", "基准：{0}"),
+    ("diff.target_progress", "Target: {0}", "目标：{0}"),
     // KPI & Stale banner
     (
         "stale.banner",

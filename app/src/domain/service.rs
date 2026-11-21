@@ -48,6 +48,14 @@ pub enum DiffRunResult {
     },
 }
 
+/// Progress or completion event streamed from `DivingService::start_diff`.
+#[derive(Debug, Clone)]
+pub enum DiffMessage {
+    BaseProgress(ProgressEvent),
+    TargetProgress(ProgressEvent),
+    Finished(DiffRunResult),
+}
+
 /// Handle cancelling both the analysis task and its delayed 500ms preview task.
 pub struct AnalyzeTaskHandle {
     tasks: Vec<AbortHandle>,
@@ -64,6 +72,7 @@ impl AnalyzeTaskHandle {
 struct ServiceInner {
     rt: Runtime,
     analyzer: Analyzer,
+    config_warning: Option<String>,
 }
 
 /// Thread-safe handle wrapping the desktop `Analyzer` and shared Tokio runtime.
@@ -82,10 +91,12 @@ impl DivingService {
     /// Initializes config from `~/.diving/config.yml` (falling back safely on error)
     /// and starts the dedicated multi-threaded Tokio runtime.
     pub fn new() -> Self {
+        let mut config_warning = None;
         let loaded = match load_config(None) {
             Ok(cfg) => Some(cfg),
             Err(err) => {
                 log::warn!("falling back to default desktop config: {err}");
+                config_warning = Some(err);
                 None
             }
         };
@@ -108,17 +119,25 @@ impl DivingService {
             .transpose()
             .unwrap_or_else(|err| {
                 log::warn!("falling back to ephemeral desktop analyzer: {err}");
+                if config_warning.is_none() {
+                    config_warning = Some(err);
+                }
                 None
             })
             .unwrap_or_else(|| {
                 Analyzer::builder()
                     .allow_local_sources(true)
+                    .use_docker_config(true)
                     .build()
                     .expect("build ephemeral desktop analyzer")
             });
 
         Self {
-            inner: Arc::new(ServiceInner { rt, analyzer }),
+            inner: Arc::new(ServiceInner {
+                rt,
+                analyzer,
+                config_warning,
+            }),
         }
     }
 
@@ -130,8 +149,17 @@ impl DivingService {
             .build()
             .expect("create test Tokio runtime");
         Self {
-            inner: Arc::new(ServiceInner { rt, analyzer }),
+            inner: Arc::new(ServiceInner {
+                rt,
+                analyzer,
+                config_warning: None,
+            }),
         }
+    }
+
+    /// Returns any non-fatal warning captured while loading `~/.diving/config.yml`.
+    pub fn config_warning(&self) -> Option<&str> {
+        self.inner.config_warning.as_deref()
     }
 
     /// Starts analyzing `image` (optionally scoped to `arch`) and streams progress + result.
@@ -142,10 +170,10 @@ impl DivingService {
         lang: Lang,
         verify_dup: bool,
     ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<AnalyzeMessage>) {
-        self.start_analyze_with_options(image, arch, lang, verify_dup, false)
+        self.start_analyze_with_options(image, arch, lang, verify_dup, false, true)
     }
 
-    /// Starts analyzing `image` with explicit memory-cache bypass control (`Mod+R`).
+    /// Starts analyzing `image` with explicit memory-cache bypass and offline fallback controls.
     pub fn start_analyze_with_options(
         &self,
         image: String,
@@ -153,6 +181,7 @@ impl DivingService {
         lang: Lang,
         verify_dup: bool,
         skip_memory_cache: bool,
+        fallback_to_last_known: bool,
     ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<AnalyzeMessage>) {
         let target = format_image_target(&image, arch.as_deref());
         let (tx, rx) = mpsc::unbounded_channel();
@@ -172,7 +201,7 @@ impl DivingService {
                 .lang(lang)
                 .verify_dup(verify_dup)
                 .skip_memory_cache(skip_memory_cache)
-                .fallback_to_last_known(true)
+                .fallback_to_last_known(fallback_to_last_known)
                 .on_progress(Arc::new(move |ev| {
                     let _ = progress_tx.send(AnalyzeMessage::Progress(ev));
                 }));
@@ -208,7 +237,7 @@ impl DivingService {
         (AnalyzeTaskHandle { tasks: handles }, rx)
     }
 
-    /// Analyzes base and target images concurrently and computes `ImageDiff`.
+    /// Analyzes base and target images concurrently, streaming progress and returning `ImageDiff`.
     pub fn start_diff(
         &self,
         base_image: String,
@@ -216,21 +245,32 @@ impl DivingService {
         target_image: String,
         target_arch: Option<String>,
         lang: Lang,
-    ) -> (AnalyzeTaskHandle, oneshot::Receiver<DiffRunResult>) {
+        skip_memory_cache: bool,
+    ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<DiffMessage>) {
         let base_ref = format_image_target(&base_image, base_arch.as_deref());
         let target_ref = format_image_target(&target_image, target_arch.as_deref());
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let analyzer = self.inner.analyzer.clone();
 
         let handle = self.inner.rt.spawn(async move {
+            let base_tx = tx.clone();
+            let target_tx = tx.clone();
             let base_opts = AnalyzeOptions::default()
                 .lang(lang)
                 .verify_dup(true)
-                .fallback_to_last_known(true);
+                .skip_memory_cache(skip_memory_cache)
+                .fallback_to_last_known(true)
+                .on_progress(Arc::new(move |ev| {
+                    let _ = base_tx.send(DiffMessage::BaseProgress(ev));
+                }));
             let target_opts = AnalyzeOptions::default()
                 .lang(lang)
                 .verify_dup(true)
-                .fallback_to_last_known(true);
+                .skip_memory_cache(skip_memory_cache)
+                .fallback_to_last_known(true)
+                .on_progress(Arc::new(move |ev| {
+                    let _ = target_tx.send(DiffMessage::TargetProgress(ev));
+                }));
 
             let (base_res, target_res) = tokio::join!(
                 analyzer.analyze(&base_ref, base_opts),
@@ -249,7 +289,7 @@ impl DivingService {
                     target: t_err.to_string(),
                 },
             };
-            let _ = tx.send(outcome);
+            let _ = tx.send(DiffMessage::Finished(outcome));
         });
 
         (

@@ -1,6 +1,9 @@
 use bytesize::ByteSize;
 use config::{Config, File, FileFormat};
-use diving_core::{Analyzer, CacheConfig, GateConfig, SensitivePatterns, SeverityThreshold};
+use diving_core::{
+    is_private_or_loopback_host, Analyzer, CacheConfig, GateConfig, SensitivePatterns,
+    SeverityThreshold,
+};
 use home::home_dir;
 use humantime::Duration as HumanDuration;
 use reqwest::Client;
@@ -241,6 +244,35 @@ pub fn build_http_client() -> Result<Client, String> {
         .map_err(|e| format!("failed to build shared reqwest client: {e}"))
 }
 
+/// Build a `reqwest::Client` for `diving-web` registry fetches.
+/// When `block_private_redirects` is true, HTTP redirects to non-HTTPS or
+/// private/loopback/link-local hosts are refused to prevent SSRF bypasses.
+pub fn build_web_http_client(block_private_redirects: bool) -> Result<Client, String> {
+    install_crypto_provider();
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(32);
+    if block_private_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            let url = attempt.url();
+            if url.scheme() != "https" {
+                return attempt.error("redirect to non-https scheme blocked");
+            }
+            let host = url.host_str().unwrap_or_default().to_string();
+            if is_private_or_loopback_host(&host) {
+                return attempt.error(format!("redirect to private host blocked: {host}"));
+            }
+            attempt.follow()
+        }));
+    }
+    builder
+        .build()
+        .map_err(|e| format!("failed to build web reqwest client: {e}"))
+}
+
 fn cache_config_from(loaded: &LoadedConfig) -> CacheConfig {
     CacheConfig::persistent(&loaded.layer_dir, &loaded.analysis_dir)
         .layer_ttl(loaded.config.layer_ttl())
@@ -288,6 +320,8 @@ pub fn build_desktop_analyzer(
     )
 }
 
+const DEFAULT_WEB_MAX_CONCURRENT_ANALYSES: usize = 8;
+
 /// Construct an [`Analyzer`] configured for Web/MCP/Webhook runs.
 pub fn build_web_analyzer(
     loaded: &LoadedConfig,
@@ -303,13 +337,17 @@ pub fn build_web_analyzer(
         .sensitive_patterns(load_user_sensitive_patterns(&loaded.config_dir));
 
     if allowlist.is_empty() {
-        builder = builder.allow_local_sources(true);
+        builder = builder
+            .allow_local_sources(true)
+            .block_private_registries(true);
     } else {
         builder = builder.registry_allowlist(allowlist);
     }
-    if let Some(max) = loaded.config.max_concurrent_analyses() {
-        builder = builder.max_concurrent_analyses(max);
-    }
+    let max_concurrent = loaded
+        .config
+        .max_concurrent_analyses()
+        .unwrap_or(DEFAULT_WEB_MAX_CONCURRENT_ANALYSES);
+    builder = builder.max_concurrent_analyses(max_concurrent);
     if let Some(concurrency) = loaded.config.layer_concurrency() {
         builder = builder.layer_concurrency(concurrency);
     }

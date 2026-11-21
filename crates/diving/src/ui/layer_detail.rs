@@ -20,12 +20,10 @@ pub fn new_layer_detail_widget(layer: &ImageLayer, opt: DetailWidgetOption) -> D
     let detail_word_width = util::get_width(&cmd);
     let mut create_at = layer.created.clone();
     if let Ok(value) = DateTime::parse_from_rfc3339(&layer.created) {
-        create_at = Local
-            .timestamp_opt(value.timestamp(), 0)
-            .single()
-            .unwrap()
-            .to_rfc3339();
-    };
+        if let Some(local_dt) = Local.timestamp_opt(value.timestamp(), 0).earliest() {
+            create_at = local_dt.to_rfc3339();
+        }
+    }
 
     let paragraph = Paragraph::new(Line::from(vec![
         Span::styled(

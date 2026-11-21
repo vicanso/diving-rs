@@ -3,10 +3,10 @@ use crate::error::{Error, IoSnafu, Result};
 use crate::i18n::Lang;
 use crate::image::{
     analyze_once, analyze_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
-    is_local_registry, load_docker_config, parse_image_info, preview_image, registry_host,
-    DockerAnalyzeResult, DockerConfig, ImageInfo, ImagePreview, PipelineContext, PipelineOptions,
-    RegistryCaches, RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
-    REGISTRY_LOCAL_PODMAN,
+    is_local_registry, is_private_or_loopback_host, load_docker_config, parse_image_info,
+    preview_image, registry_host, stream_file_from_layer, DockerAnalyzeResult, DockerConfig,
+    ImageInfo, ImagePreview, PipelineContext, PipelineOptions, RegistryCaches, RegistryCredentials,
+    TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
 use crate::recommend::build_recommendations;
@@ -123,6 +123,7 @@ pub struct AnalyzerBuilder {
     use_docker_config: bool,
     docker_config_path: Option<PathBuf>,
     registry_allowlist: Vec<String>,
+    block_private_registries: bool,
     singleflight: bool,
     max_concurrent_analyses: Option<usize>,
     memory_cache_ttl: Duration,
@@ -142,6 +143,7 @@ impl Default for AnalyzerBuilder {
             use_docker_config: false,
             docker_config_path: None,
             registry_allowlist: vec![],
+            block_private_registries: false,
             singleflight: true,
             max_concurrent_analyses: None,
             memory_cache_ttl: Duration::ZERO,
@@ -246,6 +248,13 @@ impl AnalyzerBuilder {
         self
     }
 
+    /// Reject private, loopback, link-local, and `.local`/`.internal` registry
+    /// and token-realm hosts when no explicit `registry_allowlist` is configured.
+    pub fn block_private_registries(mut self, block: bool) -> Self {
+        self.block_private_registries = block;
+        self
+    }
+
     pub fn build(self) -> Result<Analyzer> {
         let store = Arc::new(CacheStore::from_config(self.cache)?);
         let http_client = match self.http_client {
@@ -284,6 +293,7 @@ impl AnalyzerBuilder {
                 docker_config_path: self.docker_config_path,
                 docker_config: OnceLock::new(),
                 registry_allowlist: self.registry_allowlist,
+                block_private_registries: self.block_private_registries,
                 singleflight_enabled: self.singleflight,
                 analysis_slots,
                 in_flight: TokioMutex::new(HashMap::new()),
@@ -307,6 +317,7 @@ struct AnalyzerInner {
     docker_config_path: Option<PathBuf>,
     docker_config: OnceLock<Option<Arc<DockerConfig>>>,
     registry_allowlist: Vec<String>,
+    block_private_registries: bool,
     singleflight_enabled: bool,
     analysis_slots: Option<Semaphore>,
     in_flight: TokioMutex<HashMap<String, AnalysisFuture>>,
@@ -332,6 +343,8 @@ impl AnalyzerInner {
             docker_config: self.docker_config(),
             sensitive_patterns: self.sensitive_patterns.clone(),
             layer_concurrency: self.layer_concurrency,
+            block_private_hosts: self.block_private_registries
+                && self.registry_allowlist.is_empty(),
         }
     }
 
@@ -379,6 +392,12 @@ impl Analyzer {
             }
         }
         if self.inner.registry_allowlist.is_empty() {
+            if self.inner.block_private_registries && !is_local_registry(&info.registry) {
+                let host = registry_host(&info.registry).unwrap_or_default();
+                if is_private_or_loopback_host(&host) {
+                    return Err(Error::DisallowedRegistry { registry: host });
+                }
+            }
             return Ok(());
         }
         let id = if is_local_registry(&info.registry) {
@@ -577,6 +596,29 @@ impl Analyzer {
         let path = self.layer_blob_path(layer_digest)?;
         let file = File::open(&path).context(IoSnafu {})?;
         get_file_content_from_layer(BufReader::new(file), media_type, file_path, max_bytes)
+    }
+
+    /// Stream a file's bytes (up to `max_bytes`) in chunks from a cached layer blob.
+    pub fn stream_file<F>(
+        &self,
+        layer_digest: &str,
+        media_type: &str,
+        file_path: &str,
+        max_bytes: u64,
+        on_chunk: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        let path = self.layer_blob_path(layer_digest)?;
+        let file = File::open(&path).context(IoSnafu {})?;
+        stream_file_from_layer(
+            BufReader::new(file),
+            media_type,
+            file_path,
+            max_bytes,
+            on_chunk,
+        )
     }
 
     /// Read up to `limit` bytes from the start of a file inside a cached layer blob.
@@ -886,5 +928,34 @@ mod tests {
         )
         .await;
         assert!(acquired.unwrap());
+    }
+
+    #[test]
+    fn block_private_registries_rejects_ssrf_targets_and_allows_public_hosts() {
+        let analyzer = Analyzer::builder()
+            .block_private_registries(true)
+            .build()
+            .unwrap();
+
+        for blocked in [
+            "169.254.169.254/latest/meta-data:v1",
+            "10.0.0.5:5000/app:latest",
+            "127.0.0.1:5000/app:latest",
+            "localhost:5000/app:latest",
+            "metadata.google.internal/app:v1",
+            "192.168.1.10/app:v1",
+        ] {
+            let err = analyzer
+                .check_allowed(&parse_image_info(blocked))
+                .unwrap_err();
+            assert!(err.is_forbidden(), "expected forbidden for {blocked}");
+        }
+
+        for allowed in ["redis:alpine", "ghcr.io/org/app:v1", "quay.io/org/app:v1"] {
+            assert!(
+                analyzer.check_allowed(&parse_image_info(allowed)).is_ok(),
+                "expected {allowed} to be allowed"
+            );
+        }
     }
 }

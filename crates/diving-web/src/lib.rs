@@ -95,6 +95,9 @@ pub struct WebArgs {
     /// Disable the inbound `POST /api/webhook` endpoint
     #[arg(long)]
     pub no_webhook: bool,
+    /// Bearer / X-API-Key token required on `/api/*` endpoints (or $DIVING_API_TOKEN).
+    #[arg(long)]
+    pub api_token: Option<String>,
     /// Bearer token required on the `/mcp` endpoint (or $DIVING_MCP_TOKEN).
     #[arg(long)]
     pub mcp_token: Option<String>,
@@ -256,15 +259,23 @@ pub async fn run(args: WebArgs, loaded: LoadedConfig, analyzer: Analyzer, http_c
         })
     };
 
-    let state = Arc::new(WebState::new(
-        analyzer,
-        http_client,
-        loaded.config_dir.clone(),
-        loaded.config.gate_config(),
-        loaded.config.max_download_file_size(),
-        mcp_status,
-        mcp_allowed_hosts,
-    ));
+    let api_token = args
+        .api_token
+        .or_else(|| env::var("DIVING_API_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
+
+    let state = Arc::new(
+        WebState::new(
+            analyzer,
+            http_client,
+            loaded.config_dir.clone(),
+            loaded.config.gate_config(),
+            loaded.config.max_download_file_size(),
+            mcp_status,
+            mcp_allowed_hosts,
+        )
+        .with_api_token(api_token.as_deref()),
+    );
     let app = build_app_router(state, webhook_cfg, mcp_token);
 
     let addr: SocketAddr = match args.listen.parse() {

@@ -417,6 +417,55 @@ fn compact_viewport_and_reduced_motion_render_cleanly() {
 }
 
 #[test]
+fn failed_reanalysis_preserves_loaded_image_ref_and_result() {
+    let tmp = TempBuilder::new()
+        .prefix("diving-valid-")
+        .suffix(".tar")
+        .tempfile()
+        .expect("create temporary fixture tar");
+    fs::write(tmp.path(), build_test_image_tar()).expect("write fixture tar");
+    let valid_ref = format!("file://{}", tmp.path().display());
+
+    let mut app = start_desktop_app();
+    app.type_text("Image reference input", &valid_ref)
+        .expect("type valid local tar ref");
+    app.press("Analyze").expect("submit valid image");
+    app.wait_for_within("Layers", Duration::from_secs(10))
+        .expect("enter Inspector for valid image");
+    assert_eq!(app.screen().matches("text:/diving-valid-/"), Ok(true));
+
+    // Open header search via Mod+L and submit a non-existent file:// path from Inspector
+    app.press_key("cmd+l")
+        .expect("open header search via Mod+L");
+    app.wait_for_within("Header image reference input", Duration::from_secs(3))
+        .expect("render header search input");
+    app.type_text(
+        "Header image reference input",
+        "file:///nonexistent/diving-regression-missing.tar",
+    )
+    .expect("type invalid path");
+    app.press_key("enter").expect("submit invalid path");
+
+    // Error banner appears, while the loaded image ref & Inspector result stay intact
+    app.wait_for_within("Close", Duration::from_secs(10))
+        .expect("show dismissible error banner in Inspector");
+    assert_eq!(
+        app.screen().matches("text:/diving-valid-/"),
+        Ok(true),
+        "header pill should keep the loaded image ref after a failed re-analysis"
+    );
+    assert_eq!(
+        app.screen().matches("text:/diving-regression-missing/"),
+        Ok(false),
+        "header pill should not show the failed image ref"
+    );
+    assert!(
+        app.shows("Layers"),
+        "Inspector workspace should remain intact after a failed re-analysis"
+    );
+}
+
+#[test]
 fn keyboard_arrow_keys_step_through_layers() {
     let tmp = TempBuilder::new()
         .suffix(".tar")
