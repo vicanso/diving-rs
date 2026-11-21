@@ -68,9 +68,14 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
         CommandItem::new("action:clear_cache", t(lang, "cmd.clear_cache"))
             .group(group_actions)
             .keywords(["clean", "cache", "gc"]),
-        CommandItem::new("action:home", t(lang, "cmd.back_home"))
+        CommandItem::new("action:home", t(lang, "sidebar.new_analysis"))
             .group(group_actions)
-            .keywords(["home", "landing"]),
+            .keywords(["home", "landing", "new"])
+            .shortcut("mod+n"),
+        CommandItem::new("action:toggle_sidebar", t(lang, "cmd.toggle_sidebar"))
+            .group(group_actions)
+            .keywords(["sidebar", "panel", "collapse", "navigation"])
+            .shortcut("mod+\\"),
         CommandItem::new("tab:files", t(lang, "tab.files"))
             .group(group_tabs)
             .keywords(["files", "tree", "layers"])
@@ -161,6 +166,7 @@ fn execute_command(state: &AppState, id: &str) {
         }
         "action:clear_cache" => state.clear_cache(),
         "action:home" => state.navigate_home(),
+        "action:toggle_sidebar" => state.toggle_app_sidebar(),
         "tab:files" => switch_tab(state, InspectorTab::FileTree),
         "tab:treemap" => switch_tab(state, InspectorTab::Treemap),
         "tab:findings" => switch_tab(state, InspectorTab::Findings),

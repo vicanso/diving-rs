@@ -8,8 +8,9 @@ pub mod treemap;
 pub use model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
     InspectorTab, LayerFileCounts, LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode,
-    classify_file_preview, classify_layer_opcode, count_layer_file_ops, flatten_file_tree,
-    format_bytes, format_command_lines, format_runtime_compat, image_source_kind, upsert_recent,
+    classify_file_preview, classify_layer_opcode, count_layer_file_ops, findings_total_count,
+    flatten_file_tree, format_bytes, format_command_lines, format_runtime_compat,
+    image_source_kind, upsert_recent,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffRunResult, DivingService};
 pub use state::{AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo};

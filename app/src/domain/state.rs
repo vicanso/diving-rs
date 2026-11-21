@@ -28,7 +28,8 @@ use crate::i18n::{UiLang, t, tf};
 
 const KEY_LANG: &str = "diving.lang";
 const KEY_APPEARANCE: &str = "diving.appearance";
-const KEY_SIDEBAR_WIDTH: &str = "diving.sidebar_width";
+const KEY_SIDEBAR_WIDTH: &str = "diving.layers_pane_width";
+const KEY_APP_SIDEBAR_OPEN: &str = "diving.app_sidebar_open";
 const KEY_RECENT_IMAGES: &str = "diving.recent_images";
 const MAX_RECENT_IMAGES: usize = 12;
 
@@ -69,10 +70,12 @@ pub struct AppState {
     pub route: Signal<AppRoute>,
     pub lang: Signal<UiLang>,
     pub appearance: Signal<Appearance>,
+    pub app_sidebar_open: Signal<bool>,
     pub sidebar_width: Signal<Points>,
     pub recent_images: Signal<Vec<RecentImageEntry>>,
     pub image_input: Signal<String>,
     pub arch_input: Signal<Option<SharedString>>,
+    pub header_search_open: Signal<bool>,
     pub current_image: Signal<String>,
     pub request_id: Signal<u64>,
     pub is_loading: Signal<bool>,
@@ -160,24 +163,33 @@ impl AppState {
 
         let saved_sidebar = Storage::get_item(KEY_SIDEBAR_WIDTH)
             .and_then(|raw| raw.parse::<f32>().ok())
-            .map(|w| px(w.clamp(240.0, 440.0)))
-            .unwrap_or_else(|| px(320.0));
+            .map(|w| px(w.clamp(260.0, 480.0)))
+            .unwrap_or_else(|| px(340.0));
 
         let saved_recent = Storage::get_item(KEY_RECENT_IMAGES)
             .and_then(|raw| serde_json::from_str::<Vec<RecentImageEntry>>(&raw).ok())
             .unwrap_or_default();
 
-        let compact_viewport = window().width < px(1100.0);
+        let compact_viewport = window().width < px(1080.0);
+        let saved_app_sidebar = if compact_viewport {
+            false
+        } else {
+            Storage::get_item(KEY_APP_SIDEBAR_OPEN)
+                .map(|raw| raw != "false")
+                .unwrap_or(true)
+        };
 
         Self {
             service,
             route: signal(AppRoute::Landing),
             lang: signal(saved_lang),
             appearance: signal(saved_appearance),
+            app_sidebar_open: signal(saved_app_sidebar),
             sidebar_width: signal(saved_sidebar),
             recent_images: signal(saved_recent),
             image_input: signal(String::new()),
             arch_input: signal(None),
+            header_search_open: signal(false),
             current_image: signal(String::new()),
             request_id: signal(0),
             is_loading: signal(false),
@@ -284,19 +296,39 @@ impl AppState {
     }
 
     pub fn set_sidebar_width(&self, width: Points) {
-        let clamped = px(width.0.clamp(240.0, 440.0));
+        let clamped = px(width.0.clamp(260.0, 480.0));
         self.sidebar_width.set(clamped);
         let _ = Storage::set_item(KEY_SIDEBAR_WIDTH, format!("{:.0}", clamped.0));
     }
 
+    pub fn toggle_app_sidebar(&self) {
+        let next = !self.app_sidebar_open.get_untracked();
+        self.app_sidebar_open.set(next);
+        let _ = Storage::set_item(KEY_APP_SIDEBAR_OPEN, if next { "true" } else { "false" });
+    }
+
     pub fn navigate_home(&self) {
         self.preview_sheet_open.set(false);
+        self.header_search_open.set(false);
         self.route.set(AppRoute::Landing);
     }
 
     pub fn open_gallery(&self) {
         self.preview_sheet_open.set(false);
+        self.header_search_open.set(false);
         self.route.set(AppRoute::Gallery);
+    }
+
+    pub fn open_header_search(&self) {
+        self.header_search_open.set(true);
+        let input_ref = self.search_input_ref;
+        self.schedule_app_timeout(Duration::from_millis(20), move || {
+            input_ref.focus();
+        });
+    }
+
+    pub fn close_header_search(&self) {
+        self.header_search_open.set(false);
     }
 
     pub fn submit_current_input(&self) {
@@ -305,6 +337,7 @@ impl AppState {
         if trimmed.is_empty() {
             return;
         }
+        self.header_search_open.set(false);
         let arch = self
             .arch_input
             .get_untracked()
@@ -343,6 +376,7 @@ impl AppState {
             t(self.lang.get_untracked(), "landing.analyzing").to_owned(),
         ));
         self.status_notice.set(None);
+        self.header_search_open.set(false);
 
         let lang = self.lang.get_untracked();
         let (handle, mut rx) = self.service.start_analyze_with_options(
@@ -756,7 +790,14 @@ impl AppState {
     }
 
     pub fn focus_search_input(&self) {
-        self.search_input_ref.focus();
+        if matches!(
+            self.route.get_untracked(),
+            AppRoute::Inspector | AppRoute::Diff
+        ) {
+            self.open_header_search();
+        } else {
+            self.search_input_ref.focus();
+        }
     }
 
     pub fn focus_tree_filter(&self) {

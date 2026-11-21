@@ -8,6 +8,7 @@ pub mod inspector;
 pub mod landing;
 pub mod local_picker;
 pub mod menu_and_keys;
+pub mod sidebar;
 pub mod title_bar;
 
 pub use command_palette::command_palette_overlay;
@@ -17,7 +18,8 @@ pub use inspector::inspector_workspace;
 pub use landing::landing_view;
 pub use local_picker::local_picker_dialog;
 pub use menu_and_keys::install_desktop_menus_and_keys;
-pub use title_bar::desktop_title_bar;
+pub use sidebar::app_sidebar;
+pub use title_bar::content_header_bar;
 
 use crate::i18n::{UiLang, t};
 use crate::ui::SelectItem;

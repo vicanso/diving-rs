@@ -8,13 +8,13 @@ test("renders Landing and toggles EN/ZH localization", async () => {
     platform: "macos",
   });
   expect(app.texts()).toContain("Diving");
-  expect(app.texts()).toContain("Dive into every layer");
+  expect(app.texts()).toContain("Inspect container image");
   expect(app.texts()).toContain("Analyze");
   expect(app.texts()).toContain("Open local file…");
 
   await app.press("中");
-  expect(app.texts()).toContain("潜入每一层镜像");
+  expect(app.texts()).toContain("分析容器镜像");
 
   await app.press("EN");
-  expect(app.texts()).toContain("Dive into every layer");
+  expect(app.texts()).toContain("Inspect container image");
 });

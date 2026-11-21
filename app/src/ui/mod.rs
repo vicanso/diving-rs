@@ -15,9 +15,14 @@ pub mod overlay;
 pub mod tabs;
 pub mod theme;
 
-pub use button::{ButtonVariant, UiSize, ui_brand_home_button, ui_button, ui_icon_button, ui_link};
+pub use button::{
+    ButtonVariant, UiSize, ui_action_card, ui_button, ui_icon_button, ui_image_pill_button,
+    ui_link, ui_recent_item, ui_sidebar_item,
+};
 pub use code::{ui_code_viewer, ui_diff_viewer, ui_hex_viewer};
-pub use controls::{SegmentOption, ui_checkbox, ui_segmented, ui_select, ui_switch};
+pub use controls::{
+    SegmentOption, ui_borderless_select, ui_checkbox, ui_segmented, ui_select, ui_switch,
+};
 pub use data::{
     BadgeTone, FileOpKind, LayerOpcodeKind, ui_badge, ui_empty_state, ui_opcode_pill, ui_panel,
     ui_panel_titled, ui_progress_bar, ui_resizable_split, ui_separator, ui_size_bar, ui_skeleton,
@@ -25,11 +30,13 @@ pub use data::{
 };
 pub use gallery::{UiGallery, ui_gallery};
 pub use icons::{IconName, ui_icon};
-pub use input::{InputSubmit, ui_field, ui_input, ui_input_with_ref, ui_search_input};
+pub use input::{
+    InputSubmit, ui_bare_input_with_ref, ui_field, ui_input, ui_input_with_ref, ui_search_input,
+};
 pub use nsh_base::{SelectItem, theme};
 pub use overlay::{
-    BannerTone, CommandItem, ui_banner, ui_command_palette, ui_context_menu, ui_dialog, ui_menu,
-    ui_menu_item, ui_menu_separator, ui_popover, ui_sheet, ui_tooltip,
+    BannerTone, CommandItem, format_shortcut_hint, ui_banner, ui_command_palette, ui_context_menu,
+    ui_dialog, ui_menu, ui_menu_item, ui_menu_separator, ui_popover, ui_sheet, ui_tooltip,
 };
 pub use tabs::{TabOption, ui_tabs};
 pub use theme::{

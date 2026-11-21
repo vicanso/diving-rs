@@ -109,6 +109,16 @@ fn bind_global_keys(state: AppState) {
         move |_| slash_state.focus_tree_filter(),
     );
 
+    let sidebar_state = state.clone();
+    on_key_with("mod+\\", always, move |_| {
+        sidebar_state.toggle_app_sidebar();
+    });
+
+    let new_state = state.clone();
+    on_key_with("mod+n", always, move |_| {
+        new_state.navigate_home();
+    });
+
     let nav_options = KeyOptions {
         when: When::NotEditing,
         repeat: true,
@@ -134,12 +144,15 @@ fn bind_global_keys(state: AppState) {
             ..Default::default()
         },
         move |_| {
-            if !any_overlay_open(&esc_state)
-                && esc_state.route.get_untracked() == AppRoute::Inspector
-                && esc_state.active_tab.get_untracked() == InspectorTab::FileTree
-                && !esc_state.tree_keyword.get_untracked().is_empty()
-            {
-                esc_state.tree_keyword.set(String::new());
+            if !any_overlay_open(&esc_state) {
+                if esc_state.header_search_open.get_untracked() {
+                    esc_state.close_header_search();
+                } else if esc_state.route.get_untracked() == AppRoute::Inspector
+                    && esc_state.active_tab.get_untracked() == InspectorTab::FileTree
+                    && !esc_state.tree_keyword.get_untracked().is_empty()
+                {
+                    esc_state.tree_keyword.set(String::new());
+                }
             }
         },
     );
@@ -180,12 +193,14 @@ fn build_app_menu(
     active_tab: InspectorTab,
 ) -> Vec<MenuItem> {
     let open_file_s = state.clone();
+    let new_s = state.clone();
     let local_s = state.clone();
     let compare_s = state.clone();
     let export_s = state.clone();
     let reanalyze_s = state.clone();
     let clean_s = state.clone();
     let palette_s = state.clone();
+    let sidebar_s = state.clone();
     let search_s = state.clone();
     let tab1_s = state.clone();
     let tab2_s = state.clone();
@@ -213,6 +228,10 @@ fn build_app_menu(
     let file_menu = MenuItem::submenu(
         t(lang, "menu.file"),
         [
+            MenuItem::new(t(lang, "sidebar.new_analysis"))
+                .shortcut("mod+n")
+                .on_select(move || new_s.navigate_home()),
+            MenuItem::separator(),
             MenuItem::new(t(lang, "menu.open_local_file"))
                 .shortcut("mod+o")
                 .on_select(move || open_file_s.open_local_file_dialog()),
@@ -262,6 +281,9 @@ fn build_app_menu(
             MenuItem::new(t(lang, "cmd.open_palette"))
                 .shortcut("mod+k")
                 .on_select(move || palette_s.toggle_command_palette()),
+            MenuItem::new(t(lang, "cmd.toggle_sidebar"))
+                .shortcut("mod+\\")
+                .on_select(move || sidebar_s.toggle_app_sidebar()),
             MenuItem::new(t(lang, "cmd.focus_search"))
                 .shortcut("mod+l")
                 .on_select(move || search_s.focus_search_input()),

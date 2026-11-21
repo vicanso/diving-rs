@@ -137,14 +137,15 @@ pub fn ui_switch(
         .child(text(label).text_sm().text_color(move || theme().foreground))
 }
 
-/// Styled dropdown selector sharing trigger geometry with `ui_input` and `ui_button`.
-pub fn ui_select<M>(
+#[allow(clippy::too_many_arguments)]
+fn build_select<M>(
     items: impl IntoProp<Vec<SelectItem>, M>,
     value: impl IntoReactive<Option<SharedString>>,
     placeholder: impl IntoReactive<SharedString>,
     accessibility_label: impl Into<SharedString>,
     size: UiSize,
     disabled: impl IntoReactive<bool>,
+    bordered: bool,
     on_change: impl Fn(Option<SharedString>) + 'static,
 ) -> impl IntoElement {
     let items = items.into_prop();
@@ -167,6 +168,40 @@ pub fn ui_select<M>(
         display_placeholder.get()
     };
 
+    let trigger = view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .min_h(size.min_height())
+        .px(size.horizontal_padding())
+        .gap(size.gap())
+        .rounded(move || size.radius())
+        .transition_colors()
+        .duration(move || dur(INSTANT))
+        .when(bordered, |el| {
+            el.bg(move || theme().card)
+                .border_1()
+                .border_color(move || theme().input)
+                .hover(|s| s.bg(move || theme().accent).border_color(border_strong))
+        })
+        .when(!bordered, |el| {
+            el.bg(transparent_black)
+                .hover(|s| s.bg(move || theme().accent))
+        })
+        .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
+        .disabled_style(|s| s.opacity(0.5))
+        .child(
+            text(trigger_label)
+                .text_size(size.font_size())
+                .number_of_lines(1)
+                .text_color(move || theme().foreground),
+        )
+        .child(ui_icon(
+            IconName::ChevronDown,
+            size.icon_size(),
+            move || theme().muted_foreground,
+        ));
+
     select()
         .items(move || items.get())
         .value(move || value.get())
@@ -188,35 +223,51 @@ pub fn ui_select<M>(
                         .text_color(move || theme().popover_foreground),
                 )
         })
-        .trigger(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .min_h(size.min_height())
-                .px(size.horizontal_padding())
-                .gap(size.gap())
-                .rounded(move || size.radius())
-                .bg(move || theme().card)
-                .border_1()
-                .border_color(move || theme().input)
-                .transition_colors()
-                .duration(move || dur(INSTANT))
-                .hover(|s| s.bg(move || theme().accent).border_color(border_strong))
-                .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
-                .disabled_style(|s| s.opacity(0.5))
-                .child(
-                    text(trigger_label)
-                        .text_size(size.font_size())
-                        .number_of_lines(1)
-                        .text_color(move || theme().foreground),
-                )
-                .child(ui_icon(
-                    IconName::ChevronDown,
-                    size.icon_size(),
-                    move || theme().muted_foreground,
-                )),
-        )
+        .trigger(trigger)
+}
+
+/// Styled dropdown selector sharing trigger geometry with `ui_input` and `ui_button`.
+pub fn ui_select<M>(
+    items: impl IntoProp<Vec<SelectItem>, M>,
+    value: impl IntoReactive<Option<SharedString>>,
+    placeholder: impl IntoReactive<SharedString>,
+    accessibility_label: impl Into<SharedString>,
+    size: UiSize,
+    disabled: impl IntoReactive<bool>,
+    on_change: impl Fn(Option<SharedString>) + 'static,
+) -> impl IntoElement {
+    build_select(
+        items,
+        value,
+        placeholder,
+        accessibility_label,
+        size,
+        disabled,
+        true,
+        on_change,
+    )
+}
+
+/// Borderless transparent selector for unified composite command bars.
+pub fn ui_borderless_select<M>(
+    items: impl IntoProp<Vec<SelectItem>, M>,
+    value: impl IntoReactive<Option<SharedString>>,
+    placeholder: impl IntoReactive<SharedString>,
+    accessibility_label: impl Into<SharedString>,
+    size: UiSize,
+    disabled: impl IntoReactive<bool>,
+    on_change: impl Fn(Option<SharedString>) + 'static,
+) -> impl IntoElement {
+    build_select(
+        items,
+        value,
+        placeholder,
+        accessibility_label,
+        size,
+        disabled,
+        false,
+        on_change,
+    )
 }
 
 /// Compact segmented control with shared outer silhouette and single sliding highlight indicator.
@@ -238,15 +289,12 @@ pub fn ui_segmented<T: Clone + PartialEq + 'static>(
         .gap_0p5()
         .rounded(move || size.radius())
         .bg(move || theme().muted)
-        .border_1()
-        .border_color(move || theme().border)
         .indicator_style(|s| {
             s.top(px(2.0))
                 .bottom(px(2.0))
                 .rounded(radius_inset)
                 .bg(move || theme().card)
-                .border_1()
-                .border_color(move || theme().border)
+                .shadow_xs()
         })
         .children(options.into_iter().map(move |opt| {
             let value = opt.value;
@@ -258,7 +306,7 @@ pub fn ui_segmented<T: Clone + PartialEq + 'static>(
             tab()
                 .selected(move || cur_sel.get() == value)
                 .on_press(move || on_change(val_press.clone()))
-                .min_h(px((size.min_height().0 - 6.0).max(18.0)))
+                .min_h(px((size.min_height().0 - 4.0).max(18.0)))
                 .px_2p5()
                 .flex_row()
                 .items_center()

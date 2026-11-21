@@ -65,7 +65,7 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
     view()
         .w_full()
         .flex_col()
-        .bg(move || theme().card)
+        .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
         .child(dynamic(move || {
@@ -201,8 +201,6 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                         .py_2()
                         .rounded(radius_inset)
                         .bg(move || theme().muted)
-                        .border_1()
-                        .border_color(move || theme().border)
                         .children(visible_lines.into_iter().map(move |line| {
                             let mut txt = text(line)
                                 .text_xs()
@@ -229,13 +227,13 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
         .flex_row()
         .flex_wrap()
         .items_center()
-        .gap_2p5()
+        .gap_2()
         .px_4()
-        .py_2()
-        .bg(move || theme().card)
+        .py_1p5()
+        .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
-        .child(view().flex_1().min_w(px(190.0)).child(ui_search_input(
+        .child(view().flex_1().min_w(px(140.0)).child(ui_search_input(
             state.tree_keyword,
             move || t(lang.get(), "tree.filter_placeholder").to_owned(),
             "Filter files in layer",
@@ -252,7 +250,7 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
             false,
             move |next| state.tree_modifications_only.set(next),
         ))
-        .child(view().w(px(110.0)).child(ui_select(
+        .child(view().w(px(96.0)).child(ui_select(
             move || min_size_items(lang.get()),
             min_size_str,
             move || SharedString::from(t(lang.get(), "tree.size_all")),
@@ -280,24 +278,31 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
             false,
             move |next| state.tree_show_meta_cols.set(next),
         ))
-        .child(ui_button(
-            move || SharedString::from(t(lang.get(), "tree.expand_all")),
-            ButtonVariant::Ghost,
-            UiSize::Xs,
-            None,
-            false,
-            false,
-            move || expand_state.expand_all_dirs(),
-        ))
-        .child(ui_button(
-            move || SharedString::from(t(lang.get(), "tree.collapse_all")),
-            ButtonVariant::Ghost,
-            UiSize::Xs,
-            None,
-            false,
-            false,
-            move || collapse_state.collapse_all_dirs(),
-        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(ui_button(
+                    move || SharedString::from(t(lang.get(), "tree.expand_all")),
+                    ButtonVariant::Ghost,
+                    UiSize::Xs,
+                    None,
+                    false,
+                    false,
+                    move || expand_state.expand_all_dirs(),
+                ))
+                .child(ui_button(
+                    move || SharedString::from(t(lang.get(), "tree.collapse_all")),
+                    ButtonVariant::Ghost,
+                    UiSize::Xs,
+                    None,
+                    false,
+                    false,
+                    move || collapse_state.collapse_all_dirs(),
+                )),
+        )
 }
 
 fn column_header(state: AppState) -> impl IntoElement {
@@ -311,7 +316,7 @@ fn column_header(state: AppState) -> impl IntoElement {
         .items_center()
         .gap_2()
         .px_4()
-        .bg(move || theme().muted)
+        .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
         .child(

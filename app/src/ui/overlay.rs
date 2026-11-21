@@ -66,7 +66,7 @@ pub fn ui_menu_item(
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
     let disabled = disabled.into_reactive();
-    let shortcut_label = shortcut.map(|s| SharedString::from(keystroke_label_hint(s)));
+    let shortcut_label = shortcut.map(|s| SharedString::from(format_shortcut_hint(s)));
     menu_item()
         .disabled(disabled)
         .on_select(on_select)
@@ -107,11 +107,33 @@ pub fn ui_menu_item(
         })
 }
 
-fn keystroke_label_hint(raw: &str) -> String {
+/// Formats shortcut strings like `"mod+shift+o"` using native platform symbols (`⇧⌘O` / `Ctrl+Shift+O`).
+pub fn format_shortcut_hint(raw: &str) -> String {
+    let mut parts: Vec<&str> = raw.split('+').collect();
+    let key = parts.pop().unwrap_or_default().to_ascii_uppercase();
+    let has_mod = parts.iter().any(|p| p.eq_ignore_ascii_case("mod"));
+    let has_shift = parts.iter().any(|p| p.eq_ignore_ascii_case("shift"));
+
     if apple_keys() {
-        raw.replace("mod+", "⌘").replace("shift+", "⇧")
+        let mut out = String::new();
+        if has_shift {
+            out.push('⇧');
+        }
+        if has_mod {
+            out.push('⌘');
+        }
+        out.push_str(&key);
+        out
     } else {
-        raw.replace("mod+", "Ctrl+").replace("shift+", "Shift+")
+        let mut out = String::new();
+        if has_mod {
+            out.push_str("Ctrl+");
+        }
+        if has_shift {
+            out.push_str("Shift+");
+        }
+        out.push_str(&key);
+        out
     }
 }
 
@@ -491,8 +513,6 @@ pub fn ui_command_palette<M>(
                                                 .py_0p5()
                                                 .rounded(radius_inset)
                                                 .bg(move || theme().muted)
-                                                .border_1()
-                                                .border_color(move || theme().border)
                                                 .child(
                                                     text(keys)
                                                         .text_xs()

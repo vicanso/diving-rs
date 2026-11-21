@@ -140,7 +140,7 @@ The workspace separates the reusable analysis engine (`diving-core`) from applic
 - **`app/`**: Native Desktop app (`nsh 0.6.1`, `DESIGN.md`, `theme.json`, `nsh.json`):
   - `src/domain/`: pure derivations (`model.rs`, `treemap.rs`), Tokio `DivingService` (`service.rs`), persistent reactive `AppState` (`state.rs`)
   - `src/ui/`: token-backed component library (`theme.rs`, `motion.rs`, `button.rs`, `controls.rs`, `data.rs`, `input.rs`, `overlay.rs`, `tabs.rs`, `code.rs`, `gallery.rs`)
-  - `src/features/`: desktop views & overlays (`title_bar.rs`, `landing.rs`, `inspector/{mod,layer_timeline,file_tree,treemap,findings,dockerfile}.rs`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`)
+  - `src/features/`: desktop views & overlays (`sidebar.rs`, `title_bar.rs`, `landing.rs`, `inspector/{mod,layer_timeline,file_tree,treemap,findings,dockerfile}.rs`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`)
 
 ### Web Frontend (`web/`)
 

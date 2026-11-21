@@ -1,14 +1,14 @@
-//! Landing view with composite image search, local source actions, progressive preview, and history.
+//! Minimal desktop workbench launcher: seamless unified command bar, tonal quick actions, and progressive preview.
 
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, RecentImageEntry, format_bytes};
+use crate::domain::{AppState, format_bytes};
 use crate::features::arch_select_items;
 use crate::i18n::{t, tf};
 use crate::ui::{
-    BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, radius_control, radius_lg, theme,
-    ui_badge, ui_banner, ui_button, ui_icon, ui_input_with_ref, ui_panel_titled, ui_progress_bar,
-    ui_select, ui_separator, ui_skeleton,
+    BannerTone, ButtonVariant, IconName, UiSize, border_strong, font_mono_family, radius_control,
+    radius_lg, text_tertiary, theme, ui_action_card, ui_banner, ui_bare_input_with_ref,
+    ui_borderless_select, ui_button, ui_icon, ui_panel_titled, ui_progress_bar, ui_skeleton,
 };
 
 const SAMPLE_IMAGES: &[&str] = &[
@@ -18,7 +18,7 @@ const SAMPLE_IMAGES: &[&str] = &[
     "node:22-alpine",
 ];
 
-/// Renders the centered Landing workspace.
+/// Renders the calm centered Desktop Launcher in the main stage.
 pub fn landing_view(state: AppState) -> impl IntoElement {
     let err_cond = state.clone();
     let err_view = state.clone();
@@ -26,89 +26,102 @@ pub fn landing_view(state: AppState) -> impl IntoElement {
     let notice_view = state.clone();
     let preview_cond = state.clone();
     let preview_view = state.clone();
-    let recent_cond = state.clone();
-    let recent_view = state.clone();
+    let compact_height = window().height < px(700.0);
 
     scroll().flex_1().child(
-        view().w_full().items_center().py_8().px_6().child(
-            view()
-                .w_full()
-                .max_w(px(700.0))
-                .flex_col()
-                .gap_6()
-                .child(hero_header(state.clone()))
-                .child(search_card(state.clone()))
-                .child(local_source_actions(state.clone()))
-                .child(sample_chips(state))
-                .child(when(
-                    move || err_cond.analyze_error.get().is_some(),
-                    move || error_banner(err_view.clone()),
-                ))
-                .child(when(
-                    move || notice_cond.status_notice.get().is_some(),
-                    move || {
-                        let s = notice_view.clone();
-                        ui_banner(
-                            BannerTone::Info,
-                            move || SharedString::from(s.status_notice.get().unwrap_or_default()),
-                            None,
-                        )
-                    },
-                ))
-                .child(when(
-                    move || {
-                        preview_cond.is_loading.get()
-                            && (preview_cond.show_preview_card.get()
-                                || preview_cond.preview.get().is_some())
-                    },
-                    move || progressive_preview_card(preview_view.clone()),
-                ))
-                .child(when(
-                    move || !recent_cond.recent_images.get().is_empty(),
-                    move || recent_analyses_panel(recent_view.clone()),
-                )),
-        ),
+        view()
+            .w_full()
+            .items_center()
+            .pt(if compact_height { px(36.0) } else { px(88.0) })
+            .pb_8()
+            .px_6()
+            .child(
+                view()
+                    .w_full()
+                    .max_w(px(620.0))
+                    .flex_col()
+                    .gap_5()
+                    .child(launcher_heading(state.clone()))
+                    .child(unified_command_bar(state.clone()))
+                    .child(quick_action_grid(state.clone()))
+                    .child(sample_strip(state))
+                    .child(when(
+                        move || err_cond.analyze_error.get().is_some(),
+                        move || error_banner(err_view.clone()),
+                    ))
+                    .child(when(
+                        move || notice_cond.status_notice.get().is_some(),
+                        move || {
+                            let s = notice_view.clone();
+                            ui_banner(
+                                BannerTone::Info,
+                                move || {
+                                    SharedString::from(s.status_notice.get().unwrap_or_default())
+                                },
+                                None,
+                            )
+                        },
+                    ))
+                    .child(when(
+                        move || {
+                            preview_cond.is_loading.get()
+                                && (preview_cond.show_preview_card.get()
+                                    || preview_cond.preview.get().is_some())
+                        },
+                        move || progressive_preview_card(preview_view.clone()),
+                    )),
+            ),
     )
 }
 
-fn hero_header(state: AppState) -> impl IntoElement {
+fn launcher_heading(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     view()
-        .flex_col()
-        .gap_2()
-        .pt_6()
-        .child(view().flex_row().child(ui_badge(
-            move || SharedString::from(t(lang.get(), "landing.eyebrow")),
-            BadgeTone::Neutral,
-        )))
+        .flex_row()
+        .items_center()
+        .gap_3()
         .child(
-            text(move || t(lang.get(), "landing.title"))
-                .text_2xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(move || theme().foreground),
+            view()
+                .size(px(32.0))
+                .items_center()
+                .justify_center()
+                .rounded(radius_control)
+                .bg(move || theme().primary.opacity(0.12))
+                .child(ui_icon(IconName::Logo, px(18.0), move || theme().primary)),
         )
         .child(
-            text(move || t(lang.get(), "landing.lead"))
-                .text_sm()
-                .text_color(move || theme().muted_foreground),
+            text(move || t(lang.get(), "landing.title"))
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || theme().foreground),
         )
 }
 
-fn search_card(state: AppState) -> impl IntoElement {
+fn unified_command_bar(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let submit_input = state.clone();
     let submit_btn = state.clone();
 
     view()
+        .w_full()
+        .pl_3()
+        .pr_1p5()
+        .py_1p5()
         .rounded(radius_lg)
         .bg(move || theme().card)
         .border_1()
-        .border_color(move || theme().border)
-        .p_2()
+        .border_color(move || theme().input)
+        .shadow_sm()
         .flex_row()
         .items_center()
         .gap_2()
-        .child(view().flex_1().min_w(px(0.0)).child(ui_input_with_ref(
+        .transition_colors()
+        .hover(|s| s.border_color(border_strong))
+        .focus_within(|s| s.border_color(move || theme().ring))
+        .child(ui_icon(IconName::Search, px(16.0), move || {
+            theme().muted_foreground
+        }))
+        .child(view().flex_1().min_w(px(0.0)).child(ui_bare_input_with_ref(
             state.image_input,
             move || t(lang.get(), "landing.placeholder").to_owned(),
             "Image reference input",
@@ -117,15 +130,27 @@ fn search_card(state: AppState) -> impl IntoElement {
             true,
             Some(Box::new(move |_| submit_input.submit_current_input())),
         )))
-        .child(view().w(px(142.0)).flex_shrink_0().child(ui_select(
-            move || arch_select_items(lang.get()),
-            state.arch_input,
-            move || SharedString::from(t(lang.get(), "landing.arch_auto")),
-            "Target architecture",
-            UiSize::Lg,
-            state.is_loading,
-            move |next| state.arch_input.set(next.filter(|s| !s.is_empty())),
-        )))
+        .child(
+            view()
+                .w(px(1.0))
+                .h(px(20.0))
+                .bg(move || theme().border)
+                .accessibility_elements_hidden(true),
+        )
+        .child(
+            view()
+                .w(px(122.0))
+                .flex_shrink_0()
+                .child(ui_borderless_select(
+                    move || arch_select_items(lang.get()),
+                    state.arch_input,
+                    move || SharedString::from(t(lang.get(), "landing.arch_auto")),
+                    "Target architecture",
+                    UiSize::Md,
+                    state.is_loading,
+                    move |next| state.arch_input.set(next.filter(|s| !s.is_empty())),
+                )),
+        )
         .child(ui_button(
             move || {
                 SharedString::from(if submit_btn.is_loading.get() {
@@ -135,62 +160,67 @@ fn search_card(state: AppState) -> impl IntoElement {
                 })
             },
             ButtonVariant::Primary,
-            UiSize::Lg,
-            Some(IconName::Search),
+            UiSize::Md,
+            None,
             false,
             state.is_loading,
             move || submit_btn.submit_current_input(),
         ))
 }
 
-fn local_source_actions(state: AppState) -> impl IntoElement {
+fn quick_action_grid(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let file_state = state.clone();
     let local_state = state.clone();
+    let compare_state = state;
 
     view()
+        .w_full()
         .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_3()
-        .child(ui_button(
+        .items_stretch()
+        .gap_2p5()
+        .child(ui_action_card(
             move || SharedString::from(t(lang.get(), "menu.open_local_file")),
-            ButtonVariant::Outline,
-            UiSize::Md,
-            Some(IconName::FolderInput),
-            false,
-            false,
+            move || SharedString::from(t(lang.get(), "landing.quick_local_file_desc")),
+            IconName::FolderInput,
+            Some("mod+o"),
             move || file_state.open_local_file_dialog(),
         ))
-        .child(ui_button(
+        .child(ui_action_card(
             move || SharedString::from(t(lang.get(), "menu.browse_local_images")),
-            ButtonVariant::Outline,
-            UiSize::Md,
-            Some(IconName::Container),
-            false,
-            false,
+            move || SharedString::from(t(lang.get(), "landing.quick_docker_desc")),
+            IconName::Container,
+            Some("mod+shift+o"),
             move || local_state.open_local_picker(),
+        ))
+        .child(ui_action_card(
+            move || SharedString::from(t(lang.get(), "menu.compare_with")),
+            move || SharedString::from(t(lang.get(), "landing.quick_compare_desc")),
+            IconName::Compare,
+            Some("mod+d"),
+            move || compare_state.open_compare_dialog(),
         ))
 }
 
-fn sample_chips(state: AppState) -> impl IntoElement {
+fn sample_strip(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     view()
         .flex_row()
         .flex_wrap()
         .items_center()
-        .gap_2()
+        .gap_1p5()
         .child(
             text(move || format!("{}:", t(lang.get(), "landing.samples")))
                 .text_xs()
-                .text_color(move || theme().muted_foreground),
+                .font_family(font_mono_family())
+                .text_color(text_tertiary),
         )
         .children(SAMPLE_IMAGES.iter().map(|sample| {
             let click_state = state.clone();
             let image_name = *sample;
             ui_button(
                 image_name,
-                ButtonVariant::Outline,
+                ButtonVariant::Ghost,
                 UiSize::Xs,
                 None,
                 state.is_loading,
@@ -231,7 +261,7 @@ fn progressive_preview_card(state: AppState) -> impl IntoElement {
         Some(
             ui_button(
                 move || SharedString::from(t(lang.get(), "landing.cancel")),
-                ButtonVariant::Outline,
+                ButtonVariant::Ghost,
                 UiSize::Xs,
                 Some(IconName::Close),
                 false,
@@ -271,7 +301,7 @@ fn progressive_preview_card(state: AppState) -> impl IntoElement {
                     );
                     view()
                         .flex_col()
-                        .gap_2()
+                        .gap_1p5()
                         .child(
                             text(meta)
                                 .text_xs()
@@ -294,91 +324,4 @@ fn progressive_preview_card(state: AppState) -> impl IntoElement {
                 }
             })),
     ))
-}
-
-fn recent_analyses_panel(state: AppState) -> impl IntoElement {
-    let lang = state.lang;
-    let recent = state.recent_images;
-
-    ui_panel_titled(
-        move || SharedString::from(t(lang.get(), "landing.recent")),
-        None,
-        view().flex_col().gap_1().child(each(
-            move || recent.get(),
-            |entry: &RecentImageEntry| format!("{}@{}", entry.image, entry.arch),
-            move |entry, idx| {
-                let row_state = state.clone();
-                let snapshot = entry.get_untracked();
-                let entry_for_click = snapshot.clone();
-                let entry_name = snapshot.image;
-                let entry_arch = snapshot.arch;
-                let entry_size = format_bytes(snapshot.total_size);
-                let entry_score = format!("{}%", snapshot.score);
-                let score_tone = if snapshot.score >= 95 {
-                    BadgeTone::Success
-                } else if snapshot.score >= 85 {
-                    BadgeTone::Warning
-                } else {
-                    BadgeTone::Danger
-                };
-
-                view()
-                    .flex_col()
-                    .child(when(move || idx.get() > 0, ui_separator))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .px_2p5()
-                            .py_2()
-                            .rounded(radius_control)
-                            .hover(|s| s.bg(move || theme().accent))
-                            .on_press(move || {
-                                let arch = if entry_for_click.arch.is_empty() {
-                                    None
-                                } else {
-                                    Some(entry_for_click.arch.clone())
-                                };
-                                row_state.analyze(entry_for_click.image.clone(), arch);
-                            })
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .items_center()
-                                    .gap_2()
-                                    .child(ui_icon(IconName::Layers, px(14.0), move || {
-                                        theme().muted_foreground
-                                    }))
-                                    .child(
-                                        text(entry_name)
-                                            .text_sm()
-                                            .number_of_lines(1)
-                                            .text_color(move || theme().foreground),
-                                    )
-                                    .when(!entry_arch.is_empty(), |row| {
-                                        row.child(ui_badge(entry_arch, BadgeTone::Neutral))
-                                    }),
-                            )
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2p5()
-                                    .flex_shrink_0()
-                                    .child(
-                                        text(entry_size)
-                                            .text_xs()
-                                            .tabular_nums()
-                                            .text_color(move || theme().muted_foreground),
-                                    )
-                                    .child(ui_badge(entry_score, score_tone)),
-                            ),
-                    )
-            },
-        )),
-    )
 }

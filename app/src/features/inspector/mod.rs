@@ -1,4 +1,4 @@
-//! Main Image Inspector workspace: KPI strip, LayerTimeline, tabbed views, and status bar.
+//! Main Image Inspector workspace: single-line metric ribbon, LayerTimeline, detail canvas, and status bar.
 
 pub mod dockerfile;
 pub mod file_tree;
@@ -12,14 +12,13 @@ use diving_core::{DockerAnalyzeResult, DockerAnalyzeSummary};
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, InspectorTab, LayerFileCounts, count_layer_file_ops, format_bytes,
-    format_runtime_compat, image_source_kind,
+    AppState, InspectorTab, format_bytes, format_runtime_compat, image_source_kind,
 };
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
-    BadgeTone, BannerTone, ButtonVariant, IconName, TabOption, UiSize, danger, font_mono_family,
-    success, theme, ui_badge, ui_banner, ui_button, ui_empty_state, ui_icon, ui_resizable_split,
-    ui_tabs, warning,
+    BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, danger, font_mono_family, success,
+    text_tertiary, theme, ui_badge, ui_banner, ui_button, ui_empty_state, ui_icon,
+    ui_resizable_split, warning,
 };
 
 /// Renders the full Inspector view once an analysis result is present.
@@ -65,12 +64,12 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
             let split_state = state.clone();
             let resize_state = state.clone();
             let compact = window().width < px(1100.0);
-            let left_max = if compact { px(260.0) } else { px(440.0) };
+            let left_max = if compact { px(320.0) } else { px(480.0) };
             let left_initial = px(state
                 .sidebar_width
                 .get_untracked()
                 .0
-                .clamp(240.0, left_max.0));
+                .clamp(260.0, left_max.0));
 
             view()
                 .flex_1()
@@ -79,7 +78,7 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                 .when_some(res.stale_as_of.clone(), |col, stale_time| {
                     let s = retry_state.clone();
                     col.child(
-                        view().px_4().pt_2p5().child(ui_banner(
+                        view().px_4().pt_2().child(ui_banner(
                             BannerTone::Warning,
                             move || {
                                 SharedString::from(tf(lang.get(), "stale.banner", &[&stale_time]))
@@ -100,16 +99,17 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                     )
                 })
                 .when_some(state.analyze_error.get(), |col, err| {
-                    col.child(view().px_4().pt_2p5().child(ui_banner(
-                        BannerTone::Danger,
-                        err,
-                        None,
-                    )))
+                    col.child(
+                        view()
+                            .px_4()
+                            .pt_2()
+                            .child(ui_banner(BannerTone::Danger, err, None)),
+                    )
                 })
-                .child(kpi_strip(&res, &summary, lang))
+                .child(metric_ribbon(&res, &summary, lang))
                 .child(view().flex_1().min_h(px(0.0)).child(ui_resizable_split(
                     left_initial,
-                    px(240.0),
+                    px(260.0),
                     left_max,
                     layer_timeline::layer_timeline_panel(split_state.clone(), res.clone()),
                     right_workspace(split_state, res.clone(), summary),
@@ -124,7 +124,7 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
         }))
 }
 
-fn kpi_strip(
+fn metric_ribbon(
     res: &Arc<DockerAnalyzeResult>,
     summary: &Arc<DockerAnalyzeSummary>,
     lang: Signal<UiLang>,
@@ -162,50 +162,51 @@ fn kpi_strip(
 
     view()
         .w_full()
+        .min_h(px(36.0))
         .flex_row()
         .flex_wrap()
         .items_center()
         .gap_3()
         .px_4()
-        .py_2p5()
-        .bg(move || theme().card)
+        .py_1p5()
+        .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
-        .child(kpi_item(
+        .child(metric_pair(
             move || SharedString::from(t(lang.get(), "kpi.efficiency")),
             view()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(ui_icon(score_icon, px(14.0), score_color))
+                .child(ui_icon(score_icon, px(13.0), score_color))
                 .child(
                     text(format!("{score}%"))
-                        .text_sm()
+                        .text_xs()
                         .font_family(font_mono_family())
                         .font_weight(FontWeight::SEMIBOLD)
                         .tabular_nums()
                         .text_color(score_color),
                 ),
         ))
-        .child(kpi_divider())
-        .child(kpi_mono_value(
+        .child(metric_divider())
+        .child(metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.image_size")),
             format_bytes(res.total_size),
         ))
-        .child(kpi_divider())
-        .child(kpi_mono_value(
+        .child(metric_divider())
+        .child(metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.compressed")),
             format_bytes(res.size),
         ))
-        .child(kpi_divider())
-        .child(kpi_item(
+        .child(metric_divider())
+        .child(metric_pair(
             move || SharedString::from(t(lang.get(), "kpi.wasted")),
             text(if has_waste {
                 format!("{} ({wasted_pct})", format_bytes(wasted_size))
             } else {
                 "0 B".to_owned()
             })
-            .text_sm()
+            .text_xs()
             .font_family(font_mono_family())
             .font_weight(FontWeight::MEDIUM)
             .tabular_nums()
@@ -217,26 +218,26 @@ fn kpi_strip(
                 }
             }),
         ))
-        .child(kpi_divider())
-        .child(kpi_mono_value(
+        .child(metric_divider())
+        .child(metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.platform")),
             platform,
         ))
         .when(!base_os.is_empty(), |row| {
-            row.child(kpi_divider()).child(kpi_mono_value(
+            row.child(metric_divider()).child(metric_mono_pair(
                 move || SharedString::from(t(lang.get(), "kpi.base_os")),
                 base_os,
             ))
         })
         .when(!user.is_empty(), |row| {
-            row.child(kpi_divider()).child(kpi_mono_value(
+            row.child(metric_divider()).child(metric_mono_pair(
                 move || SharedString::from(t(lang.get(), "kpi.user")),
                 user,
             ))
         })
         .when_some(runtime_tone, |row, tone| {
             let rc = runtime_compat.clone();
-            row.child(kpi_divider()).child(kpi_item(
+            row.child(metric_divider()).child(metric_pair(
                 move || SharedString::from(t(lang.get(), "kpi.libc")),
                 ui_badge(
                     move || {
@@ -251,7 +252,7 @@ fn kpi_strip(
             ))
         })
         .when(!tags.is_empty(), |row| {
-            row.child(kpi_divider()).child(
+            row.child(metric_divider()).child(
                 view()
                     .flex_row()
                     .items_center()
@@ -267,18 +268,22 @@ fn kpi_strip(
         })
 }
 
-fn kpi_divider() -> impl IntoElement {
+fn metric_divider() -> impl IntoElement {
     view()
         .w(px(1.0))
-        .h(px(26.0))
+        .h(px(12.0))
         .bg(move || theme().border)
         .accessibility_elements_hidden(true)
 }
 
-fn kpi_item(label: impl IntoReactive<SharedString>, value: impl IntoElement) -> impl IntoElement {
+fn metric_pair(
+    label: impl IntoReactive<SharedString>,
+    value: impl IntoElement,
+) -> impl IntoElement {
     view()
-        .flex_col()
-        .gap_0p5()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
         .child(
             text(label)
                 .text_xs()
@@ -287,14 +292,14 @@ fn kpi_item(label: impl IntoReactive<SharedString>, value: impl IntoElement) -> 
         .child(value)
 }
 
-fn kpi_mono_value(
+fn metric_mono_pair(
     label: impl IntoReactive<SharedString>,
     value: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
-    kpi_item(
+    metric_pair(
         label,
         text(value)
-            .text_sm()
+            .text_xs()
             .font_family(font_mono_family())
             .font_weight(FontWeight::MEDIUM)
             .tabular_nums()
@@ -307,23 +312,7 @@ fn right_workspace(
     res: Arc<DockerAnalyzeResult>,
     summary: Arc<DockerAnalyzeSummary>,
 ) -> impl IntoElement {
-    let lang = state.lang;
     let active_tab = state.active_tab;
-    let selected_layer = state.selected_layer;
-
-    let res_for_count = res.clone();
-    let files_tab_label = move || -> SharedString {
-        let count = res_for_count
-            .file_tree_list
-            .get(selected_layer.get())
-            .map_or(0, |tree| count_layer_file_ops(tree).let_total());
-        SharedString::from(format!("{} ({count})", t(lang.get(), "tab.files")))
-    };
-    let findings_count = res.recommendations.len()
-        + res.sensitive_files.len()
-        + res.duplicate_groups.len()
-        + usize::from(!summary.wasted_list.is_empty())
-        + usize::from(!res.big_modified_file_list.is_empty());
 
     view()
         .flex_1()
@@ -331,67 +320,20 @@ fn right_workspace(
         .min_h(px(0.0))
         .flex_col()
         .bg(move || theme().background)
-        .child(
-            view()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(move || theme().border)
-                .bg(move || theme().card)
-                .child(ui_tabs(
-                    vec![
-                        TabOption::new(
-                            InspectorTab::FileTree,
-                            files_tab_label,
-                            Some(IconName::Layers),
-                        ),
-                        TabOption::new(
-                            InspectorTab::Treemap,
-                            move || SharedString::from(t(lang.get(), "tab.treemap")),
-                            Some(IconName::Treemap),
-                        ),
-                        TabOption::new(
-                            InspectorTab::Findings,
-                            move || {
-                                SharedString::from(format!(
-                                    "{} ({findings_count})",
-                                    t(lang.get(), "tab.findings")
-                                ))
-                            },
-                            Some(IconName::Findings),
-                        ),
-                        TabOption::new(
-                            InspectorTab::Dockerfile,
-                            move || SharedString::from(t(lang.get(), "tab.dockerfile")),
-                            Some(IconName::Dockerfile),
-                        ),
-                    ],
-                    active_tab,
-                    "Inspector workspace tabs",
-                    move |tab| active_tab.set(tab),
-                )),
-        )
-        .child(
-            view()
-                .flex_1()
-                .min_h(px(0.0))
-                .flex_col()
-                .child(dynamic(move || match active_tab.get() {
-                    InspectorTab::FileTree => {
-                        file_tree::file_tree_tab(state.clone(), res.clone()).into_element()
-                    }
-                    InspectorTab::Treemap => {
-                        treemap::treemap_tab(state.clone(), res.clone()).into_element()
-                    }
-                    InspectorTab::Findings => {
-                        findings::findings_tab(state.clone(), res.clone(), summary.clone())
-                            .into_element()
-                    }
-                    InspectorTab::Dockerfile => {
-                        dockerfile::dockerfile_tab(state.clone(), res.clone()).into_element()
-                    }
-                })),
-        )
+        .child(dynamic(move || match active_tab.get() {
+            InspectorTab::FileTree => {
+                file_tree::file_tree_tab(state.clone(), res.clone()).into_element()
+            }
+            InspectorTab::Treemap => {
+                treemap::treemap_tab(state.clone(), res.clone()).into_element()
+            }
+            InspectorTab::Findings => {
+                findings::findings_tab(state.clone(), res.clone(), summary.clone()).into_element()
+            }
+            InspectorTab::Dockerfile => {
+                dockerfile::dockerfile_tab(state.clone(), res.clone()).into_element()
+            }
+        }))
 }
 
 fn bottom_status_bar(state: AppState) -> impl IntoElement {
@@ -406,8 +348,8 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .px_3()
-        .bg(move || theme().card)
+        .px_3p5()
+        .bg(move || theme().background)
         .border_t_1()
         .border_color(move || theme().border)
         .child(
@@ -415,8 +357,8 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
                 InspectorTab::FileTree => t(lang.get(), "status.hints_files"),
                 _ => t(lang.get(), "status.hints_general"),
             })
-            .text_xs()
-            .text_color(move || theme().muted_foreground),
+            .text_size(px(11.0))
+            .text_color(text_tertiary),
         )
         .child(
             view()
@@ -427,7 +369,7 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
                     move || notice.get().is_some(),
                     move || {
                         text(move || notice.get().unwrap_or_default())
-                            .text_xs()
+                            .text_size(px(11.0))
                             .text_color(move || theme().foreground)
                     },
                 ))
@@ -439,14 +381,4 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
                     BadgeTone::Neutral,
                 )),
         )
-}
-
-trait LayerCountsExt {
-    fn let_total(self) -> usize;
-}
-
-impl LayerCountsExt for LayerFileCounts {
-    fn let_total(self) -> usize {
-        self.added + self.modified + self.removed
-    }
 }

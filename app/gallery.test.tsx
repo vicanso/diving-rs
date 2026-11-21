@@ -26,7 +26,7 @@ test("landing renders light theme screenshot on macos", async () => {
     platform: "macos",
   });
   expect(app.texts()).toContain("Diving");
-  expect(app.texts()).toContain("Dive into every layer");
+  expect(app.texts()).toContain("Inspect container image");
   await app.waitFor("Analyze");
   await captureIfGraphical(app, ".nsh/out/landing-light.png");
 });
@@ -39,7 +39,7 @@ test("landing renders dark theme screenshot on macos", async () => {
     platform: "macos",
   });
   expect(app.texts()).toContain("Diving");
-  expect(app.texts()).toContain("Dive into every layer");
+  expect(app.texts()).toContain("Inspect container image");
   await app.waitFor("Analyze");
   await captureIfGraphical(app, ".nsh/out/landing-dark.png");
 });
@@ -162,4 +162,19 @@ test("inspector renders cleanly with reducedMotion on macos", async () => {
   await app.waitFor("Layers");
   await app.press("Treemap");
   await app.waitFor("Root");
+});
+
+test("landing with recent analysis renders dark theme screenshot on macos", async () => {
+  const app = await open(".", {
+    width: 1280,
+    height: 820,
+    colorScheme: "dark",
+    platform: "macos",
+  });
+  await app.type("Image reference input", FIXTURE_REF);
+  await app.press("Analyze");
+  await app.waitFor("Layers");
+  await app.keyboard.press("mod+n");
+  await app.waitFor("Inspect container image");
+  await captureIfGraphical(app, ".nsh/out/landing-recent-dark.png");
 });

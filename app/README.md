@@ -6,7 +6,7 @@ Pure-Rust native desktop application built with [NSH](https://nsh.dev) (`0.6.1`)
 
 - `src/domain/`: Pure image/layer/treemap derivations (`model.rs`, `treemap.rs`), multi-threaded Tokio `DivingService` bridge (`service.rs`), and reactive `AppState` with `nsh_core::storage` persistence (`state.rs`).
 - `src/ui/`: Tokenized design system built over `nsh_base` and `theme.json` (`theme.rs`, `motion.rs`, `icons.rs`, `button.rs`, `input.rs`, `controls.rs`, `tabs.rs`, `overlay.rs`, `data.rs`, `code.rs`, `gallery.rs`).
-- `src/features/`: Desktop views & overlays composed strictly from `crate::ui` and `nsh_core` primitives (`title_bar.rs`, `landing.rs`, `inspector/`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`).
+- `src/features/`: Desktop views & overlays composed strictly from `crate::ui` and `nsh_core` primitives (`sidebar.rs`, `title_bar.rs`, `landing.rs`, `inspector/`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`).
 - `src/i18n.rs`: Synchronized EN / ZH catalog matching `diving_core::Lang`.
 
 ## Commands
@@ -30,8 +30,10 @@ nsh package --target macos           # Build ad-hoc signed .app bundle into .nsh
 
 | Shortcut | Action |
 | --- | --- |
+| `Mod + \` | Toggle collapsible left sidebar |
+| `Mod + N` | Return to New Analysis launcher |
 | `Mod + K` | Open / close Command Palette |
-| `Mod + L` | Focus image search bar |
+| `Mod + L` | Open / focus inline image switcher |
 | `Mod + O` | Open local tar / OCI archive (`file://`) |
 | `Mod + Shift + O` | Browse local Docker / Podman images |
 | `Mod + D` | Open `Compare with…` diff dialog |

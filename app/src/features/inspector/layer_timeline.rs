@@ -45,12 +45,13 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
         .min_w(px(0.0))
         .min_h(px(0.0))
         .flex_col()
-        .bg(move || theme().sidebar)
+        .bg(move || theme().background)
         .child(
             view()
                 .flex_col()
                 .gap_2()
-                .p_3()
+                .px_3()
+                .py_2p5()
                 .border_b_1()
                 .border_color(move || theme().border)
                 .child(
@@ -61,9 +62,9 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                         .child(
                             text(move || t(lang.get(), "layers.title"))
                                 .role(AccessibilityRole::Header)
-                                .text_sm()
+                                .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || theme().sidebar_foreground),
+                                .text_color(move || theme().foreground),
                         )
                         .child(
                             text(move || {
@@ -130,22 +131,22 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
 
                             let row = view()
                                 .w_full()
-                                .min_h(px(32.0))
+                                .min_h(px(30.0))
                                 .px_2()
                                 .py_1()
                                 .flex_row()
                                 .items_center()
-                                .gap_2()
+                                .gap_1p5()
                                 .rounded(radius_inset)
                                 .overflow_hidden()
                                 .bg(move || {
                                     if selected_layer.get() == orig_idx {
                                         surface_active()
                                     } else {
-                                        theme().sidebar
+                                        theme().background
                                     }
                                 })
-                                .hover(|s| s.bg(move || theme().sidebar_accent))
+                                .hover(|s| s.bg(move || theme().accent))
                                 .on_press(move || click_state.select_layer(orig_idx))
                                 .child(
                                     text(format!("{:02}", orig_idx + 1))
@@ -160,11 +161,12 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                 .child(ui_opcode_pill(opcode))
                                 .child(
                                     text(size_label)
-                                        .w(px(58.0))
+                                        .w(px(66.0))
                                         .flex_shrink_0()
                                         .text_xs()
                                         .font_family(font_mono_family())
                                         .tabular_nums()
+                                        .number_of_lines(1)
                                         .text_right()
                                         .text_color(move || {
                                             if is_zero {
@@ -174,14 +176,14 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                             }
                                         }),
                                 )
-                                .child(ui_size_bar(ratio, px(36.0)))
+                                .child(ui_size_bar(ratio, px(22.0)))
                                 .child(
                                     text(summary)
                                         .flex_1()
                                         .min_w(px(0.0))
                                         .text_xs()
                                         .number_of_lines(1)
-                                        .text_color(move || theme().sidebar_foreground),
+                                        .text_color(move || theme().foreground),
                                 );
 
                             ui_context_menu(row, |_| {})

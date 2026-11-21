@@ -10,6 +10,7 @@ use crate::domain::{
     build_final_tree, dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles,
     top_three_layers,
 };
+use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_control,
@@ -59,8 +60,8 @@ fn treemap_toolbar(
         .justify_between()
         .gap_3()
         .px_4()
-        .py_2p5()
-        .bg(move || theme().card)
+        .py_2()
+        .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
         .child(
@@ -197,7 +198,9 @@ fn treemap_body(
 
     view()
         .flex_1()
+        .min_w(px(0.0))
         .min_h(px(0.0))
+        .overflow_hidden()
         .flex_col()
         .child(dynamic(move || {
             let lang = state.lang;
@@ -236,15 +239,22 @@ fn treemap_canvas_view(
     top_layer_ids: &[usize],
 ) -> impl IntoElement {
     let win = window();
-    let w = (win.width.0 - state.sidebar_width.get().0 - 40.0).clamp(440.0, 1280.0);
-    let h = (win.height.0 - 296.0).clamp(260.0, 580.0);
+    let app_sidebar_w = if state.app_sidebar_open.get() {
+        APP_SIDEBAR_WIDTH
+    } else {
+        0.0
+    };
+    let w = (win.width.0 - app_sidebar_w - state.sidebar_width.get().0 - 40.0).clamp(320.0, 1280.0);
+    let h = (win.height.0 - 216.0).clamp(260.0, 680.0);
     let tiles = layout_treemap_tiles(node, w, h, top_layer_ids);
     let parent_size = node.size.max(1);
     let leave_state = state.clone();
 
     view()
         .flex_1()
+        .min_w(px(0.0))
         .min_h(px(0.0))
+        .overflow_hidden()
         .p_4()
         .items_center()
         .justify_center()
@@ -412,7 +422,9 @@ fn treemap_table_view(
 
     view()
         .flex_1()
+        .min_w(px(0.0))
         .min_h(px(0.0))
+        .overflow_hidden()
         .flex_col()
         .child(
             view()
@@ -597,7 +609,7 @@ fn treemap_info_footer(state: AppState) -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap_4()
-        .bg(move || theme().card)
+        .bg(move || theme().background)
         .border_t_1()
         .border_color(move || theme().border)
         .child(dynamic(move || match hovered.get() {

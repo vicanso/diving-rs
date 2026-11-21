@@ -11,8 +11,8 @@ use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, TabOption, UiSize, diverge_down, diverge_up,
     font_mono_family, radius_control, radius_inset, theme, ui_badge, ui_banner, ui_button,
-    ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill, ui_panel_titled, ui_select,
-    ui_separator, ui_skeleton, ui_tabs,
+    ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill, ui_panel, ui_panel_titled,
+    ui_select, ui_separator, ui_skeleton, ui_tabs,
 };
 
 const MINUS_SIGN: char = '−';
@@ -368,7 +368,7 @@ fn render_diff_report(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
             .p_5()
             .flex_col()
             .gap_5()
-            .child(summary_card(state.clone(), Arc::clone(&diff)))
+            .child(summary_card(Arc::clone(&diff), state.lang))
             .child(layers_diff_panel(state.clone(), Arc::clone(&diff)))
             .child(dir_changes_panel(state.clone(), Arc::clone(&diff)))
             .child(file_changes_panel(state.clone(), Arc::clone(&diff)))
@@ -376,14 +376,7 @@ fn render_diff_report(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
     )
 }
 
-fn summary_card(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
-    let lang = state.lang;
-    let swap_state = state.clone();
-    let open_base_state = state.clone();
-    let open_target_state = state.clone();
-    let cmp_state = state.clone();
-    let export_state = state.clone();
-
+fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement {
     let base_name = diff.base.name.clone();
     let base_arch = diff.base.arch.clone();
     let base_stale = diff.base.stale_as_of.clone();
@@ -422,61 +415,9 @@ fn summary_card(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
         ),
     ];
 
-    ui_panel_titled(
-        move || SharedString::from(t(lang.get(), "diff.title")),
-        Some(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "diff.swap")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    Some(IconName::Compare),
-                    false,
-                    false,
-                    move || swap_state.swap_diff(),
-                ))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "diff.open_base")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    None,
-                    false,
-                    false,
-                    move || open_base_state.open_diff_side(false),
-                ))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "diff.open_target")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    None,
-                    false,
-                    false,
-                    move || open_target_state.open_diff_side(true),
-                ))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "diff.compare_with")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    None,
-                    false,
-                    false,
-                    move || cmp_state.open_compare_dialog(),
-                ))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "diff.export_md")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    Some(IconName::Download),
-                    false,
-                    false,
-                    move || export_state.export_diff_markdown(),
-                ))
-                .into_element(),
-        ),
+    ui_panel(
+        None,
+        None,
         view()
             .flex_col()
             .gap_4()
@@ -606,8 +547,6 @@ fn diff_side_card(
         .p_3()
         .rounded(radius_control)
         .bg(move || theme().muted)
-        .border_1()
-        .border_color(move || theme().border)
         .flex_col()
         .gap_1()
         .child(
@@ -711,8 +650,6 @@ fn layer_diff_column(
         .p_3()
         .rounded(radius_control)
         .bg(move || theme().muted)
-        .border_1()
-        .border_color(move || theme().border)
         .flex_col()
         .gap_2()
         .child(
@@ -1082,8 +1019,6 @@ fn rec_diff_column(
         .p_3()
         .rounded(radius_control)
         .bg(move || theme().muted)
-        .border_1()
-        .border_color(move || theme().border)
         .flex_col()
         .gap_2()
         .child(

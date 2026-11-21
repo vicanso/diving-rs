@@ -12,8 +12,9 @@ use nsh_core::prelude::*;
 
 use crate::domain::{AppRoute, AppState, DivingService};
 use crate::features::{
-    command_palette_overlay, compare_dialog, desktop_title_bar, diff_workspace, file_preview_sheet,
-    inspector_workspace, install_desktop_menus_and_keys, landing_view, local_picker_dialog,
+    app_sidebar, command_palette_overlay, compare_dialog, content_header_bar, diff_workspace,
+    file_preview_sheet, inspector_workspace, install_desktop_menus_and_keys, landing_view,
+    local_picker_dialog,
 };
 use crate::ui::{UiGallery, register_fonts, theme, ui_gallery};
 
@@ -46,26 +47,42 @@ pub fn App() -> impl IntoElement {
     let state = AppState::new(DivingService::new());
     provide_context(state.clone());
     install_desktop_menus_and_keys(state.clone());
+    let sidebar_open = state.app_sidebar_open;
+    let sidebar_state = state.clone();
     let route_state = state.clone();
 
     view()
         .relative()
         .flex_1()
-        .flex_col()
+        .flex_row()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
-        .child(desktop_title_bar(state.clone()))
+        .child(when(
+            move || sidebar_open.get(),
+            move || app_sidebar(sidebar_state.clone()),
+        ))
         .child(
             view()
                 .flex_1()
+                .min_w(px(0.0))
                 .min_h(px(0.0))
                 .flex_col()
-                .child(dynamic(move || match route_state.route.get() {
-                    AppRoute::Landing => landing_view(route_state.clone()).into_element(),
-                    AppRoute::Inspector => inspector_workspace(route_state.clone()).into_element(),
-                    AppRoute::Diff => diff_workspace(route_state.clone()).into_element(),
-                    AppRoute::Gallery => ui_gallery().into_element(),
-                })),
+                .bg(move || theme().background)
+                .child(content_header_bar(state.clone()))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .flex_col()
+                        .child(dynamic(move || match route_state.route.get() {
+                            AppRoute::Landing => landing_view(route_state.clone()).into_element(),
+                            AppRoute::Inspector => {
+                                inspector_workspace(route_state.clone()).into_element()
+                            }
+                            AppRoute::Diff => diff_workspace(route_state.clone()).into_element(),
+                            AppRoute::Gallery => ui_gallery().into_element(),
+                        })),
+                ),
         )
         .child(file_preview_sheet(state.clone()))
         .child(compare_dialog(state.clone()))

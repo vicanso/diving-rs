@@ -7,14 +7,6 @@ use crate::ui::data::{FileOpKind, LayerOpcodeKind};
 
 const THEME_JSON: &str = include_str!("../../theme.json");
 
-const FONT_SANS_REGULAR: &[u8] =
-    include_bytes!("../../assets/fonts/ibm-plex-sans-latin-400-normal.woff2");
-const FONT_SANS_MEDIUM: &[u8] =
-    include_bytes!("../../assets/fonts/ibm-plex-sans-latin-500-normal.woff2");
-const FONT_SANS_SEMIBOLD: &[u8] =
-    include_bytes!("../../assets/fonts/ibm-plex-sans-latin-600-normal.woff2");
-const FONT_SANS_BOLD: &[u8] =
-    include_bytes!("../../assets/fonts/ibm-plex-sans-latin-700-normal.woff2");
 const FONT_MONO_REGULAR: &[u8] =
     include_bytes!("../../assets/fonts/ibm-plex-mono-latin-400-normal.woff2");
 const FONT_MONO_MEDIUM: &[u8] =
@@ -27,17 +19,12 @@ pub fn app_tokens() -> Tokens {
     tokens_of(Some(THEME_JSON)).expect("app/theme.json must parse cleanly")
 }
 
-/// Registers the offline IBM Plex Sans & Mono woff2 faces synchronously before Frame 1.
+/// Registers the offline IBM Plex Mono woff2 faces synchronously before Frame 1.
+///
+/// UI sans-serif text intentionally uses the platform native font stack (`SF Pro` / `PingFang SC`
+/// on macOS).
 pub fn register_fonts() {
-    let faces: [&[u8]; 7] = [
-        FONT_SANS_REGULAR,
-        FONT_SANS_MEDIUM,
-        FONT_SANS_SEMIBOLD,
-        FONT_SANS_BOLD,
-        FONT_MONO_REGULAR,
-        FONT_MONO_MEDIUM,
-        FONT_MONO_SEMIBOLD,
-    ];
+    let faces: [&[u8]; 3] = [FONT_MONO_REGULAR, FONT_MONO_MEDIUM, FONT_MONO_SEMIBOLD];
     for bytes in faces {
         drop(register_font(bytes));
     }

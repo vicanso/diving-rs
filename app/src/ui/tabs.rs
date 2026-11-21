@@ -41,19 +41,16 @@ pub fn ui_tabs<T: Clone + PartialEq + 'static>(
         .accessibility_label(accessibility_label.into())
         .flex_row()
         .items_center()
-        .p(px(3.0))
-        .gap_1()
+        .p(px(2.5))
+        .gap_0p5()
         .rounded(radius_control)
         .bg(move || theme().muted)
-        .border_1()
-        .border_color(move || theme().border)
         .indicator_style(|s| {
-            s.top(px(3.0))
-                .bottom(px(3.0))
+            s.top(px(2.5))
+                .bottom(px(2.5))
                 .rounded(radius_inset)
                 .bg(move || theme().card)
-                .border_1()
-                .border_color(move || theme().border)
+                .shadow_xs()
         })
         .children(items.into_iter().map(move |item| {
             let value = item.value;
@@ -68,9 +65,9 @@ pub fn ui_tabs<T: Clone + PartialEq + 'static>(
             tab()
                 .selected(move || cur_sel.get() == val_sel)
                 .on_press(move || on_change(value.clone()))
-                .min_h(px(28.0))
-                .px_3()
-                .py_1()
+                .min_h(px(25.0))
+                .px_2p5()
+                .py_0p5()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
@@ -82,7 +79,7 @@ pub fn ui_tabs<T: Clone + PartialEq + 'static>(
                 .when_some(item.icon, move |el, icon_name| {
                     let cur = cur_ico.clone();
                     let val = val_ico.clone();
-                    el.child(ui_icon(icon_name, px(14.0), move || {
+                    el.child(ui_icon(icon_name, px(13.0), move || {
                         if cur.get() == val {
                             theme().primary
                         } else {
@@ -92,7 +89,7 @@ pub fn ui_tabs<T: Clone + PartialEq + 'static>(
                 })
                 .child(
                     text(item.label)
-                        .text_sm()
+                        .text_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if cur_txt.get() == val_txt {

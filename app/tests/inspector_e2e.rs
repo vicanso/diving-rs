@@ -147,7 +147,7 @@ fn landing_analyzes_local_tar_and_inspects_files_findings_and_dockerfile() {
     let image_ref = format!("file://{}", tmp.path().display());
     let mut app = start_desktop_app();
 
-    assert!(app.shows("Dive into every layer"));
+    assert!(app.shows("Inspect container image"));
     assert!(app.shows("Analyze"));
     assert!(app.shows("Open local file…"));
 
@@ -217,16 +217,16 @@ fn landing_analyzes_local_tar_and_inspects_files_findings_and_dockerfile() {
 #[test]
 fn language_toggle_switches_en_and_zh() {
     let mut app = start_desktop_app();
-    assert!(app.shows("Dive into every layer"));
+    assert!(app.shows("Inspect container image"));
     assert!(app.shows("Analyze"));
 
     app.press("中").expect("switch language to ZH");
-    assert!(app.shows("潜入每一层镜像"));
+    assert!(app.shows("分析容器镜像"));
     assert!(app.shows("开始分析"));
     assert!(app.shows("打开本地文件…"));
 
     app.press("EN").expect("switch language back to EN");
-    assert!(app.shows("Dive into every layer"));
+    assert!(app.shows("Inspect container image"));
     assert!(app.shows("Analyze"));
 }
 
@@ -241,7 +241,7 @@ fn invalid_image_shows_inline_error_and_preserves_input() {
     app.wait_for_within("Retry", Duration::from_secs(5))
         .expect("display inline retryable error banner");
 
-    assert!(app.shows("Dive into every layer"));
+    assert!(app.shows("Inspect container image"));
     assert_eq!(
         app.screen().input_text("Image reference input"),
         Ok(Some(missing_ref))
@@ -326,7 +326,7 @@ fn diff_compares_two_local_tars_and_swaps() {
 #[test]
 fn command_palette_opens_with_mod_k_and_switches_language() {
     let mut app = start_desktop_app();
-    assert!(app.shows("Dive into every layer"));
+    assert!(app.shows("Inspect container image"));
 
     app.press_key("mod+k").expect("open Command Palette");
     app.wait_for_within("Command Palette", Duration::from_secs(3))
@@ -339,7 +339,7 @@ fn command_palette_opens_with_mod_k_and_switches_language() {
     app.press("Language: 中文")
         .expect("execute Language: 中文 command");
 
-    app.wait_for_within("潜入每一层镜像", Duration::from_secs(3))
+    app.wait_for_within("分析容器镜像", Duration::from_secs(3))
         .expect("localize UI to ZH");
     app.wait_for_gone("Command Palette", Duration::from_secs(3))
         .expect("close Command Palette after selection");
@@ -368,7 +368,7 @@ fn local_picker_dialog_opens_and_closes_on_escape() {
 
     app.press_key("escape")
         .expect("dismiss Local Images on Esc");
-    app.wait_for_gone("Local Images", Duration::from_secs(3))
+    app.wait_for_gone("Analyze selected", Duration::from_secs(3))
         .expect("close Local Images dialog");
 }
 
@@ -475,4 +475,39 @@ fn write_optional_screenshot_fixture() {
         ".nsh/out/fixture-v2.tar",
         &build_test_image_v2_tar(),
     );
+}
+
+#[test]
+fn sidebar_toggles_with_shortcut_and_lists_recent_analyses() {
+    let tmp = TempBuilder::new()
+        .suffix(".tar")
+        .tempfile()
+        .expect("create temporary fixture tar");
+    fs::write(tmp.path(), build_test_image_tar()).expect("write fixture tar");
+
+    let image_ref = format!("file://{}", tmp.path().display());
+    let mut app = start_desktop_app();
+    assert!(app.shows("Workbench"));
+    assert!(app.shows("No recent analyses yet"));
+
+    app.type_text("Image reference input", &image_ref)
+        .expect("type image ref");
+    app.press("Analyze").expect("press Analyze");
+    app.wait_for_within("Layers", Duration::from_secs(10))
+        .expect("enter Inspector");
+
+    app.press_key("mod+n")
+        .expect("return to New Analysis launcher via mod+n");
+    app.wait_for_within("Inspect container image", Duration::from_secs(3))
+        .expect("show Landing after mod+n");
+    assert!(app.shows(&image_ref), "expected recent image in sidebar");
+
+    app.press_key("mod+\\")
+        .expect("collapse sidebar via mod+\\");
+    app.wait_for_gone("Workbench", Duration::from_secs(3))
+        .expect("hide sidebar navigation");
+
+    app.press_key("mod+\\").expect("expand sidebar via mod+\\");
+    app.wait_for_within("Workbench", Duration::from_secs(3))
+        .expect("restore sidebar navigation");
 }

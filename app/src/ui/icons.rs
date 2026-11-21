@@ -37,6 +37,8 @@ pub enum IconName {
     Command,
     Filter,
     Eye,
+    PanelLeft,
+    Plus,
 }
 
 impl IconName {
@@ -73,6 +75,8 @@ impl IconName {
             Self::Command => include_str!("../../assets/icons/command.svg"),
             Self::Filter => include_str!("../../assets/icons/filter.svg"),
             Self::Eye => include_str!("../../assets/icons/eye.svg"),
+            Self::PanelLeft => include_str!("../../assets/icons/panel-left.svg"),
+            Self::Plus => include_str!("../../assets/icons/plus.svg"),
         }
     }
 }

@@ -87,15 +87,15 @@ fn build_panel(
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .px_4()
-                    .py_2p5()
+                    .px_3p5()
+                    .py_2()
                     .border_b_1()
                     .border_color(move || theme().border)
                     .when_some(title, |row, heading| {
                         row.child(
                             text(heading)
                                 .role(AccessibilityRole::Header)
-                                .text_sm()
+                                .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || theme().card_foreground),
                         )
@@ -103,7 +103,7 @@ fn build_panel(
                     .when_some(header_extra, |row, extra| row.child(extra)),
             )
         })
-        .child(view().p_4().child(content))
+        .child(view().p_3p5().child(content))
 }
 
 /// Flat hairline container panel (no drop shadows; single outer radius).
@@ -148,15 +148,13 @@ fn badge_bg(tone: BadgeTone) -> AdaptiveColor {
     }
 }
 
-/// Small semantic badge; keep badges scarce and predominantly `Neutral`.
+/// Small tonal semantic badge without heavy outer borders.
 pub fn ui_badge(label: impl IntoReactive<SharedString>, tone: BadgeTone) -> impl IntoElement {
     view()
         .px_1p5()
         .py_0p5()
         .rounded(radius_inset)
         .bg(move || badge_bg(tone))
-        .border_1()
-        .border_color(move || theme().border)
         .child(
             text(label)
                 .text_xs()
@@ -168,7 +166,7 @@ pub fn ui_badge(label: impl IntoReactive<SharedString>, tone: BadgeTone) -> impl
 /// Monospace Dockerfile instruction pill (`FROM` / `RUN` / `COPY` / `CMD` / `META`).
 pub fn ui_opcode_pill(kind: LayerOpcodeKind) -> impl IntoElement {
     view()
-        .w(px(48.0))
+        .w(px(42.0))
         .py_0p5()
         .items_center()
         .justify_center()

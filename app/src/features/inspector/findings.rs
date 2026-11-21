@@ -180,8 +180,6 @@ fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) ->
                                     .p_2p5()
                                     .rounded(radius_inset)
                                     .bg(move || theme().muted)
-                                    .border_1()
-                                    .border_color(move || theme().border)
                                     .child(
                                         text(hint)
                                             .text_xs()

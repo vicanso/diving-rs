@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytesize::ByteSize;
 use diving_core::{
-    FileTreeItem, Op, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
-    RuntimeCompat, parse_image_info,
+    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op, REGISTRY_LOCAL_DOCKER,
+    REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, RuntimeCompat, parse_image_info,
 };
 use serde::{Deserialize, Serialize};
 
@@ -301,6 +301,22 @@ pub struct LayerFileCounts {
     pub added: usize,
     pub modified: usize,
     pub removed: usize,
+}
+
+impl LayerFileCounts {
+    /// Total file entries touched in the layer (`added + modified + removed`).
+    pub fn total(self) -> usize {
+        self.added + self.modified + self.removed
+    }
+}
+
+/// Computes the section/card count displayed on the Inspector `Findings` tab.
+pub fn findings_total_count(res: &DockerAnalyzeResult, summary: &DockerAnalyzeSummary) -> usize {
+    res.recommendations.len()
+        + res.sensitive_files.len()
+        + res.duplicate_groups.len()
+        + usize::from(!summary.wasted_list.is_empty())
+        + usize::from(!res.big_modified_file_list.is_empty())
 }
 
 /// Counts leaf file operations across one layer's hierarchical file tree.

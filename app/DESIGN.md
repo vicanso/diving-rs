@@ -11,7 +11,7 @@
 - **产品名称**：`Diving Desktop`（容器镜像层分析与诊断原生桌面客户端）
 - **工程形态**：位于仓库独立子目录 `app/`（根 `Cargo.toml` 中通过 `[workspace] exclude = ["app"]` 隔离，通过 `path` 依赖 `../crates/diving-core` 与 `../crates/diving-app`）
 - **开发模式**：纯 Rust 模式（`nsh init app --template rust`），无 JS VM、无内嵌浏览器，零独立服务端，直接在进程内复用 `diving-core` 分析引擎与 `~/.diving/{layers,analysis}` 持久化缓存及凭证，支持远程仓库、本地 `docker://`、`podman://` 与本地压缩包/目录 `file://`
-- **设计宣言（Design Thesis）**：沿用并升级现有 Web 版的冷灰高密度开发者工具美学（IBM Plex Sans + Mono），从浏览器页面进化为多栏可调宽的桌面原生工作台——**克制、精准、结构先于装饰、状态显式可见、键盘与辅助功能作为一等公民**。
+- **设计宣言（Design Thesis）**：v2 采用 **OrbStack / Linear 风格的原生 macOS 专业工具台**——以纯净苹果浅灰白（Light）与中性炭黑 + 克制钴蓝（Dark）为基底，全高可折叠左侧边栏与 48pt 一体化内容顶栏统一承接导航、最近记录、工作区 Tab 与 Diff 操作；**去掉网页营销感、去掉重边界线"框套框"堆积、用微弱面层色差（6.5%–7% 发丝线）建立层次，并将键盘与辅助功能作为一等公民**。
 
 ### 1.2 目标运行平台与窗口约束
 
@@ -51,41 +51,41 @@
 
 | Token 名称 | 用途角色 | Light 值 | Dark 值 | 备注 |
 | --- | --- | --- | --- | --- |
-| `background` | 主窗口画布底色 | `#f8fafc` | `#090d12` | 窗口根底色 |
-| `foreground` | 主正文与主标题文字 | `#0f172a` | `#f1f5f9` | 与主表面保持 AAA/AA 高对比 |
-| `card` | 卡片/信息面板/代码框表面 | `#ffffff` | `#111720` | 平面结构，依靠边界分隔 |
-| `card-foreground` | 卡片内主要文字 | `#0f172a` | `#f1f5f9` | — |
-| `sidebar` | 左侧 `LayerTimeline` 与侧边栏底色 | `#f1f5f9` | `#0d121a` | 自绘标题栏下延伸至窗口顶边 |
-| `sidebar-foreground` | 侧边栏文字 | `#0f172a` | `#f1f5f9` | — |
-| `popover` | `Menu` / `Select` / `Popover` / `Tooltip` 浮层表面 | `#ffffff` | `#1e2735` | 所有锚定浮层共享同一处理 |
-| `popover-foreground` | 浮层内主文字 | `#0f172a` | `#f1f5f9` | — |
-| `muted` | 次级静音容器、快捷键底条、代码块底色 | `#f1f5f9` | `#18202b` | — |
-| `muted-foreground` | 次级辅助信息、字段标签、占位说明 | `#475569` | `#94a3b8` | 次要信息始终用颜色层级而非单纯缩小字号 |
-| `text-tertiary` | 三级元数据（极低权重，不用于 `>=12pt` 必读正文） | `#64748b` | `#64748b` | 自定义 Token |
-| `border` | 发丝线边界、表格横线、分割线 | `rgba(15, 23, 42, 0.10)` | `rgba(255, 255, 255, 0.10)` | 仅由边界归属方绘制一次 |
-| `border-strong` | 强调边框、弹窗描边、悬浮加强边 | `rgba(15, 23, 42, 0.20)` | `rgba(255, 255, 255, 0.20)` | 自定义 Token |
-| `input` | 输入框与选择器静态边框 | `rgba(15, 23, 42, 0.16)` | `rgba(255, 255, 255, 0.16)` | — |
-| `ring` | 键盘焦点外环（`focus_visible`） | `#0ea5e9` | `#38bdf8` | 必须绘制在控件边框之外 |
+| `background` | 主窗口右区画布底色 | `#ffffff` | `#111214` | 中性炭黑（Dark）/ 纯白（Light） |
+| `foreground` | 主正文与主标题文字 | `#111318` | `#eceef2` | 与主表面保持 AAA/AA 高对比 |
+| `card` | 卡片/信息面板/代码框表面 | `#ffffff` | `#191b1f` | 微弱提亮台阶，极细边界分隔 |
+| `card-foreground` | 卡片内主要文字 | `#111318` | `#eceef2` | — |
+| `sidebar` | 顶通可折叠左侧 App Sidebar 底色 | `#f5f5f7` | `#16171a` | 自绘标题栏下顶通延伸至窗口顶边 |
+| `sidebar-foreground` | 侧边栏正文文字 | `#1c1f26` | `#d4d7de` | — |
+| `popover` | `Menu` / `Select` / `Popover` / `Tooltip` 浮层表面 | `#ffffff` | `#1e2025` | 所有锚定浮层共享同一处理 |
+| `popover-foreground` | 浮层内主文字 | `#111318` | `#eceef2` | — |
+| `muted` | 次级静音容器、滑块轨底、代码块内嵌区 | `#f2f3f6` | `#202227` | 无重外框的色调层级 |
+| `muted-foreground` | 次级辅助信息、字段标签、占位说明 | `#636874` | `#8b909a` | 次要信息始终用颜色层级而非单纯缩小字号 |
+| `text-tertiary` | 三级元数据（快捷键标牌、版本次标） | `#9298a4` | `#5e636e` | 自定义 Token |
+| `border` | 发丝线边界、表格横线、分割线 | `rgba(0, 0, 0, 0.07)` | `rgba(255, 255, 255, 0.065)` | 极低噪仅单侧绘制一次 |
+| `border-strong` | 强调边框、弹窗描边、悬浮加强边 | `rgba(0, 0, 0, 0.15)` | `rgba(255, 255, 255, 0.14)` | 自定义 Token |
+| `input` | 输入框与统一命令栏静态边界 | `rgba(0, 0, 0, 0.11)` | `rgba(255, 255, 255, 0.10)` | — |
+| `ring` | 键盘焦点外环（`focus_visible`） | `rgba(37, 99, 235, 0.45)` | `rgba(59, 130, 246, 0.55)` | 必须绘制在控件边框之外 |
 
 #### B. 交互动作与状态变体（Per-variant Normal / Hover / Active）
 
 | Token 名称 | 用途角色 | Light 值 | Dark 值 | 备注 |
 | --- | --- | --- | --- | --- |
-| `primary` | 决策区唯一默认主动作背景 | `#0284c7` | `#38bdf8` | 每块决策区最多 1 个 |
-| `primary-hover` | 主动作悬停态 | `#0369a1` | `#7dd3fc` | 自定义 Token |
-| `primary-active` | 主动作按压态 | `#075985` | `#0ea5e9` | 自定义 Token |
-| `primary-foreground` | 主动作前景色 | `#ffffff` | `#090d12` | 确保文字高对比可读 |
-| `secondary` | 次要默认按钮与切换胶囊静态背景 | `#e2e8f0` | `#1e293b` | — |
-| `secondary-hover` | 次要动作悬停态 | `#cbd5e1` | `#283548` | 自定义 Token |
-| `secondary-active` | 次要动作按压态 | `#94a3b8` | `#334155` | 自定义 Token |
-| `secondary-foreground` | 次要动作前景色 | `#0f172a` | `#f1f5f9` | — |
-| `accent` | 列表行、菜单项、幽灵按钮悬停洗色 | `#e2e8f0` | `#222d3d` | — |
-| `accent-foreground` | 悬停态文字前景色 | `#0f172a` | `#f1f5f9` | — |
-| `surface-active` | 层列表与文件树当前选中行填充背景 | `#e0f2fe` | `#0c2d48` | 自定义 Token，不可与 hover 叠色混淆 |
-| `destructive` | 危险/破坏性确认操作背景 | `#dc2626` | `#f87171` | — |
-| `destructive-hover` | 危险动作悬停态 | `#b91c1c` | `#ef4444` | 自定义 Token |
-| `destructive-active` | 危险动作按压态 | `#991b1b` | `#dc2626` | 自定义 Token |
-| `destructive-foreground` | 危险动作前景色 | `#ffffff` | `#090d12` | — |
+| `primary` | 决策区唯一默认主动作背景（克制钴蓝） | `#2563eb` | `#3b82f6` | 每块决策区最多 1 个 |
+| `primary-hover` | 主动作悬停态 | `#1d4ed8` | `#4f8ff7` | 自定义 Token |
+| `primary-active` | 主动作按压态 | `#1e40af` | `#2563eb` | 自定义 Token |
+| `primary-foreground` | 主动作前景色 | `#ffffff` | `#ffffff` | 纯白文字确保对比可读 |
+| `secondary` | 次要默认按钮静态背景 | `#f0f1f4` | `#23252b` | 无外框纯色调按钮 |
+| `secondary-hover` | 次要动作悬停态 | `#e5e7ec` | `#2b2e36` | 自定义 Token |
+| `secondary-active` | 次要动作按压态 | `#d9dce3` | `#333741` | 自定义 Token |
+| `secondary-foreground` | 次要动作前景色 | `#111318` | `#eceef2` | — |
+| `accent` | 列表行、菜单项、幽灵按钮悬停洗色 | `#ecedf1` | `#262930` | — |
+| `accent-foreground` | 悬停态文字前景色 | `#111318` | `#eceef2` | — |
+| `surface-active` | 侧栏、层列表与文件树当前选中行填充背景 | `rgba(37, 99, 235, 0.10)` | `rgba(59, 130, 246, 0.15)` | 自定义 Token |
+| `destructive` | 危险/破坏性确认操作背景 | `#dc2626` | `#ef4444` | — |
+| `destructive-hover` | 危险动作悬停态 | `#b91c1c` | `#dc2626` | 自定义 Token |
+| `destructive-active` | 危险动作按压态 | `#991b1b` | `#b91c1c` | 自定义 Token |
+| `destructive-foreground` | 危险动作前景色 | `#ffffff` | `#ffffff` | — |
 
 #### C. 语义状态与 Diving 领域专属 Token
 
@@ -119,9 +119,9 @@
 
 ### 3.1 字体与离线打包策略
 
-- **离线字体打包**：直接复用仓库 `web/` 中经过裁剪的 IBM Plex Latin `.woff2` 字体资源（总体积约 140 KB），放入 `app/assets/fonts/` 并在应用初始化时通过 NSH `Font` API 注册，保证零外部 CDN 请求与离线可用：
-  - UI 正文字体：`IBM Plex Sans`（权重 `400`, `500`, `600`, `700`），CJK 与其余 Unicode 字符自然回退至平台系统 UI 字体（macOS PingFang / SF，Windows Microsoft YaHei / Segoe UI，Linux Noto Sans）。
-  - 等宽字体：`IBM Plex Mono`（权重 `400`, `500`, `600`），仅用于镜像引用、文件路径、层摘要、SHA256、字节大小数字、Docker 指令与 Dockerfile、Unix 权限/UID:GID、快捷键标牌以及文件代码/Hex 预览。
+- **原生 UI 字体 + 离线等宽字体**：
+  - UI 正文字体：不在 `app/theme.json` 设置 `font-sans`，直接复用平台原生 UI 字体栈（macOS 为 **SF Pro + 苹方 PingFang SC**，消除中英混排割裂感；Windows/Linux 分别回退系统无衬线字体）。
+  - 等宽字体：`IBM Plex Mono`（权重 `400`, `500`, `600`，离线打包于 `app/assets/fonts/`，零外部 CDN 请求），专用于镜像引用、文件路径、层摘要、SHA256、字节大小数字、Docker 指令与 Dockerfile、Unix 权限/UID:GID、快捷键标牌以及文件代码/Hex 预览。
 - **等宽数字对齐**：所有可比数值（效率评分、体积、占比、文件计数、Diff 增减值）必须调用 `.tabular_nums()` 并右对齐（`text_right`），避免切换或过滤时数字列抖动。
 
 ### 3.2 字阶规范（Type Scale）
@@ -147,10 +147,10 @@
 
 | 层级 | Token / 方法 | 数值 | 适用对象 |
 | --- | --- | --- | --- |
-| 容器圆角 | `radius-lg` | `10pt` | Findings 面板卡片、Landing 搜索复合框、Dialog/Sheet 容器、Treemap 外框 |
-| 控件圆角 | `radius` | `6pt` | 按钮、输入框、`Select`、`SegmentedControl` 容器、Popup/Menu/Popover 浮层 |
-| 内嵌圆角 | `radius-inset` | `4pt` | 分段控制内部滑块、Tab 选中底块、Tooltip、Checkbox、Opcode 胶囊、状态徽章（遵守 `inner ≈ max(0, outer − gap)`） |
-| 全圆角 | `rounded_full` | `9999pt` | **仅限**圆形指示点、Switch 拇指、Landing 示例镜像胶囊；**严禁**用于普通按钮或 Tooltip |
+| 容器圆角 | `radius-lg` | `12pt` | Findings 面板卡片、Landing 一体化命令框、Dialog/Sheet 容器、Treemap 外框 |
+| 控件圆角 | `radius` | `7pt` | 按钮、输入框、`Select`、`SegmentedControl` 容器、Popup/Menu/Popover 浮层 |
+| 内嵌圆角 | `radius-inset` | `5pt` | 分段控制内部滑块、Tab 选中底块、Sidebar 导航项、Opcode 胶囊、状态徽章（遵守 `inner ≈ max(0, outer − gap)`） |
+| 全圆角 | `rounded_full` | `9999pt` | **仅限**圆形指示点、Switch 拇指；**严禁**用于普通按钮或 Tooltip |
 
 **裁切约束**：带圆角的列表容器、选中高亮填充与内部滚动区域必须设置 `.overflow_hidden()` 或同步圆角，确保背景不溢出圆角；同时外置 `focus_visible` 光环的父级必须保留至少 `3pt` 外延留白，避免光环被裁切。
 
@@ -177,46 +177,56 @@
 
 | `Size` 变体 | 控件高度 | 图标尺寸 | 文本字号 | 水平内边距 | 典型适用位置 |
 | --- | --- | --- | --- | --- | --- |
-| `Size::Xs` | `20pt` | `12pt` | `text-xs` | `px-1.5` (6pt) | 紧致表格内行操作、命令框 Copy 微按钮 |
-| `Size::Sm` | `24pt` | `14pt` | `text-xs` | `px-2.5` (10pt) | 工具栏过滤胶囊、侧栏过滤分段按钮、小尺寸下拉 |
-| `Size::Md`（默认） | `32pt` | `16pt` | `text-sm` | `px-3` (12pt) | 常规按钮、标题栏搜索输入框、弹窗表单控件 |
-| `Size::Lg` | `40pt` | `16pt` | `text-sm` | `px-4` (16pt) | 仅 Landing 居中输入搜索框与确认按钮 |
+| `Size::Xs` | `22pt` | `12pt` | `12pt` | `7pt` | 侧栏底栏微调切换、命令框内联微按钮 |
+| `Size::Sm` | `26pt` | `14pt` | `12pt` | `10pt` | 48pt 工具栏动作、过滤下拉、侧栏过滤分段按钮 |
+| `Size::Md`（默认） | `30pt` | `15pt` | `13pt` | `12pt` | 常规按钮、弹窗表单控件、Landing 命令栏提交按钮 |
+| `Size::Lg` | `36pt` | `15pt` | `13pt` | `14pt` | Landing 一体化命令框输入、局部大控件 |
 
-- **图标按钮**：宽高严格等于当前 `Size` 的高度正方形（`20 / 24 / 32 / 40 pt`）。
-- **数据行高**：LayerTimeline 行高 `32pt`（带指令与微条的紧致双栏行）；VirtualFileTree 数据行高 `28pt`；Diff 表格行高 `32pt`。
+- **图标按钮**：宽高严格等于当前 `Size` 的高度正方形（`22 / 26 / 30 / 36 pt`）。
+- **数据行高**：Sidebar 导航行 `28pt`；`LayerTimeline` 行高 `30pt`；VirtualFileTree 数据行高 `28pt`；Diff 表格行高 `32pt`。
 
 ---
 
-## 4. 桌面应用壳层与自绘标题栏（NSH 0.6.1）
+## 4. 桌面应用壳层与自绘标题栏（NSH 0.6.1 v2 工作台）
 
-### 4.1 融合自绘标题栏规范
+### 4.1 全高可折叠侧边栏 + 一体化 48pt 内容顶栏
 
-依据 NSH `0.6.1` 设计规范（#2348），桌面窗口启用 `TitleBarStyle::Hidden`，不绘制操作系统灰/白原生标题条，也不在自定义标题栏下方再叠第二层空白 Header。窗口第一行即融合功能区：
+依据 NSH `0.6.1` 设计规范（#2348）与 macOS 原生多栏工具范式（对标 OrbStack / Linear），桌面窗口启用 `TitleBarStyle::Hidden`，由全高可折叠 `App Sidebar`（`208pt`）与右侧 `Content Header Bar`（`48pt`）共同构成原生顶通窗口：
 
 ```text
-+---------------------------------------------------------------------------------------------------+
-| [● ● ●]  [Logo Diving] | [ 镜像输入框  ▾ amd64 | 本地文件 | 分析 ] | [对比…] [主题] [EN/中] [⋯] [— □ ×] |
-|  macOS     左侧导航区        中间核心搜索与操作区 (drag=false)        右侧辅助操作区         Win/Linux  |
-+---------------------------------------------------------------------------------------------------+
++-----------------------+---------------------------------------------------------------------+
+| [● ● ●]    [侧栏] [+] | [切换或标题]    [ 文件树 | 空间分布 | 分析发现 | Dockerfile ]   [操作] |
+|-----------------------|---------------------------------------------------------------------|
+| Workbench             | Landing：无顶栏底线，居中单框一体化命令栏 + 三列快捷卡片 + 示例          |
+|  • New Analysis   ⌘N  |---------------------------------------------------------------------|
+|  • Local Images  ⇧⌘O  | Inspector：36pt 单行指标带 → 可拖拽 [镜像层 | 详情工作区] + 底部状态条      |
+|  • Compare        ⌘D  |---------------------------------------------------------------------|
+|  • Open File…     ⌘O  | Diff：右侧直接渲染对比报告（所有操作收口于 48pt 内容顶栏）                |
+|                       |                                                                     |
+| Recent (Scroll)       |                                                                     |
+|  • redis:alpine  99%  |                                                                     |
+|-----------------------|                                                                     |
+| Diving v0.12.3    ⋯   |                                                                     |
+| [⌘K] [☀]     [EN|中]  |                                                                     |
++-----------------------+---------------------------------------------------------------------+
 ```
 
-- **动态安全占位**：左右两端预留由 `title_bar()` API 动态返回的原生窗口控制区宽度（macOS 左侧红绿灯区域，Windows/Linux 右侧最小化/最大化/关闭按钮区域）与标准高度（若高于 `44pt` 则取平台返回值，低于则兜底到标题栏最小舒适高度 `44pt`）。
-- **拖拽与点击契约**：标题栏外层容器背景标记 `.window_drag(true)`，保留桌面平台标准的窗口拖动与双击标题栏空白区缩放/最大化行为；内部一切按钮、输入框、图标按钮、面包屑返回区均显式标记 `.window_drag(false)`，避免拦截点击或输入。
-- **两态内容映射**：
-  - **Landing 态**：左侧展示品牌标识与版本徽章（`v0.12.3`）；中间留作纯净拖拽区；右侧放置主题切换按钮、语言切换分段按钮（`EN`/`中`）与「更多」溢出菜单。
-  - **Inspector / Diff 态**：左侧品牌徽章转为可点击的「返回首页」导航按钮（`Button::Ghost`）；中间容纳紧凑模式搜索复合框（镜像名称输入 + 架构 `Select` + 本地镜像/文件入口图标按钮 + `Analyze` 提交按钮）；右侧放置 `Compare with…`、主题切换、语言切换与溢出 `Menu`（打开本地文件 `file://`…、浏览本地 Docker/Podman 镜像…、导出 Markdown 报告…、清除本地缓存、检查更新…、以及构建包含在 Debug 标志下的 `UI Gallery` 入口）。
-- **颜色随区域延伸**：在左右分栏的工作台视图下，标题栏底色采用统一的半透/微透明或实体顶部栏（与 `background` / `sidebar` 通过单侧 hairline 分隔），浅深主题即时联动，彻底消除系统色横条割裂感。
+- **动态安全占位与折叠联动**：`App Sidebar` 展开时，红绿灯安全区归左侧栏顶部 `48pt` 拖拽区（右边紧跟侧栏折叠 `[PanelLeft]` 与新建 `[+]` 按钮）；`App Sidebar` 收起时，红绿灯安全区由 `Content Header Bar` 左侧接管，紧接着展示侧栏展开 `[PanelLeft]` 与紧凑实用按钮（保证在收起侧栏与窄窗口下仍可随时切换主题、语言与命令面板）。
+- **拖拽与点击契约**：侧栏顶栏与内容顶栏背景均标记 `.window_drag(true)`，保留标准桌面窗体拖动与双击缩放；内部一切按钮、输入框、Tab 与胶囊控件显式标记 `.window_drag(false)`。
+- **路由态职责映射**：
+  - **Landing 态**：内容顶栏无底部分隔线，主画布光学偏上居中呈现「图标+单标题 → 无内边框嵌套的一体化命令框 → 3 列快捷动作卡片 → 无边框示例条」，近期分析由左侧边栏统一承载。
+  - **Inspector 态**：内容顶栏左侧展示当前镜像身份胶囊（点击或 `⌘L` 原地切换为内联搜索栏），中间居中放置 `File Tree` / `Treemap` / `Findings` / `Dockerfile` 工作台 Tabs，右侧置对比/刷新/导出，下方紧接 `36pt` 单行指标摘要条，最大限度释放纵向阅读空间。
+  - **Diff 态**：内容顶栏直接容纳 `Swap`、`Open Base`、`Open Target`、`Compare with…`、`Export Markdown…`，消除主区重复标题卡片。
 
 ### 4.2 响应式窗口策略（`960px` – 无上限）
 
-1. **`>= 1100 pt`（标准桌面布局）**：
-   - 主体采用 `ResizablePanelGroup` 横向分栏：左侧 `LayerTimeline`（最小 `240pt`、默认 `320pt`、最大 `440pt`，拖拽宽度持久化并在下次打开时按当前窗口裁剪校验）+ 右侧主工作台（`flex_1 min_w_0`）。
+1. **`>= 1080 pt`（标准桌面布局）**：
+   - 默认展开 `208pt` 全高可折叠 `App Sidebar`（支持 `Mod+\` 或顶部按钮随时折叠并持久化）。
+   - Inspector 内部采用 `ResizablePanelGroup` 横向分栏：左侧 `LayerTimeline`（最小 `260pt`、默认 `340pt`、最大 `480pt`，宽度持久化）+ 右侧 Detail 工作台（`flex_1 min_w_0`）。
    - `Findings` 页采用 2 列等宽网格布局。
-2. **`960 – 1099 pt`（紧凑窗口适配）**：
-   - `LayerTimeline` 宽度自动夹紧至 `240–260pt`。
-   - `KPI Strip` 由单行横排允许优雅折行为两行紧凑排列，保证数值不被截断。
-   - `File Tree` 中可选元数据列（权限 `Mode` 与 `UID:GID`）在默认初次布局时自动折起，用户仍可通过勾选框手动显示并横向滚动或压缩路径列查看。
-   - `Findings` 页由 2 列退化为单列堆叠。
+2. **`960 – 1079 pt`（紧凑窗口适配）**：
+   - `App Sidebar` 初始化自动收起（用户仍可按 `Mod+\` 或点左上按钮滑出），内容顶栏右侧 Compare 按钮自动收束为图标，确保 `48pt` 顶栏与 Tabs 不溢出。
+   - `LayerTimeline` 宽度自动夹紧至 `260–320pt`，`File Tree` 中 `Mode & UID` 元数据列默认折起，`Findings` 退化为单列堆叠。
 
 ### 4.3 原生应用菜单（`set_application_menu`）
 
