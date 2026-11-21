@@ -147,6 +147,8 @@ pub struct AppState {
     pub local_selected_ref: Signal<Option<String>>,
     pub local_request_id: Signal<u64>,
     pub command_palette_open: Signal<bool>,
+    pub provenance_open: Signal<bool>,
+    pub provenance_query: Signal<String>,
     root_owner: Owner,
     active_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
     active_diff_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
@@ -269,6 +271,8 @@ impl AppState {
             local_selected_ref: signal(None),
             local_request_id: signal(0),
             command_palette_open: signal(false),
+            provenance_open: signal(false),
+            provenance_query: signal(String::new()),
             root_owner: Owner::current(),
             active_task: Rc::new(RefCell::new(None)),
             active_diff_task: Rc::new(RefCell::new(None)),
@@ -956,6 +960,35 @@ impl AppState {
         self.command_palette_open.set(next);
     }
 
+    pub fn open_provenance_search(&self) {
+        if self.result.get_untracked().is_some() {
+            self.provenance_open.set(true);
+        }
+    }
+
+    pub fn jump_to_layer_file(&self, layer_index: usize, path: String) {
+        self.provenance_open.set(false);
+        self.route.set(AppRoute::Inspector);
+        self.active_tab.set(InspectorTab::FileTree);
+        self.select_layer(layer_index);
+        self.tree_keyword.set(path.clone());
+        self.selected_file_path.set(Some(path));
+    }
+
+    /// Handles a local `.tar` archive or OCI layout directory dropped onto the window.
+    pub fn handle_dropped_uri(&self, uri: &str) {
+        let trimmed = uri.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let image_ref = if trimmed.starts_with("file://") {
+            percent_decode_file_uri(trimmed)
+        } else {
+            format!("file://{trimmed}")
+        };
+        self.analyze(image_ref, None);
+    }
+
     pub fn reanalyze_current_image(&self) {
         match self.route.get_untracked() {
             AppRoute::Diff => {
@@ -1309,6 +1342,30 @@ fn format_progress_event_text(lang: UiLang, ev: &ProgressEvent) -> String {
         ProgressEvent::AnalysisCacheHit { .. } => t(lang, "progress.cache_hit").to_owned(),
         ProgressEvent::UsingStaleCache { as_of } => tf(lang, "stale.banner", &[as_of]),
     }
+}
+
+fn percent_decode_file_uri(uri: &str) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return uri.to_owned();
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let decoded = String::from_utf8(out).unwrap_or_else(|_| rest.to_owned());
+    format!("file://{decoded}")
 }
 
 fn short_digest(digest: &str) -> &str {

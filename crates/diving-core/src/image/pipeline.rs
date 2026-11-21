@@ -11,8 +11,9 @@ use super::registry::{
 };
 use super::registry_auth::{DockerConfig, RegistryCredentials};
 use super::scan::{
-    build_risk_tags, detect_os_from_history, display_name, extract_image_meta, preview_layers,
-    probe_base_os, reconstruct_dockerfile, scan_layers, LayerScan,
+    build_risk_tags, detect_os_from_history, display_name, extract_base_os_from_layers,
+    extract_health_and_ports, extract_image_meta, preview_layers, probe_base_os,
+    reconstruct_dockerfile, scan_layers, LayerScan,
 };
 use crate::error::{Error, IoSnafu, Result};
 use crate::i18n::Lang;
@@ -144,6 +145,7 @@ async fn analyze_client(
     let image_os = config.os.clone();
     let dockerfile = reconstruct_dockerfile(&config.history);
     let (run_user, envs, labels) = extract_image_meta(&config);
+    let (has_healthcheck, exposed_ports) = extract_health_and_ports(&config);
 
     let is_local = client.is_local();
     let verify_dup = params.verify_dup;
@@ -166,7 +168,9 @@ async fn analyze_client(
         unstripped_binaries,
     ) = tokio::task::spawn_blocking(move || {
         let scan = scan_layers(&config, &manifest.layers, &info_list, &sensitive_patterns);
-        let base_os = if !is_local {
+        let base_os = if let Some(found) = extract_base_os_from_layers(&info_list) {
+            found
+        } else if !is_local {
             let base_os = probe_base_os(&manifest, &store_for_probe);
             if base_os.is_empty() {
                 detect_os_from_history(&scan.layers)
@@ -281,6 +285,8 @@ async fn analyze_client(
         duplicate_groups,
         runtime_compat,
         unstripped_binaries,
+        has_healthcheck,
+        exposed_ports,
         stale_as_of: None,
     };
     result.recommendations = build_recommendations(&result, lang);

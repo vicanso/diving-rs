@@ -310,6 +310,233 @@ pub(crate) fn is_sensitive_file(path: &str) -> Option<&'static str> {
     None
 }
 
+/// Maximum file size scanned for inline secrets during the single-pass tar scan (1 MiB).
+pub(crate) const MAX_CONTENT_SECRET_SCAN_BYTES: u64 = 1024 * 1024;
+
+/// Fast pre-filter deciding whether a tar entry is worth reading for content-level
+/// secret scanning (small regular text/config/script files outside system binary dirs).
+pub(crate) fn should_scan_content(path: &str, size: u64) -> bool {
+    if size == 0 || size > MAX_CONTENT_SECRET_SCAN_BYTES {
+        return false;
+    }
+    let clean = path.trim_start_matches("./").trim_start_matches('/');
+    let pl = clean.to_ascii_lowercase();
+    if is_public_ca_store(&pl, pl.rsplit('/').next().unwrap_or(&pl)) {
+        return false;
+    }
+    // Skip OS/runtime bulk directories where high-volume static data lives.
+    for skip in [
+        "usr/share/",
+        "usr/include/",
+        "usr/lib/",
+        "usr/lib64/",
+        "lib/",
+        "lib64/",
+        "var/lib/dpkg/",
+        "var/lib/apt/",
+        "var/lib/rpm/",
+        "var/cache/",
+        "node_modules/",
+    ] {
+        if pl.starts_with(skip) {
+            return false;
+        }
+    }
+    // Skip obvious binary / media / archive extensions.
+    let file = pl.rsplit('/').next().unwrap_or(&pl);
+    if let Some((_, ext)) = file.rsplit_once('.') {
+        if matches!(
+            ext,
+            "so" | "a"
+                | "o"
+                | "pyc"
+                | "pyo"
+                | "whl"
+                | "jar"
+                | "class"
+                | "wasm"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "ico"
+                | "svg"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "otf"
+                | "eot"
+                | "mp3"
+                | "mp4"
+                | "pdf"
+                | "zip"
+                | "gz"
+                | "bz2"
+                | "xz"
+                | "zst"
+                | "tar"
+                | "db"
+                | "sqlite"
+                | "bin"
+                | "exe"
+                | "dll"
+                | "dylib"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Zero-regex content-level secret detector for small text files (<= 1 MiB).
+pub(crate) fn scan_content_secrets(path: &str, bytes: &[u8]) -> Option<&'static str> {
+    if bytes.is_empty() || bytes.len() > MAX_CONTENT_SECRET_SCAN_BYTES as usize {
+        return None;
+    }
+    // Reject binary files (NUL byte in prefix).
+    let sniff = &bytes[..bytes.len().min(4096)];
+    if sniff.contains(&0) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+
+    // 1. PEM private key headers
+    if text.contains("-----BEGIN ") && text.contains(" PRIVATE KEY-----") {
+        return Some("Embedded private key (content)");
+    }
+
+    // 2. High-confidence provider token prefixes
+    if contains_aws_access_key(text) {
+        return Some("AWS Access Key ID (content)");
+    }
+    for (prefix, min_tail, reason) in [
+        ("ghp_", 30, "GitHub personal access token (content)"),
+        ("gho_", 30, "GitHub OAuth token (content)"),
+        ("ghu_", 30, "GitHub user-to-server token (content)"),
+        ("ghs_", 30, "GitHub server token (content)"),
+        ("github_pat_", 20, "GitHub fine-grained token (content)"),
+        ("xoxb-", 20, "Slack bot token (content)"),
+        ("xoxp-", 20, "Slack user token (content)"),
+        ("sk_live_", 16, "Stripe live secret key (content)"),
+        ("AIza", 35, "Google API key (content)"),
+    ] {
+        if contains_prefixed_token(text, prefix, min_tail) {
+            return Some(reason);
+        }
+    }
+
+    // 3. Hardcoded secret assignments in .env / config files
+    let file = path
+        .trim_start_matches("./")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    let is_config_file = file.starts_with(".env")
+        || file.ends_with(".env")
+        || file.ends_with(".yml")
+        || file.ends_with(".yaml")
+        || file.ends_with(".toml")
+        || file.ends_with(".ini")
+        || file.ends_with(".properties")
+        || file.ends_with(".conf");
+    if is_config_file && has_hardcoded_secret_assignment(text) {
+        return Some("Hardcoded secret assignment (content)");
+    }
+
+    None
+}
+
+fn contains_aws_access_key(text: &str) -> bool {
+    for prefix in ["AKIA", "ASIA"] {
+        let mut rest = text;
+        while let Some(idx) = rest.find(prefix) {
+            let after = &rest[idx + prefix.len()..];
+            let candidate = after.as_bytes();
+            if candidate.len() >= 16
+                && candidate[..16]
+                    .iter()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            {
+                let next_ok = candidate.get(16).is_none_or(|b| !b.is_ascii_alphanumeric());
+                let prev_ok = idx == 0 || !rest.as_bytes()[idx - 1].is_ascii_alphanumeric();
+                if prev_ok && next_ok {
+                    return true;
+                }
+            }
+            rest = &rest[idx + prefix.len()..];
+        }
+    }
+    false
+}
+
+fn contains_prefixed_token(text: &str, prefix: &str, min_tail: usize) -> bool {
+    let mut rest = text;
+    while let Some(idx) = rest.find(prefix) {
+        let prev_ok = idx == 0 || !rest.as_bytes()[idx - 1].is_ascii_alphanumeric();
+        let after = &rest[idx + prefix.len()..];
+        let tail_len = after
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            .count();
+        if prev_ok && tail_len >= min_tail {
+            return true;
+        }
+        rest = &rest[idx + prefix.len()..];
+    }
+    false
+}
+
+fn has_hardcoded_secret_assignment(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let Some((raw_key, raw_val)) = trimmed.split_once('=').or_else(|| trimmed.split_once(':'))
+        else {
+            continue;
+        };
+        let key = raw_key
+            .trim()
+            .trim_start_matches("export ")
+            .trim_matches(['"', '\''])
+            .to_ascii_uppercase();
+        let sensitive_key = key.ends_with("_SECRET")
+            || key.ends_with("_PASSWORD")
+            || key.ends_with("_API_KEY")
+            || key.ends_with("_TOKEN")
+            || key == "DATABASE_URL"
+            || key == "AWS_SECRET_ACCESS_KEY";
+        if !sensitive_key {
+            continue;
+        }
+        let val = raw_val
+            .split('#')
+            .next()
+            .unwrap_or(raw_val)
+            .trim()
+            .trim_matches(['"', '\'', ',']);
+        if val.len() < 12 {
+            continue;
+        }
+        let val_lower = val.to_ascii_lowercase();
+        let is_placeholder = val.starts_with('$')
+            || val.starts_with("{{")
+            || val.starts_with('<')
+            || val_lower.contains("changeme")
+            || val_lower.contains("example")
+            || val_lower.contains("placeholder")
+            || val_lower.contains("your_")
+            || val_lower.contains("xxx");
+        if !is_placeholder {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +575,32 @@ mod tests {
         assert_eq!(
             rules.evaluate_path("app/secret.pem").as_deref(),
             Some("Private key / certificate")
+        );
+    }
+
+    #[test]
+    fn content_secret_scanner_detects_keys_and_ignores_placeholders() {
+        assert!(scan_content_secrets(
+            "app/config.txt",
+            b"-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"
+        )
+        .is_some());
+        assert!(scan_content_secrets("app/app.py", b"AWS_ID = \"AKIAIOSFODNN7EXAMPLE\"").is_some());
+        assert!(
+            scan_content_secrets("app/.env", b"API_SECRET=super_secret_prod_value_998877")
+                .is_some()
+        );
+        assert_eq!(
+            scan_content_secrets("app/.env", b"API_SECRET=${MY_SECRET_FROM_VAULT}"),
+            None
+        );
+        assert_eq!(
+            scan_content_secrets("app/.env", b"API_SECRET=your_example_placeholder"),
+            None
+        );
+        assert_eq!(
+            scan_content_secrets("app/bin", b"\x7fELF\0\0AKIAIOSFODNN7EXAMPLE"),
+            None
         );
     }
 

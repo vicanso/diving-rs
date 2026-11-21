@@ -153,6 +153,16 @@ pub struct ImageExtraInfo {
     pub entrypoint: Option<Vec<String>>,
     #[serde(rename = "Cmd")]
     pub cmd: Option<Vec<String>>,
+    #[serde(rename = "ExposedPorts")]
+    pub exposed_ports: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "Healthcheck")]
+    pub healthcheck: Option<serde_json::Value>,
+    #[serde(rename = "WorkingDir")]
+    pub working_dir: Option<String>,
+    #[serde(rename = "Volumes")]
+    pub volumes: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "StopSignal")]
+    pub stop_signal: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

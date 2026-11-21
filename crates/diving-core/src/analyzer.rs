@@ -576,8 +576,10 @@ impl Analyzer {
         self.check_allowed(&base_info)?;
         self.check_allowed(&target_info)?;
 
-        let base_res = self.analyze_info(base_info, opts.clone()).await?;
-        let target_res = self.analyze_info(target_info, opts).await?;
+        let (base_res, target_res) = tokio::try_join!(
+            self.analyze_info(base_info, opts.clone()),
+            self.analyze_info(target_info, opts),
+        )?;
         tokio::task::spawn_blocking(move || diff_images(&base_res, &target_res))
             .await
             .map_err(|e| Error::Other {

@@ -386,6 +386,32 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("findings.show_all", "Show all ({0})", "显示全部（{0}）"),
     ("findings.show_less", "Show fewer", "收起"),
     (
+        "findings.what_if_summary",
+        "If applied: save ~{0} → projected size {1} (efficiency ~{2}%)",
+        "若按建议优化：预计节省约 {0} → 镜像体积约 {1}（效率约 {2}%）",
+    ),
+    (
+        "provenance.title",
+        "Cross-Layer File Provenance",
+        "跨层文件溯源",
+    ),
+    (
+        "provenance.placeholder",
+        "Search file path across all layers (e.g. nginx.conf, .env)…",
+        "跨所有镜像层搜索文件路径（如 nginx.conf、.env）…",
+    ),
+    (
+        "provenance.empty",
+        "Type a path fragment to trace where files are added, modified, or deleted across layers.",
+        "输入路径关键字，追踪文件在各层的添加、修改与删除历史。",
+    ),
+    (
+        "provenance.no_matches",
+        "No matching files found across layers.",
+        "所有镜像层中未找到匹配文件。",
+    ),
+    ("provenance.button", "Trace across layers", "跨层溯源"),
+    (
         "findings.unstripped",
         "Unstripped Binaries",
         "未剥离符号的二进制",

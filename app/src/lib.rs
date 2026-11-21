@@ -14,7 +14,7 @@ use crate::domain::{AppRoute, AppState, DivingService};
 use crate::features::{
     app_sidebar, command_palette_overlay, compare_dialog, content_header_bar, diff_workspace,
     file_preview_sheet, inspector_workspace, install_desktop_menus_and_keys, landing_view,
-    local_picker_dialog,
+    local_picker_dialog, provenance_dialog,
 };
 use crate::i18n::{t, tf};
 use crate::ui::{
@@ -56,6 +56,7 @@ pub fn App() -> impl IntoElement {
     let route_state = state.clone();
     let config_state = state.clone();
     let progress_state = state.clone();
+    let drop_state = state.clone();
 
     view()
         .relative()
@@ -63,6 +64,11 @@ pub fn App() -> impl IntoElement {
         .flex_row()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
+        .on_file_drop(move |ev: &FileDropEvent| {
+            if let Some(first) = ev.uris.first() {
+                drop_state.handle_dropped_uri(first);
+            }
+        })
         .child(when(
             move || sidebar_open.get(),
             move || app_sidebar(sidebar_state.clone()),
@@ -104,6 +110,7 @@ pub fn App() -> impl IntoElement {
         .child(file_preview_sheet(state.clone()))
         .child(compare_dialog(state.clone()))
         .child(local_picker_dialog(state.clone()))
+        .child(provenance_dialog(state.clone()))
         .child(command_palette_overlay(state))
 }
 

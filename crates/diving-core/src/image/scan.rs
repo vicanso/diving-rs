@@ -81,6 +81,35 @@ pub(crate) fn detect_os_from_history(layers: &[ImageLayer]) -> Option<String> {
     None
 }
 
+pub(crate) fn extract_base_os_from_layers(info_list: &[ImageLayerInfo]) -> Option<String> {
+    for info in info_list.iter().take(4) {
+        if let Some((ref filename, ref content)) = info.os_release {
+            if let Some(name) = parse_os_release(content, filename) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_health_and_ports(config: &ImageConfig) -> (bool, Vec<String>) {
+    let Some(extra) = config.config.as_ref() else {
+        return (false, vec![]);
+    };
+    let has_healthcheck = extra.healthcheck.as_ref().is_some_and(|hc| {
+        hc.get("Test")
+            .and_then(|t| t.as_array())
+            .is_some_and(|arr| !arr.is_empty() && arr[0].as_str() != Some("NONE"))
+    });
+    let mut ports: Vec<String> = extra
+        .exposed_ports
+        .as_ref()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    ports.sort();
+    (has_healthcheck, ports)
+}
+
 pub(crate) fn probe_base_os(manifest: &ImageManifest, store: &CacheStore) -> String {
     for layer in manifest.layers.iter().take(3) {
         let path = store.blob_path(&layer.digest);
@@ -322,6 +351,16 @@ pub(crate) fn scan_layers(
                                 });
                             }
                         }
+                    }
+                }
+                for (path, file_size, reason) in &info.content_secrets {
+                    if !sensitive_patterns.is_ignored(path) && sensitive_seen.insert(path.clone()) {
+                        sensitive_files.push(SensitiveFileInfo {
+                            path: path.clone(),
+                            size: *file_size,
+                            layer_index,
+                            reason: reason.clone(),
+                        });
                     }
                 }
                 image_size += info.size;

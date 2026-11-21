@@ -174,6 +174,16 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
         arch => arch,
     };
 
+    let explicit_scheme = if let Some(rest) = value.strip_prefix("http://") {
+        value = rest.to_string();
+        Some("http")
+    } else if let Some(rest) = value.strip_prefix("https://") {
+        value = rest.to_string();
+        Some("https")
+    } else {
+        None
+    };
+
     let (path, tag) = split_name_and_tag(&value);
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
@@ -189,9 +199,10 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
     }
 
     let first = parts[0];
-    let has_registry = looks_like_registry_host(first);
+    let has_registry = explicit_scheme.is_some() || looks_like_registry_host(first);
     let (registry, repo_parts): (String, &[&str]) = if has_registry && parts.len() >= 2 {
-        (format!("https://{first}/v2"), &parts[1..])
+        let scheme = explicit_scheme.unwrap_or("https");
+        (format!("{scheme}://{first}/v2"), &parts[1..])
     } else {
         (REGISTRY_DOCKER_HUB.to_string(), &parts[..])
     };
@@ -228,6 +239,12 @@ mod tests {
         assert_eq!(info.tag, "alpine");
         assert_eq!(info.user, "library");
         assert_eq!(info.registry, REGISTRY_DOCKER_HUB);
+
+        let http_info = parse_image_info("http://localhost:5000/team/app:v2");
+        assert_eq!(http_info.registry, "http://localhost:5000/v2");
+        assert_eq!(http_info.user, "team");
+        assert_eq!(http_info.name, "app");
+        assert_eq!(http_info.tag, "v2");
     }
 
     #[test]

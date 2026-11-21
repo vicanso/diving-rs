@@ -55,6 +55,10 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
             .group(group_actions)
             .keywords(["search", "image", "focus"])
             .shortcut("mod+l"),
+        CommandItem::new("action:provenance", t(lang, "provenance.title"))
+            .group(group_actions)
+            .keywords(["provenance", "trace", "global", "find", "file", "layer"])
+            .disabled(!has_result),
         CommandItem::new("action:reanalyze", t(lang, "cmd.reanalyze"))
             .group(group_actions)
             .keywords(["refresh", "reload", "reanalyze"])
@@ -160,6 +164,7 @@ fn execute_command(state: &AppState, id: &str) {
         "action:local_images" => state.open_local_picker(),
         "action:compare" => state.open_compare_dialog(),
         "action:focus_search" => state.focus_search_input(),
+        "action:provenance" => state.open_provenance_search(),
         "action:reanalyze" => state.reanalyze_current_image(),
         "action:export_md" => {
             if state.route.get_untracked() == AppRoute::Diff {

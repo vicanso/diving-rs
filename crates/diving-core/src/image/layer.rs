@@ -1,5 +1,6 @@
 use super::ImageFileInfo;
 use crate::error::{Error, IoSnafu, Result, TarSnafu};
+use crate::sensitive::{scan_content_secrets, should_scan_content};
 use flate2::read::MultiGzDecoder as GzipDecoder;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -70,12 +71,34 @@ fn file_type_bits(entry_type: EntryType) -> u32 {
     }
 }
 
-fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFileInfo>> {
+struct CollectedLayer {
+    files: Vec<ImageFileInfo>,
+    os_release: Option<(String, Vec<u8>)>,
+    content_secrets: Vec<(String, u64, String)>,
+}
+
+const MAX_CONTENT_SECRETS_PER_LAYER: usize = 64;
+
+fn is_os_release_entry(clean_path: &str) -> Option<&'static str> {
+    match clean_path {
+        "etc/os-release" => Some("etc/os-release"),
+        "usr/lib/os-release" => Some("usr/lib/os-release"),
+        "etc/alpine-release" => Some("etc/alpine-release"),
+        "etc/debian_version" => Some("etc/debian_version"),
+        "etc/redhat-release" => Some("etc/redhat-release"),
+        _ => None,
+    }
+}
+
+fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLayer> {
     let mut files = vec![];
+    let mut os_release: Option<(String, Vec<u8>)> = None;
+    let mut content_secrets: Vec<(String, u64, String)> = vec![];
     for entry in archive.entries().context(TarSnafu {})? {
-        let file = entry.context(TarSnafu {})?;
+        let mut file = entry.context(TarSnafu {})?;
         let header = file.header();
-        if header.entry_type().is_dir() {
+        let entry_type = header.entry_type();
+        if entry_type.is_dir() {
             continue;
         }
         let mut link = "".to_string();
@@ -115,8 +138,33 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
                 is_whiteout = Some(true);
             }
         }
-        let mode =
-            (header.mode().context(TarSnafu {})? & 0o7777) | file_type_bits(header.entry_type());
+        let mode = (header.mode().context(TarSnafu {})? & 0o7777) | file_type_bits(entry_type);
+        let uid = header.uid().context(TarSnafu {})?;
+        let gid = header.gid().context(TarSnafu {})?;
+        let size = file.size();
+
+        // Single-pass capture of base-OS release file & inline text secrets (no extra decompression).
+        if is_whiteout.is_none() && entry_type.is_file() {
+            let clean = path.trim_start_matches("./").trim_start_matches('/');
+            if os_release.is_none() && size > 0 && size <= 32 * 1024 {
+                if let Some(canonical) = is_os_release_entry(clean) {
+                    let mut buf = Vec::with_capacity(size as usize);
+                    if file.read_to_end(&mut buf).is_ok() {
+                        os_release = Some((canonical.to_string(), buf));
+                    }
+                }
+            } else if content_secrets.len() < MAX_CONTENT_SECRETS_PER_LAYER
+                && should_scan_content(clean, size)
+            {
+                let mut buf = Vec::with_capacity(size.min(64 * 1024) as usize);
+                if file.read_to_end(&mut buf).is_ok() {
+                    if let Some(reason) = scan_content_secrets(clean, &buf) {
+                        content_secrets.push((clean.to_string(), size, reason.to_string()));
+                    }
+                }
+            }
+        }
+
         if files.len() >= MAX_TAR_ENTRIES {
             return Err(Error::Other {
                 message: format!("layer exceeds maximum tar entry count ({MAX_TAR_ENTRIES})"),
@@ -125,15 +173,19 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<Vec<ImageFil
         files.push(ImageFileInfo {
             path,
             link,
-            size: file.size(),
+            size,
             mode: unix_mode::to_string(mode),
-            uid: header.uid().context(TarSnafu {})?,
-            gid: header.gid().context(TarSnafu {})?,
+            uid,
+            gid,
             is_whiteout,
             is_opaque,
         });
     }
-    Ok(files)
+    Ok(CollectedLayer {
+        files,
+        os_release,
+        content_secrets,
+    })
 }
 
 /// Whether `path` is under directory `dir` (or is `dir` itself).
@@ -480,6 +532,10 @@ pub struct ImageLayerInfo {
     pub size: u64,
     pub unpack_size: u64,
     pub files: Vec<ImageFileInfo>,
+    #[serde(default, skip_serializing)]
+    pub os_release: Option<(String, Vec<u8>)>,
+    #[serde(default, skip_serializing)]
+    pub content_secrets: Vec<(String, u64, String)>,
 }
 
 pub fn get_files_from_layer<R: Read>(
@@ -490,12 +546,12 @@ pub fn get_files_from_layer<R: Read>(
     macro_rules! parse_layer {
         ($reader:expr) => {{
             let mut counting = CountingReader::new($reader);
-            let files = collect_tar_entries(&mut Archive::new(&mut counting))?;
-            (files, counting.count)
+            let collected = collect_tar_entries(&mut Archive::new(&mut counting))?;
+            (collected, counting.count)
         }};
     }
 
-    let (files, unpack_size) = if media_type.contains("gzip") {
+    let (collected, unpack_size) = if media_type.contains("gzip") {
         parse_layer!(GzipDecoder::new(reader))
     } else if media_type.contains("zstd") {
         let dec = zstd::Decoder::new(reader).map_err(|source| Error::Decompress {
@@ -507,9 +563,11 @@ pub fn get_files_from_layer<R: Read>(
     };
 
     Ok(ImageLayerInfo {
-        files,
+        files: collected.files,
         size: compressed_size,
         unpack_size,
+        os_release: collected.os_release,
+        content_secrets: collected.content_secrets,
     })
 }
 
@@ -670,7 +728,7 @@ mod tests {
         let data = builder.into_inner().unwrap();
 
         let mut archive = Archive::new(Cursor::new(data));
-        let files = collect_tar_entries(&mut archive).unwrap();
+        let files = collect_tar_entries(&mut archive).unwrap().files;
 
         let nested = files.iter().find(|f| f.path == "x/.wh.f/f").unwrap();
         assert_eq!(nested.is_whiteout, Some(true));
@@ -690,7 +748,7 @@ mod tests {
         let data = builder.into_inner().unwrap();
 
         let mut archive = Archive::new(Cursor::new(data));
-        let files = collect_tar_entries(&mut archive).unwrap();
+        let files = collect_tar_entries(&mut archive).unwrap().files;
         assert_eq!(files.len(), 3);
 
         let normal = files.iter().find(|f| f.path == "app/config.json").unwrap();

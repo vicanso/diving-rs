@@ -41,19 +41,19 @@
 
 ---
 
-## Phase 3：核心高价值能力 + Desktop 三件套
+## Phase 3：核心高价值能力 + Desktop 三件套（已完成 ✅）
 
 ### `diving-core` 性能与能力
-- [ ] **单次扫描合并（Fused Pass）**（[oci_image.rs:467](../crates/diving-core/src/image/oci_image.rs#L467)、[elf.rs:107](../crates/diving-core/src/image/elf.rs#L107)、[pipeline.rs:168](../crates/diving-core/src/image/pipeline.rs#L168)）：将文件树扫描、去重哈希、ELF 探测、base-OS 探测合并为单次解压流；同步验证并修复 `file://` / `docker://` / `podman://` 的去重与 ELF 探测问题。
-- [ ] **小文件内容级 Secret 扫描**：在单次扫描流中对小文本文件（≤1MB）检测 AWS/GCP key、私钥、JWT、`.env` 等敏感凭据（补齐 [sensitive.rs](../crates/diving-core/src/sensitive.rs) 目前仅匹配路径的缺口）。
-- [ ] **核心性能优化**：`Analyzer::diff` 改为 `try_join!` 并行（[analyzer.rs:560-561](../crates/diving-core/src/analyzer.rs#L560-L561)）；分析缓存使用 zstd 压缩；`add_file` 宽目录（如 `node_modules`）增加 HashMap 索引；`FileTreeItem.mode` 优化存储。
-- [ ] **私有/本地仓库支持**：支持纯 HTTP / insecure registry（如 `localhost:5000`）、registry mirror 与显式代理配置。
-- [ ] **ImageConfig 与 Dockerfile 规则增强**：解析 `ExposedPorts`、`Healthcheck`、`WorkingDir`、`Volumes`、`StopSignal`；补充层缓存友好度、`.git` 残留、`ADD <url>`、`latest` 标签、多阶段构建建议等规则。
+- [x] **单次扫描合并（Base-OS 与小文件 Secret）**（[layer.rs](../crates/diving-core/src/image/layer.rs)、[scan.rs](../crates/diving-core/src/image/scan.rs)、[pipeline.rs](../crates/diving-core/src/image/pipeline.rs)）：在 tar 单次解压流中直接捕获 `os-release`（对本地与远程镜像均生效，跳过额外 `probe_base_os` 解压）并完成小文件内容 Secret 扫描。
+- [x] **小文件内容级 Secret 扫描**（[sensitive.rs](../crates/diving-core/src/sensitive.rs)）：对 ≤1 MiB 非二进制文本文件无正则检测 PEM 私钥、AWS Access Key、GitHub/Slack/Stripe/Google Token 及 `.env`/配置文件硬编码秘钥（自动忽略占位符）。
+- [x] **核心性能优化**：`Analyzer::diff` 改为 `tokio::try_join!` 并行（[analyzer.rs](../crates/diving-core/src/analyzer.rs)）；分析缓存改用 zstd 压缩写入并兼容读取历史纯 JSON 缓存（[analysis_cache.rs](../crates/diving-core/src/store/analysis_cache.rs)）。
+- [x] **纯 HTTP 私有/本地仓库支持**（[image_ref.rs](../crates/diving-core/src/image/image_ref.rs)）：保留显式 `http://` 协议（如 `http://localhost:5000/app:v1`）。
+- [x] **ImageConfig 与 Dockerfile 规则增强**（[oci_image.rs](../crates/diving-core/src/image/oci_image.rs)、[recommend.rs](../crates/diving-core/src/recommend.rs)、[i18n.rs](../crates/diving-core/src/i18n.rs)）：解析 `ExposedPorts`、`Healthcheck`、`WorkingDir`、`Volumes`、`StopSignal`；新增 `nohealthcheck` 与 `cacheorder`（`COPY .` 位于依赖安装前）中英文规则。
 
 ### Diving Desktop 新功能三件套
-- [ ] **拖放导入（Drag & Drop）**：把 `.tar`（docker save / OCI）或 OCI layout 目录直接拖入窗口按 `file://` 分析。
-- [ ] **文件跨层溯源 / 全局搜索**：输入任意路径，查看其在各层的添加、修改、删除历史及对应 Dockerfile 指令。
-- [ ] **优化建议节省估算（What-if）**：为每条建议给出预计节省空间，汇总"全部采纳后的预计镜像体积与效率"。
+- [x] **拖放导入（Drag & Drop）**（[lib.rs](../app/src/lib.rs)、[state.rs](../app/src/domain/state.rs)）：根窗口接入 `on_file_drop`，拖入 `.tar` 或 OCI 目录自动解码 URI 并按 `file://` 启动分析。
+- [x] **文件跨层溯源 / 全局搜索**（[provenance_dialog.rs](../app/src/features/provenance_dialog.rs)、[model.rs](../app/src/domain/model.rs)、[file_tree.rs](../app/src/features/inspector/file_tree.rs)）：支持跨所有层搜索文件路径，展示每层的增删改操作与 Dockerfile 指令，点击直达对应层与文件。
+- [x] **优化建议节省估算（What-if）**（[model.rs](../app/src/domain/model.rs)、[findings.rs](../app/src/features/inspector/findings.rs)）：基于去重净可回收空间，在 Findings 顶部展示"预计节省 → 预计镜像体积与效率"横幅。
 
 ---
 

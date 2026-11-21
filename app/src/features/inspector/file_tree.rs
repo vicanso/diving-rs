@@ -277,6 +277,18 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
             true,
             None,
         )))
+        .child({
+            let prov_state = state.clone();
+            ui_button(
+                move || SharedString::from(t(lang.get(), "provenance.button")),
+                ButtonVariant::Outline,
+                UiSize::Xs,
+                Some(IconName::Search),
+                false,
+                false,
+                move || prov_state.open_provenance_search(),
+            )
+        })
         .child(ui_checkbox(
             move || SharedString::from(t(lang.get(), "tree.modifications_only")),
             state.tree_modifications_only,

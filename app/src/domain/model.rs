@@ -690,6 +690,117 @@ pub fn remove_recent(list: &mut Vec<RecentImageEntry>, image: &str, arch: &str) 
     list.retain(|existing| !(existing.image == image && existing.arch == arch));
 }
 
+/// Projected image size and efficiency if reclaimable recommendations are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WhatIfProjection {
+    pub saved_bytes: u64,
+    pub projected_size: u64,
+    pub projected_efficiency: u64,
+}
+
+/// Computes a conservative deduplicated What-if savings projection from recommendations.
+pub fn compute_what_if_projection(
+    res: &DockerAnalyzeResult,
+    summary: &DockerAnalyzeSummary,
+) -> Option<WhatIfProjection> {
+    if res.total_size == 0 {
+        return None;
+    }
+    let saved_raw = res
+        .recommendations
+        .iter()
+        .find(|r| r.id == "netreclaim" && r.est_saved_bytes > 0)
+        .map(|r| r.est_saved_bytes)
+        .or_else(|| {
+            res.recommendations
+                .iter()
+                .filter(|r| r.est_saved_bytes > 0)
+                .map(|r| r.est_saved_bytes)
+                .max()
+        })?;
+    let saved_bytes = saved_raw.min(res.total_size);
+    if saved_bytes == 0 {
+        return None;
+    }
+    let projected_size = res.total_size.saturating_sub(saved_bytes);
+    let remaining_waste = summary.wasted_size.saturating_sub(saved_bytes);
+    let projected_efficiency = if projected_size == 0 {
+        100
+    } else {
+        ((1.0 - (remaining_waste as f64 / projected_size as f64)).clamp(0.0, 1.0) * 100.0).round()
+            as u64
+    };
+    Some(WhatIfProjection {
+        saved_bytes,
+        projected_size,
+        projected_efficiency,
+    })
+}
+
+/// A single cross-layer provenance event for a file path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileProvenanceHit {
+    pub layer_index: usize,
+    pub path: String,
+    pub size: u64,
+    pub op: Op,
+    pub layer_cmd: String,
+}
+
+/// Searches across every layer's file tree for paths matching `query` (case-insensitive).
+pub fn search_file_provenance(
+    res: &DockerAnalyzeResult,
+    query: &str,
+    limit: usize,
+) -> Vec<FileProvenanceHit> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    fn walk(
+        items: &[FileTreeItem],
+        prefix: &str,
+        layer_index: usize,
+        layer_cmd: &str,
+        q: &str,
+        limit: usize,
+        hits: &mut Vec<FileProvenanceHit>,
+    ) {
+        for item in items {
+            if hits.len() >= limit {
+                return;
+            }
+            let key = join_tree_key(prefix, &item.name);
+            if item.children.is_empty() {
+                if key.to_ascii_lowercase().contains(q) {
+                    hits.push(FileProvenanceHit {
+                        layer_index,
+                        path: key,
+                        size: item.size,
+                        op: item.op.clone(),
+                        layer_cmd: layer_cmd.to_owned(),
+                    });
+                }
+            } else {
+                walk(&item.children, &key, layer_index, layer_cmd, q, limit, hits);
+            }
+        }
+    }
+    for (layer_index, tree) in res.file_tree_list.iter().enumerate() {
+        if hits.len() >= limit {
+            break;
+        }
+        let cmd = res
+            .layers
+            .get(layer_index)
+            .map(|l| classify_layer_opcode(&l.cmd).1)
+            .unwrap_or_default();
+        walk(tree, "", layer_index, &cmd, &q, limit, &mut hits);
+    }
+    hits
+}
+
 /// Formats `RuntimeCompat` for KPI strip display with semantic badge tone.
 pub fn format_runtime_compat(rc: &RuntimeCompat, lang: UiLang) -> Option<(String, BadgeTone)> {
     if rc.libc.is_empty() {

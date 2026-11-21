@@ -9,7 +9,7 @@ use crate::image::DockerAnalyzeResult;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::{fs, task};
@@ -57,11 +57,24 @@ fn cache_file_path_in(analysis_dir: &Path, digest: &str, arch: &str) -> PathBuf 
     analysis_dir.join(name)
 }
 
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
 async fn read_entry(store: &CacheStore, digest: &str, arch: &str) -> Option<AnalysisCacheEntry> {
     let path = cache_file_path_in(store.analysis_dir(), digest, arch);
     let entry: AnalysisCacheEntry = task::spawn_blocking(move || {
         let file = File::open(&path).ok()?;
-        match serde_json::from_reader(BufReader::new(file)) {
+        let mut reader = BufReader::new(file);
+        let is_zstd = reader
+            .fill_buf()
+            .ok()
+            .is_some_and(|buf| buf.len() >= 4 && buf[..4] == ZSTD_MAGIC);
+        let parsed = if is_zstd {
+            let dec = zstd::stream::Decoder::new(reader).ok()?;
+            serde_json::from_reader(dec)
+        } else {
+            serde_json::from_reader(reader)
+        };
+        match parsed {
             Ok(e) => Some(e),
             Err(e) => {
                 warn!(
@@ -156,9 +169,10 @@ pub async fn write_analysis(
         let tmp = tmp_sibling_path(&path);
         let outcome = (|| -> std::io::Result<()> {
             let file = File::create(&tmp)?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer(&mut writer, &entry)
+            let mut encoder = zstd::stream::Encoder::new(BufWriter::new(file), 3)?;
+            serde_json::to_writer(&mut encoder, &entry)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let mut writer = encoder.finish()?;
             writer.flush()?;
             std::fs::rename(&tmp, &path)?;
             Ok(())

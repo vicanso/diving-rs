@@ -5,11 +5,11 @@ use std::sync::Arc;
 use diving_core::{DockerAnalyzeResult, DockerAnalyzeSummary};
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, format_bytes};
+use crate::domain::{AppState, compute_what_if_projection, format_bytes};
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
-    BadgeTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme, ui_badge,
-    ui_button, ui_empty_state, ui_panel_titled, ui_separator,
+    BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme,
+    ui_badge, ui_banner, ui_button, ui_empty_state, ui_panel_titled, ui_separator,
 };
 
 fn severity_badge_tone(severity: &str) -> BadgeTone {
@@ -37,7 +37,7 @@ pub fn findings_tab(
             .p_6()
             .flex_col()
             .gap_6()
-            .child(recommendations_panel(res.clone(), lang))
+            .child(recommendations_panel(res.clone(), summary.clone(), lang))
             .child(dynamic(move || {
                 if wide_layout.get() {
                     view()
@@ -101,8 +101,13 @@ pub fn findings_tab(
     )
 }
 
-fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
+fn recommendations_panel(
+    res: Arc<DockerAnalyzeResult>,
+    summary: Arc<DockerAnalyzeSummary>,
+    lang: Signal<UiLang>,
+) -> impl IntoElement {
     let count = res.recommendations.len();
+    let projection = compute_what_if_projection(&res, &summary);
     ui_panel_titled(
         move || {
             SharedString::from(format!(
@@ -123,6 +128,23 @@ fn recommendations_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) ->
             view()
                 .flex_col()
                 .gap_3()
+                .when_some(projection, |col, proj| {
+                    col.child(ui_banner(
+                        BannerTone::Info,
+                        move || {
+                            SharedString::from(tf(
+                                lang.get(),
+                                "findings.what_if_summary",
+                                &[
+                                    &format_bytes(proj.saved_bytes),
+                                    &format_bytes(proj.projected_size),
+                                    &proj.projected_efficiency.to_string(),
+                                ],
+                            ))
+                        },
+                        None,
+                    ))
+                })
                 .children(res.recommendations.iter().enumerate().map(|(idx, rec)| {
                     let tone = severity_badge_tone(&rec.severity);
                     let severity = rec.severity.clone();

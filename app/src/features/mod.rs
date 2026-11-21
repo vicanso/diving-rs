@@ -8,6 +8,7 @@ pub mod inspector;
 pub mod landing;
 pub mod local_picker;
 pub mod menu_and_keys;
+pub mod provenance_dialog;
 pub mod sidebar;
 pub mod title_bar;
 
@@ -18,6 +19,7 @@ pub use inspector::inspector_workspace;
 pub use landing::landing_view;
 pub use local_picker::local_picker_dialog;
 pub use menu_and_keys::install_desktop_menus_and_keys;
+pub use provenance_dialog::provenance_dialog;
 pub use sidebar::app_sidebar;
 pub use title_bar::content_header_bar;
 

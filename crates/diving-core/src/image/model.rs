@@ -52,6 +52,10 @@ pub struct DockerAnalyzeResult {
     pub runtime_compat: RuntimeCompat,
     #[serde(default)]
     pub unstripped_binaries: Vec<UnstrippedBinary>,
+    #[serde(default)]
+    pub has_healthcheck: bool,
+    #[serde(default)]
+    pub exposed_ports: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_as_of: Option<String>,
 }
@@ -136,6 +140,8 @@ impl DockerAnalyzeResult {
             duplicate_groups: self.duplicate_groups.clone(),
             runtime_compat: self.runtime_compat.clone(),
             unstripped_binaries: self.unstripped_binaries.clone(),
+            has_healthcheck: self.has_healthcheck,
+            exposed_ports: self.exposed_ports.clone(),
             stale_as_of: self.stale_as_of.clone(),
         }
     }

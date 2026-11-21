@@ -6,12 +6,13 @@ pub mod state;
 pub mod treemap;
 
 pub use model::{
-    AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
-    IndexedTree, IndexedTreeNode, InspectorTab, LayerFileCounts, LayerFilterMode, RecentImageEntry,
-    SharedRef, TreemapViewMode, build_indexed_tree, classify_file_preview, classify_layer_opcode,
-    count_layer_file_ops, findings_total_count, flatten_file_tree, flatten_indexed_tree,
-    format_bytes, format_command_lines, format_runtime_compat, image_source_kind, remove_recent,
-    upsert_recent,
+    AppRoute, DiffFileTab, FilePreviewContent, FileProvenanceHit, FileTreeFilter, FileTreeRow,
+    ImageSourceKind, IndexedTree, IndexedTreeNode, InspectorTab, LayerFileCounts, LayerFilterMode,
+    RecentImageEntry, SharedRef, TreemapViewMode, WhatIfProjection, build_indexed_tree,
+    classify_file_preview, classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
+    findings_total_count, flatten_file_tree, flatten_indexed_tree, format_bytes,
+    format_command_lines, format_runtime_compat, image_source_kind, remove_recent,
+    search_file_provenance, upsert_recent,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
 pub use state::{AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo};

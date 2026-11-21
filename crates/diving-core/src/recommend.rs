@@ -1261,6 +1261,77 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         }
     }
 
+    // Exposed service without HEALTHCHECK.
+    if !result.exposed_ports.is_empty() && !result.has_healthcheck {
+        let ports = result
+            .exposed_ports
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(Recommendation {
+            category: CATEGORY_NECESSITY.into(),
+            severity: SEVERITY_LOW.into(),
+            id: "nohealthcheck".into(),
+            title: t("rec.nohealthcheck.title"),
+            detail: f("rec.nohealthcheck.detail", &[&ports]),
+            dockerfile_hint:
+                "HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost/ || exit 1"
+                    .into(),
+            est_saved_bytes: 0,
+            heuristic: false,
+            paths: vec![],
+        });
+    }
+
+    // Build-cache friendliness: `COPY .` / `ADD .` before a package-manager install.
+    {
+        let mut first_broad_copy: Option<usize> = None;
+        let mut install_after_copy: Option<usize> = None;
+        for (idx, layer) in result.layers.iter().enumerate() {
+            let cmd = layer.cmd.to_ascii_lowercase();
+            if first_broad_copy.is_none()
+                && (cmd.contains("copy . ")
+                    || cmd.contains("copy ./ ")
+                    || cmd.contains("add . ")
+                    || cmd.contains("add ./ "))
+            {
+                first_broad_copy = Some(idx);
+            } else if first_broad_copy.is_some()
+                && (cmd.contains("npm install")
+                    || cmd.contains("npm ci")
+                    || cmd.contains("yarn install")
+                    || cmd.contains("pnpm install")
+                    || cmd.contains("pip install")
+                    || cmd.contains("pip3 install")
+                    || cmd.contains("apt-get install")
+                    || cmd.contains("apk add")
+                    || cmd.contains("go mod download")
+                    || cmd.contains("cargo fetch"))
+            {
+                install_after_copy = Some(idx);
+                break;
+            }
+        }
+        if let (Some(copy_idx), Some(inst_idx)) = (first_broad_copy, install_after_copy) {
+            out.push(Recommendation {
+                category: CATEGORY_NECESSITY.into(),
+                severity: SEVERITY_LOW.into(),
+                id: "cacheorder".into(),
+                title: t("rec.cacheorder.title"),
+                detail: f(
+                    "rec.cacheorder.detail",
+                    &[&(copy_idx + 1).to_string(), &(inst_idx + 1).to_string()],
+                ),
+                dockerfile_hint: "COPY package*.json ./\nRUN npm ci\nCOPY . .".into(),
+                est_saved_bytes: 0,
+                heuristic: true,
+                paths: vec![],
+            });
+        }
+    }
+
     // Net reclaimable estimate. Several size/necessity rules can match the
     // same file (e.g. a .pyc is both a dev artifact and a build-only file),
     // so naively summing each card's `estSavedBytes` over-counts. This rolls
