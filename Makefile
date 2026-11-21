@@ -29,6 +29,18 @@ release-web: build-web-bin
 
 release: build-bin build-web-bin
 
+dev-app:
+	cd app && nsh run --target macos
+
+test-app:
+	cd app && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test && nsh check && nsh test
+
+build-app:
+	cd app && nsh build
+
+package-macos:
+	cd app && nsh package --target macos
+
 dev:
 	cargo run -p diving -- redis:alpine?arch=amd64
 
@@ -86,7 +98,7 @@ define bump_version
 	&& echo "Bumped to $$NEXT (tag v$$NEXT). Run 'git push && git push --tags' to publish."
 endef
 
-.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish hooks
+.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish hooks dev-app test-app build-app package-macos
 
 version-patch:
 	$(call bump_version,patch)

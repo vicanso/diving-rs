@@ -8,3 +8,7 @@
 node_modules
 dist
 .claude
+app/.nsh/
+app/target/
+.agents/
+skills-lock.json

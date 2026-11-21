@@ -140,6 +140,19 @@ async fn analyze_local_tar_end_to_end() {
 
     assert!(summary.wasted_size > 0);
     assert!(summary.score < 100);
+
+    let archive_path = tmp.path().to_str().expect("temp tar path");
+    let (head, total) = analyzer
+        .read_local_file_head(
+            archive_path,
+            &result.layers[0].digest,
+            &result.layers[0].media_type,
+            "etc/config.yml",
+            64,
+        )
+        .expect("read local layer file head");
+    assert_eq!(head, b"a: 1");
+    assert_eq!(total, 4);
 }
 
 fn sha256(data: &[u8]) -> String {

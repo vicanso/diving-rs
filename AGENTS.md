@@ -1,14 +1,15 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Project Overview
 
-**diving-rs** is a Rust-based workspace for analyzing Docker/OCI image layers to understand space usage, wasted bytes, secrets, duplicates, and runtime compatibility. It produces three deliverables across a 4-crate Cargo workspace:
+**diving-rs** is a Rust-based workspace for analyzing Docker/OCI image layers to understand space usage, wasted bytes, secrets, duplicates, and runtime compatibility. It produces three core deliverables across a 4-crate Cargo workspace, plus a standalone native desktop GUI:
 - **`diving-core`** (`crates/diving-core`, published library): pure Rust async analysis engine (`Analyzer::builder()...build()`) with isolated per-instance caches, singleflight deduplication, registry allowlist, progress callbacks, image diffing, Markdown rendering, and CI gates (no web framework, CLI, TUI, or config-file I/O).
 - **`diving-app`** (`crates/diving-app`, published internal helper crate): shared YAML `~/.diving/config.yml` loader, AI report generation, multi-channel outbound notifications (WeCom, Feishu, DingTalk, Slack, generic webhook), logging, and `Analyzer` factories.
 - **`diving`** (`crates/diving`, published binary): standalone terminal TUI (ratatui) and CLI / CI gate / `diving diff` tool. Compiles without Node/yarn or web assets.
 - **`diving-web`** (`crates/diving-web`, `publish = false`): standalone Axum HTTP server, embedded React SPA (`web/` -> `crates/diving-web/dist/`), MCP `/mcp` endpoint, and inbound `POST /api/webhook` runner packaged in the `vicanso/diving` Docker image.
+- **`nsh-app-diving`** (`app/`, excluded from root Cargo workspace): standalone native desktop app (**Diving Desktop**, built with `nsh 0.6.1`) backed directly by `diving-core` & `diving-app`.
 
 The core engine fetches image metadata from registries (Docker Hub, private registries with credentials), a local docker/podman client, or saved images (`docker save` tar, OCI archive tar, OCI layout directory), decompresses layers, and provides detailed file-level visibility into what's consuming space.
 
@@ -41,6 +42,12 @@ make dev-web            # Watch-based dev for diving-web
 make dev                # Run CLI/TUI mode with test image (redis:alpine)
 make dev-docker         # Run with local docker client
 make dev-ci             # Run with CI mode enabled
+
+# Native Desktop App (Diving Desktop via nsh 0.6.1)
+make dev-app            # Run Diving Desktop on macOS (nsh run --target macos)
+make test-app           # Run fmt/clippy/Rust tests + nsh check + nsh test in app/
+make build-app          # Build desktop nsh runtime artifacts
+make package-macos      # Package installable Diving.app bundle (.nsh/out/)
 
 # Quality & release
 make lint               # Run cargo clippy --workspace --all-targets -- -D warnings
@@ -130,6 +137,10 @@ The workspace separates the reusable analysis engine (`diving-core`) from applic
   - `ai.rs`, `notify.rs`, `wecom.rs`, `summary.rs`, `logging.rs`, `env_util.rs`
 - **`crates/diving/`**: Standalone CLI / TUI / CI binary (`src/main.rs`, `src/cli.rs`, `src/ui/*`)
 - **`crates/diving-web/`**: Standalone HTTP / MCP / Webhook binary + React SPA embed (`build.rs`, `src/{main,lib,state,error,http_util,dist,middleware,controller,mcp,webhook}.rs`)
+- **`app/`**: Native Desktop app (`nsh 0.6.1`, `DESIGN.md`, `theme.json`, `nsh.json`):
+  - `src/domain/`: pure derivations (`model.rs`, `treemap.rs`), Tokio `DivingService` (`service.rs`), persistent reactive `AppState` (`state.rs`)
+  - `src/ui/`: token-backed component library (`theme.rs`, `motion.rs`, `button.rs`, `controls.rs`, `data.rs`, `input.rs`, `overlay.rs`, `tabs.rs`, `code.rs`, `gallery.rs`)
+  - `src/features/`: desktop views & overlays (`title_bar.rs`, `landing.rs`, `inspector/{mod,layer_timeline,file_tree,treemap,findings,dockerfile}.rs`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`)
 
 ### Web Frontend (`web/`)
 
@@ -149,7 +160,7 @@ The workspace separates the reusable analysis engine (`diving-core`) from applic
   - Wasted space summary with file deletion candidates
   - Large modified files detection
   - Dark mode support
-- **Build**: `yarn install && yarn build` outputs to `dist/`, embedded in binary via `rust-embed`
+- **Build**: `yarn install && yarn build` outputs to `web/dist/`, copied into `crates/diving-web/dist/` by `make build-web` and embedded in `diving-web` via `rust-embed`
 - **Fonts**: IBM Plex is bundled (`web/src/fonts.css`, latin woff2 from the `@fontsource` packages) — no external font request, so the UI works on networks that cannot reach a font CDN
 - **Internationalization**: `web/src/i18n/` (en.ts, zh.ts)
 
@@ -174,14 +185,14 @@ The workspace separates the reusable analysis engine (`diving-core`) from applic
 - Op 1: Removed (whiteout)
 - Op 2: Modified (exists in previous layer, modified here)
 
-**Operation Codes** (defined in `src/image/oci_image.rs`):
+**Operation Codes** (defined in `crates/diving-core/src/image/oci_image.rs`):
 - Used to mark file changes across layer boundaries
 - Terminal and web UIs colorize/filter based on operation type
 
 ### Request Flow (Web Mode)
 
 1. Frontend sends `GET /api/analyze?image=redis:alpine&arch=amd64`
-2. Backend calls `analyze_docker_image(image_info)` (async)
+2. Backend calls `state.analyzer.analyze(&params.image, opts)` (async)
 3. Downloads manifest, fetches layers, builds file trees
 4. Returns JSON with full analysis
 5. Frontend caches in state, renders layers/files UI
@@ -199,13 +210,13 @@ When `CI=true` env var is set:
 - Optional `fail_on_severity` (off by default): fail when any recommendation is at that severity or above; ids in `ignore_recommendations` (`Recommendation::id`, e.g. `runasroot`) are excluded from it
 - `diving diff` has its own gate: `highest_size_increase` (off by default) caps target − base uncompressed growth
 - `--summary <file>` writes the short Markdown report with the verdict (PR comment / job summary); `action.yml` at the repo root is a composite GitHub Action that installs a release binary, runs the gate (or `diff` when its `base` input is set) and appends that summary to `$GITHUB_STEP_SUMMARY`. GitHub passes no outputs on from a failed step, so the `summary-file` input (a fixed path) is how a later `if: always()` step reads the summary after a failed gate
-- The gate is evaluated before anything is sent (`evaluate_gate` in `src/lib.rs`) and also applies after an AI report / WeCom push when `CI=true` (outside CI those paths end the run); in CI the WeCom message opens with the verdict
+- The gate is evaluated before anything is sent (`evaluate_gate` in `crates/diving-core/src/gate.rs`) and also applies after an AI report / WeCom push when `CI=true` (outside CI those paths end the run); in CI the WeCom message opens with the verdict
 - Exit codes: `1` = image failed the gate, `2` (`EXIT_ERROR`) = diving itself failed (analysis error, bad config, panic hook, failed push)
 - Can output JSON analysis to file with `-o/--output-file`
 
 ## Configuration
 
-Config file: `~/.diving/config.yml`, or the file given by `--config` / `-c` (wins) or `$DIVING_CONFIG`. A file given that way must exist (startup error otherwise) and is always parsed as YAML. `main.rs` calls `config::set_config_file` before the first config read; only `config.yml` moves — `sensitive-files`, `ai_history/` and the default cache dirs stay under `~/.diving/`.
+Config file: `~/.diving/config.yml`, or the file given by `--config` / `-c` (wins) or `$DIVING_CONFIG`. A file given that way must exist (startup error otherwise) and is always parsed as YAML. Both `diving` and `diving-web` `main.rs` call `diving_app::config::load_config(args.config_file())` at startup; only `config.yml` moves — `sensitive-files`, `ai_history/` and the default cache dirs stay under `~/.diving/`.
 
 Example:
 ```yaml

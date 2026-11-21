@@ -1,0 +1,365 @@
+//! Async analysis bridge running `diving-core` pipelines on a multi-threaded Tokio runtime.
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use diving_app::config::{build_desktop_analyzer, build_http_client, load_config};
+use diving_core::{
+    AnalyzeOptions, Analyzer, CleanupStats, DockerAnalyzeResult, ImageDiff, ImagePreview, Lang,
+    LocalContainerImage, LocalRuntime, PreviewOptions, ProgressEvent, REGISTRY_LOCAL_FILE,
+    diff_images, list_local_images, parse_image_info,
+};
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::AbortHandle;
+
+use crate::domain::model::{
+    FilePreviewContent, ImageSourceKind, classify_file_preview, image_source_kind,
+};
+
+const FILE_PREVIEW_LIMIT: u64 = 128 * 1024;
+const FILE_EXPORT_LIMIT: u64 = 100 * 1024 * 1024;
+
+/// Progress, preview, completion, or failure event streamed from `DivingService::start_analyze`.
+#[derive(Debug, Clone)]
+pub enum AnalyzeMessage {
+    Progress(ProgressEvent),
+    Preview(ImagePreview),
+    Finished(Arc<DockerAnalyzeResult>),
+    Failed(String),
+}
+
+/// Outcome returned when running concurrent base/target analysis for `Image Diff`.
+#[derive(Debug, Clone)]
+pub enum DiffRunResult {
+    Ready {
+        diff: Arc<ImageDiff>,
+        base: Arc<DockerAnalyzeResult>,
+        target: Arc<DockerAnalyzeResult>,
+    },
+    BaseFailed(String),
+    TargetFailed(String),
+    BothFailed {
+        base: String,
+        target: String,
+    },
+}
+
+/// Handle cancelling both the analysis task and its delayed 500ms preview task.
+pub struct AnalyzeTaskHandle {
+    tasks: Vec<AbortHandle>,
+}
+
+impl AnalyzeTaskHandle {
+    pub fn abort(self) {
+        for handle in self.tasks {
+            handle.abort();
+        }
+    }
+}
+
+struct ServiceInner {
+    rt: Runtime,
+    analyzer: Analyzer,
+}
+
+/// Thread-safe handle wrapping the desktop `Analyzer` and shared Tokio runtime.
+#[derive(Clone)]
+pub struct DivingService {
+    inner: Arc<ServiceInner>,
+}
+
+impl Default for DivingService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DivingService {
+    /// Initializes config from `~/.diving/config.yml` (falling back safely on error)
+    /// and starts the dedicated multi-threaded Tokio runtime.
+    pub fn new() -> Self {
+        let loaded = match load_config(None) {
+            Ok(cfg) => Some(cfg),
+            Err(err) => {
+                log::warn!("falling back to default desktop config: {err}");
+                None
+            }
+        };
+        let worker_threads = loaded
+            .as_ref()
+            .map_or(4, |cfg| cfg.config.worker_threads().clamp(1, 8));
+        let rt = Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .enable_all()
+            .build()
+            .expect("create Tokio runtime for DivingService");
+
+        let analyzer = loaded
+            .as_ref()
+            .map(|cfg| {
+                build_http_client().and_then(|client| {
+                    build_desktop_analyzer(cfg, client).map_err(|err| err.to_string())
+                })
+            })
+            .transpose()
+            .unwrap_or_else(|err| {
+                log::warn!("falling back to ephemeral desktop analyzer: {err}");
+                None
+            })
+            .unwrap_or_else(|| {
+                Analyzer::builder()
+                    .allow_local_sources(true)
+                    .build()
+                    .expect("build ephemeral desktop analyzer")
+            });
+
+        Self {
+            inner: Arc::new(ServiceInner { rt, analyzer }),
+        }
+    }
+
+    /// Creates an isolated service backed by a custom `Analyzer` (used in tests).
+    pub fn with_analyzer(analyzer: Analyzer) -> Self {
+        let rt = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("create test Tokio runtime");
+        Self {
+            inner: Arc::new(ServiceInner { rt, analyzer }),
+        }
+    }
+
+    /// Starts analyzing `image` (optionally scoped to `arch`) and streams progress + result.
+    pub fn start_analyze(
+        &self,
+        image: String,
+        arch: Option<String>,
+        lang: Lang,
+        verify_dup: bool,
+    ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<AnalyzeMessage>) {
+        self.start_analyze_with_options(image, arch, lang, verify_dup, false)
+    }
+
+    /// Starts analyzing `image` with explicit memory-cache bypass control (`Mod+R`).
+    pub fn start_analyze_with_options(
+        &self,
+        image: String,
+        arch: Option<String>,
+        lang: Lang,
+        verify_dup: bool,
+        skip_memory_cache: bool,
+    ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<AnalyzeMessage>) {
+        let target = format_image_target(&image, arch.as_deref());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let analyzer = self.inner.analyzer.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let is_registry = image_source_kind(&target) == ImageSourceKind::Registry;
+
+        let mut handles = Vec::with_capacity(2);
+
+        let main_tx = tx.clone();
+        let main_done = Arc::clone(&done);
+        let main_target = target.clone();
+        let main_analyzer = analyzer.clone();
+        let main_handle = self.inner.rt.spawn(async move {
+            let progress_tx = main_tx.clone();
+            let opts = AnalyzeOptions::default()
+                .lang(lang)
+                .verify_dup(verify_dup)
+                .skip_memory_cache(skip_memory_cache)
+                .fallback_to_last_known(true)
+                .on_progress(Arc::new(move |ev| {
+                    let _ = progress_tx.send(AnalyzeMessage::Progress(ev));
+                }));
+
+            let outcome = main_analyzer.analyze(&main_target, opts).await;
+            main_done.store(true, Ordering::SeqCst);
+            match outcome {
+                Ok(result) => {
+                    let _ = main_tx.send(AnalyzeMessage::Finished(result));
+                }
+                Err(err) => {
+                    let _ = main_tx.send(AnalyzeMessage::Failed(err.to_string()));
+                }
+            }
+        });
+        handles.push(main_handle.abort_handle());
+
+        if is_registry {
+            let preview_handle = self.inner.rt.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Ok(preview) = analyzer.preview(&target, PreviewOptions::default()).await
+                    && !done.load(Ordering::SeqCst)
+                {
+                    let _ = tx.send(AnalyzeMessage::Preview(preview));
+                }
+            });
+            handles.push(preview_handle.abort_handle());
+        }
+
+        (AnalyzeTaskHandle { tasks: handles }, rx)
+    }
+
+    /// Analyzes base and target images concurrently and computes `ImageDiff`.
+    pub fn start_diff(
+        &self,
+        base_image: String,
+        base_arch: Option<String>,
+        target_image: String,
+        target_arch: Option<String>,
+        lang: Lang,
+    ) -> (AnalyzeTaskHandle, oneshot::Receiver<DiffRunResult>) {
+        let base_ref = format_image_target(&base_image, base_arch.as_deref());
+        let target_ref = format_image_target(&target_image, target_arch.as_deref());
+        let (tx, rx) = oneshot::channel();
+        let analyzer = self.inner.analyzer.clone();
+
+        let handle = self.inner.rt.spawn(async move {
+            let base_opts = AnalyzeOptions::default()
+                .lang(lang)
+                .verify_dup(true)
+                .fallback_to_last_known(true);
+            let target_opts = AnalyzeOptions::default()
+                .lang(lang)
+                .verify_dup(true)
+                .fallback_to_last_known(true);
+
+            let (base_res, target_res) = tokio::join!(
+                analyzer.analyze(&base_ref, base_opts),
+                analyzer.analyze(&target_ref, target_opts),
+            );
+
+            let outcome = match (base_res, target_res) {
+                (Ok(base), Ok(target)) => {
+                    let diff = Arc::new(diff_images(&base, &target));
+                    DiffRunResult::Ready { diff, base, target }
+                }
+                (Err(b_err), Ok(_)) => DiffRunResult::BaseFailed(b_err.to_string()),
+                (Ok(_), Err(t_err)) => DiffRunResult::TargetFailed(t_err.to_string()),
+                (Err(b_err), Err(t_err)) => DiffRunResult::BothFailed {
+                    base: b_err.to_string(),
+                    target: t_err.to_string(),
+                },
+            };
+            let _ = tx.send(outcome);
+        });
+
+        (
+            AnalyzeTaskHandle {
+                tasks: vec![handle.abort_handle()],
+            },
+            rx,
+        )
+    }
+
+    /// Reads up to 128 KiB from a cached layer blob or local archive for File Preview Sheet.
+    pub fn load_file_preview(
+        &self,
+        image_ref: String,
+        layer_digest: String,
+        media_type: String,
+        file_path: String,
+    ) -> oneshot::Receiver<Result<FilePreviewContent, String>> {
+        let (tx, rx) = oneshot::channel();
+        let analyzer = self.inner.analyzer.clone();
+        self.inner.rt.spawn_blocking(move || {
+            let info = parse_image_info(&image_ref);
+            let outcome = if info.registry == REGISTRY_LOCAL_FILE {
+                analyzer.read_local_file_head(
+                    &info.name,
+                    &layer_digest,
+                    &media_type,
+                    &file_path,
+                    FILE_PREVIEW_LIMIT,
+                )
+            } else {
+                analyzer.read_file_head(&layer_digest, &media_type, &file_path, FILE_PREVIEW_LIMIT)
+            };
+            let result = outcome
+                .map(|(bytes, total_size)| classify_file_preview(&file_path, &bytes, total_size))
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    /// Exports an entire file (up to 100 MiB) from a cached layer blob or local archive to `dest`.
+    pub fn export_layer_file(
+        &self,
+        image_ref: String,
+        layer_digest: String,
+        media_type: String,
+        file_path: String,
+        dest: PathBuf,
+    ) -> oneshot::Receiver<Result<u64, String>> {
+        let (tx, rx) = oneshot::channel();
+        let analyzer = self.inner.analyzer.clone();
+        self.inner.rt.spawn_blocking(move || {
+            let info = parse_image_info(&image_ref);
+            let outcome = if info.registry == REGISTRY_LOCAL_FILE {
+                analyzer.read_local_file(
+                    &info.name,
+                    &layer_digest,
+                    &media_type,
+                    &file_path,
+                    FILE_EXPORT_LIMIT,
+                )
+            } else {
+                analyzer.read_file(&layer_digest, &media_type, &file_path, FILE_EXPORT_LIMIT)
+            };
+            let result = outcome.map_err(|err| err.to_string()).and_then(|bytes| {
+                let len = bytes.len() as u64;
+                fs::write(&dest, &bytes)
+                    .map(|()| len)
+                    .map_err(|err| err.to_string())
+            });
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    /// Lists local images from Docker or Podman daemon CLI.
+    pub fn list_local(
+        &self,
+        runtime: LocalRuntime,
+    ) -> oneshot::Receiver<Result<Vec<LocalContainerImage>, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.rt.spawn(async move {
+            let result = list_local_images(runtime)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    /// Runs expired cache cleanup on layer blobs and saved analyses.
+    pub fn cleanup_caches(&self) -> oneshot::Receiver<Result<CleanupStats, String>> {
+        let (tx, rx) = oneshot::channel();
+        let analyzer = self.inner.analyzer.clone();
+        self.inner.rt.spawn(async move {
+            let result = analyzer
+                .cleanup_caches()
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        rx
+    }
+}
+
+fn format_image_target(image: &str, arch: Option<&str>) -> String {
+    let trimmed = image.trim();
+    match arch.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(arch) if !trimmed.contains("?arch=") => format!("{trimmed}?arch={arch}"),
+        _ => trimmed.to_owned(),
+    }
+}

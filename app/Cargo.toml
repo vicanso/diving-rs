@@ -1,0 +1,35 @@
+[package]
+name = "nsh-app-diving"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nsh-core = "0.6.1"
+nsh-base = "0.6.1"
+env_logger = "0.11"
+diving-core = { path = "../crates/diving-core" }
+diving-app = { path = "../crates/diving-app" }
+bytesize = { version = "2.7.0", features = ["serde"] }
+chrono = "0.4.45"
+log = "0.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
+
+[dev-dependencies]
+nsh-engine = { version = "0.6.1", default-features = false }
+nsh-testing = { version = "0.6.1", default-features = false }
+tar = "0.4.46"
+tempfile = "3.27.0"

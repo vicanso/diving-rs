@@ -30,13 +30,13 @@ pub use gate::{
 };
 pub use i18n::{fill, tr, Lang};
 pub use image::{
-    final_filesystem, host_arch, is_local_registry, parse_image_info, registry_host,
-    resolve_explicit as resolve_explicit_credentials, AnalyzeReport, BigModifiedFileInfo,
-    DockerAnalyzeResult, DockerAnalyzeSummary, DuplicateGroup, DuplicatePath, FileTreeItem,
-    FinalFile, ImageFileInfo, ImageFileSummary, ImageFileWastedSummary, ImageInfo, ImageLayer,
-    ImagePreview, Op, RegistryCredentials, RuntimeCompat, SensitiveFileInfo, UnstrippedBinary,
-    WasteChange, REGISTRY_DOCKER_HUB, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
-    REGISTRY_LOCAL_PODMAN,
+    final_filesystem, host_arch, is_local_registry, list_local_images, parse_image_info,
+    parse_local_images_output, registry_host, resolve_explicit as resolve_explicit_credentials,
+    AnalyzeReport, BigModifiedFileInfo, DockerAnalyzeResult, DockerAnalyzeSummary, DuplicateGroup,
+    DuplicatePath, FileTreeItem, FinalFile, ImageFileInfo, ImageFileSummary,
+    ImageFileWastedSummary, ImageInfo, ImageLayer, ImagePreview, LocalContainerImage, LocalRuntime,
+    Op, RegistryCredentials, RuntimeCompat, SensitiveFileInfo, UnstrippedBinary, WasteChange,
+    REGISTRY_DOCKER_HUB, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 pub use markdown::{to_markdown, to_summary_markdown};
 pub use progress::{ProgressCallback, ProgressEvent};

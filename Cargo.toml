@@ -6,6 +6,7 @@ members = [
     "crates/diving",
     "crates/diving-web",
 ]
+exclude = ["app"]
 default-members = ["crates/diving"]
 
 [workspace.package]

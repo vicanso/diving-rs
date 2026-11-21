@@ -1,0 +1,28 @@
+{
+  "name": "Diving",
+  "id": "io.github.vicanso.diving",
+  "version": "0.12.3",
+  "build": 1,
+  "icon": "assets/icon.png",
+  "theme": "theme.json",
+  "appearance": "system",
+  "rust": ".",
+  "root": "App",
+  "window": {
+    "defaultSize": { "width": 1280, "height": 820 },
+    "minSize": { "width": 960, "height": 640 },
+    "titleBar": { "style": "hidden", "height": 48 },
+    "restoreBounds": true
+  },
+  "capabilities": {
+    "application": true,
+    "homeDir": true,
+    "picker": true,
+    "clipboard": true,
+    "statusBar": true,
+    "openUrl": { "schemes": ["https", "http"] }
+  },
+  "updater": {
+    "github": "vicanso/diving-rs"
+  }
+}

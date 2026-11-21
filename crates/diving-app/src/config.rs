@@ -247,23 +247,45 @@ fn cache_config_from(loaded: &LoadedConfig) -> CacheConfig {
         .max_layer_cache_size(loaded.config.max_layer_cache_size())
 }
 
-/// Construct an [`Analyzer`] configured for CLI/TUI/CI runs.
-pub fn build_cli_analyzer(
+fn build_local_analyzer(
     loaded: &LoadedConfig,
     http_client: Client,
+    singleflight: bool,
+    memory_cache_ttl: Duration,
 ) -> diving_core::Result<Analyzer> {
     let mut builder = Analyzer::builder()
         .cache(cache_config_from(loaded))
         .http_client(http_client)
         .allow_local_sources(true)
         .use_docker_config(true)
-        .singleflight(false)
-        .memory_cache_ttl(Duration::ZERO)
+        .singleflight(singleflight)
+        .memory_cache_ttl(memory_cache_ttl)
         .sensitive_patterns(load_user_sensitive_patterns(&loaded.config_dir));
     if let Some(concurrency) = loaded.config.layer_concurrency() {
         builder = builder.layer_concurrency(concurrency);
     }
     builder.build()
+}
+
+/// Construct an [`Analyzer`] configured for CLI/TUI/CI runs.
+pub fn build_cli_analyzer(
+    loaded: &LoadedConfig,
+    http_client: Client,
+) -> diving_core::Result<Analyzer> {
+    build_local_analyzer(loaded, http_client, false, Duration::ZERO)
+}
+
+/// Construct an [`Analyzer`] configured for the native desktop app (`Diving Desktop`).
+pub fn build_desktop_analyzer(
+    loaded: &LoadedConfig,
+    http_client: Client,
+) -> diving_core::Result<Analyzer> {
+    build_local_analyzer(
+        loaded,
+        http_client,
+        true,
+        loaded.config.analysis_memory_ttl(),
+    )
 }
 
 /// Construct an [`Analyzer`] configured for Web/MCP/Webhook runs.
@@ -391,5 +413,21 @@ notify_webhook_secret: hook-sec
     fn missing_explicit_config_returns_err_instead_of_panic() {
         let err = load_config(Some("/nonexistent/diving-config-12345.yml")).unwrap_err();
         assert!(err.contains("config file not found"), "{err}");
+    }
+
+    #[test]
+    fn build_desktop_analyzer_succeeds_with_temp_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = LoadedConfig {
+            config: DivingConfig::default(),
+            config_dir: dir.path().to_path_buf(),
+            layer_dir: dir.path().join("layers"),
+            analysis_dir: dir.path().join("analysis"),
+        };
+        let client = build_http_client().unwrap();
+        let analyzer = build_desktop_analyzer(&loaded, client);
+        if let Err(err) = analyzer {
+            panic!("desktop analyzer build failed: {err}");
+        }
     }
 }

@@ -5,7 +5,7 @@ use crate::image::{
     analyze_once, analyze_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
     is_local_registry, load_docker_config, parse_image_info, preview_image, registry_host,
     DockerAnalyzeResult, DockerConfig, ImageInfo, ImagePreview, PipelineContext, PipelineOptions,
-    RegistryCaches, RegistryCredentials, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    RegistryCaches, RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
     REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
@@ -21,7 +21,7 @@ use snafu::ResultExt;
 use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
-use std::io::BufReader;
+use std::io::{BufReader, Take};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -590,6 +590,53 @@ impl Analyzer {
         let path = self.layer_blob_path(layer_digest)?;
         let file = File::open(&path).context(IoSnafu {})?;
         get_file_head_from_layer(BufReader::new(file), media_type, file_path, limit)
+    }
+
+    fn open_local_layer_reader(
+        &self,
+        archive_path: &str,
+        layer_digest: &str,
+    ) -> Result<BufReader<Take<File>>> {
+        let info = ImageInfo {
+            registry: REGISTRY_LOCAL_FILE.to_string(),
+            name: archive_path.to_string(),
+            ..Default::default()
+        };
+        self.check_allowed(&info)?;
+        let index = TarIndex::build(archive_path)?;
+        let (reader, _) = index.open_reader(layer_digest)?;
+        Ok(BufReader::new(reader))
+    }
+
+    /// Read a file's full bytes (up to `max_bytes`) from a layer inside a local `file://` archive or directory.
+    pub fn read_local_file(
+        &self,
+        archive_path: &str,
+        layer_digest: &str,
+        media_type: &str,
+        file_path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        let reader = self.open_local_layer_reader(archive_path, layer_digest)?;
+        get_file_content_from_layer(
+            reader,
+            media_type,
+            file_path.trim_start_matches('/'),
+            max_bytes,
+        )
+    }
+
+    /// Read up to `limit` bytes from the start of a file inside a local `file://` archive or directory layer.
+    pub fn read_local_file_head(
+        &self,
+        archive_path: &str,
+        layer_digest: &str,
+        media_type: &str,
+        file_path: &str,
+        limit: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        let reader = self.open_local_layer_reader(archive_path, layer_digest)?;
+        get_file_head_from_layer(reader, media_type, file_path.trim_start_matches('/'), limit)
     }
 
     /// Check whether a layer blob file currently exists in this analyzer's cache.
