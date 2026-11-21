@@ -127,7 +127,7 @@ fn compact_search_bar(state: AppState) -> impl IntoElement {
         .child(ui_icon_button(
             IconName::FolderInput,
             "Open local image file",
-            Some("Open local file…"),
+            Some(move || SharedString::from(t(lang.get(), "menu.open_local_file"))),
             ButtonVariant::Outline,
             UiSize::Md,
             false,
@@ -192,7 +192,7 @@ fn title_bar_right(state: AppState) -> impl IntoElement {
         .child(ui_icon_button(
             IconName::Search,
             "Open Command Palette",
-            Some("Command Palette (⌘K)"),
+            Some(move || SharedString::from(t(lang.get(), "tooltip.open_palette"))),
             ButtonVariant::Ghost,
             UiSize::Sm,
             false,
@@ -205,7 +205,7 @@ fn title_bar_right(state: AppState) -> impl IntoElement {
             ui_icon_button(
                 icon,
                 "Switch color theme",
-                Some(t(lang.get_untracked(), "theme.cycle_tooltip")),
+                Some(move || SharedString::from(t(lang.get(), "theme.cycle_tooltip"))),
                 ButtonVariant::Ghost,
                 UiSize::Sm,
                 false,
@@ -227,7 +227,7 @@ fn title_bar_right(state: AppState) -> impl IntoElement {
             ui_menu(ui_icon_button(
                 IconName::More,
                 "More actions",
-                Some(t(lang.get_untracked(), "menu.more_actions")),
+                Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
                 ButtonVariant::Ghost,
                 UiSize::Sm,
                 false,

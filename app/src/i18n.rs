@@ -191,6 +191,23 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("common.save_as", "Save as…", "另存为…"),
     ("common.done", "Done", "完成"),
     ("common.cancel", "Cancel", "取消"),
+    ("common.layer_number", "Layer #{0}", "第 {0} 层"),
+    (
+        "tooltip.open_palette",
+        "Command Palette (⌘K)",
+        "命令面板 (⌘K)",
+    ),
+    (
+        "inspector.empty_title",
+        "No image analyzed yet",
+        "尚未分析镜像",
+    ),
+    (
+        "inspector.empty_desc",
+        "Enter an image reference or open a local tar file.",
+        "请输入镜像名称或打开本地 tar / OCI 归档文件。",
+    ),
+    ("sheet.title_default", "File Preview", "文件预览"),
     // File tree toolbar & columns
     (
         "tree.filter_placeholder",

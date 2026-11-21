@@ -97,7 +97,7 @@ pub fn ui_search_input(
         .selection_color(|| color(theme().primary.opacity(0.24)))
         .text_color(move || theme().foreground)
         .label(a11y)
-        .flex_1()
+        .w_full()
         .min_w(px(0.0))
         .text_size(size.font_size())
         .when(monospace, |el| el.font_family(font_mono_family()));
@@ -121,14 +121,24 @@ pub fn ui_search_input(
         .duration(move || dur(INSTANT))
         .hover(|s| s.border_color(border_strong))
         .focus_within(|s| s.border_color(move || theme().ring))
-        .child(ui_icon(IconName::Search, size.icon_size(), move || {
-            theme().muted_foreground
-        }))
-        .child(raw_input)
+        .child(view().flex_shrink_0().child(ui_icon(
+            IconName::Search,
+            size.icon_size(),
+            move || theme().muted_foreground,
+        )))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .pr_1()
+                .overflow_hidden()
+                .child(raw_input),
+        )
         .child(when(
             move || shortcut_hint.is_some() && !has_value(),
             move || {
                 view()
+                    .flex_shrink_0()
                     .px_1p5()
                     .py_0p5()
                     .rounded(radius_inset)
@@ -144,7 +154,7 @@ pub fn ui_search_input(
             },
         ))
         .child(when(has_value, move || {
-            ui_icon_button(
+            view().flex_shrink_0().child(ui_icon_button(
                 IconName::Close,
                 "Clear input",
                 Some("Clear (Esc)"),
@@ -153,7 +163,7 @@ pub fn ui_search_input(
                 false,
                 false,
                 move || value.set(String::new()),
-            )
+            ))
         }))
 }
 

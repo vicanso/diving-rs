@@ -10,7 +10,7 @@ use crate::domain::{
     build_final_tree, dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles,
     top_three_layers,
 };
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_control,
     radius_inset, theme, treemap_ink, treemap_slot, ui_badge, ui_button, ui_empty_state, ui_icon,
@@ -539,7 +539,7 @@ fn treemap_table_view(
                                             .text_color(move || theme().foreground),
                                     ),
                             )
-                            .child(view().w(px(72.0)).child(ui_badge(
+                            .child(view().w(px(72.0)).items_start().child(ui_badge(
                                 layer.map_or_else(|| "—".to_owned(), |l| format!("L{}", l + 1)),
                                 BadgeTone::Neutral,
                             )))
@@ -624,8 +624,18 @@ fn treemap_info_footer(state: AppState) -> impl IntoElement {
                         .gap_3()
                         .flex_shrink_0()
                         .child(ui_badge(
-                            info.layer
-                                .map_or_else(|| "—".to_owned(), |l| format!("Layer #{}", l + 1)),
+                            move || {
+                                SharedString::from(info.layer.map_or_else(
+                                    || "—".to_owned(),
+                                    |l| {
+                                        tf(
+                                            lang.get(),
+                                            "common.layer_number",
+                                            &[&(l + 1).to_string()],
+                                        )
+                                    },
+                                ))
+                            },
                             BadgeTone::Neutral,
                         ))
                         .child(

@@ -39,6 +39,35 @@ pub fn ui_code_viewer(
         )
 }
 
+/// Read-only hex dump viewer without redundant line numbers (hex rows already carry byte offsets).
+pub fn ui_hex_viewer(
+    content: impl IntoReactive<Option<SharedString>>,
+    accessibility_label: impl Into<SharedString>,
+) -> impl IntoElement {
+    let content = content.into_reactive();
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .rounded(radius_control)
+        .bg(move || theme().muted)
+        .border_1()
+        .border_color(move || theme().border)
+        .overflow_hidden()
+        .child(
+            editor()
+                .value(move || content.get())
+                .read_only(true)
+                .line_numbers(false)
+                .soft_wrap(false)
+                .folding(false)
+                .font_family(font_mono_family())
+                .font_size(px(12.0))
+                .line_height(px(18.5))
+                .accessibility_label(accessibility_label.into())
+                .flex_1(),
+        )
+}
+
 /// Read-only syntax-highlighted patch/text diff viewer built over `nsh_base::diff_view`.
 pub fn ui_diff_viewer(
     old_value: impl IntoReactive<Option<SharedString>>,

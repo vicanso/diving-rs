@@ -237,35 +237,7 @@ fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> imp
                         .map(|(idx, item)| {
                             let path = item.path.clone();
                             let size = format_bytes(item.total_size);
-                            let changes_desc: Vec<String> = item
-                                .changes
-                                .iter()
-                                .map(|c| {
-                                    let to_layer = (c.layer + 1).to_string();
-                                    match (c.written_in, c.removed) {
-                                        (Some(w), true) => tf(
-                                            lang.get_untracked(),
-                                            "findings.waste_removed_from",
-                                            &[&(w + 1).to_string(), &to_layer],
-                                        ),
-                                        (Some(w), false) => tf(
-                                            lang.get_untracked(),
-                                            "findings.waste_overwritten_from",
-                                            &[&(w + 1).to_string(), &to_layer],
-                                        ),
-                                        (None, true) => tf(
-                                            lang.get_untracked(),
-                                            "findings.waste_removed_in",
-                                            &[&to_layer],
-                                        ),
-                                        (None, false) => tf(
-                                            lang.get_untracked(),
-                                            "findings.waste_overwritten_in",
-                                            &[&to_layer],
-                                        ),
-                                    }
-                                })
-                                .collect();
+                            let changes = item.changes.clone();
 
                             view()
                                 .flex_col()
@@ -294,9 +266,40 @@ fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> imp
                                         ),
                                 )
                                 .child(
-                                    text(changes_desc.join(" · "))
-                                        .text_xs()
-                                        .text_color(move || theme().muted_foreground),
+                                    text(move || {
+                                        let cur_lang = lang.get();
+                                        let desc: Vec<String> = changes
+                                            .iter()
+                                            .map(|c| {
+                                                let to_layer = (c.layer + 1).to_string();
+                                                match (c.written_in, c.removed) {
+                                                    (Some(w), true) => tf(
+                                                        cur_lang,
+                                                        "findings.waste_removed_from",
+                                                        &[&(w + 1).to_string(), &to_layer],
+                                                    ),
+                                                    (Some(w), false) => tf(
+                                                        cur_lang,
+                                                        "findings.waste_overwritten_from",
+                                                        &[&(w + 1).to_string(), &to_layer],
+                                                    ),
+                                                    (None, true) => tf(
+                                                        cur_lang,
+                                                        "findings.waste_removed_in",
+                                                        &[&to_layer],
+                                                    ),
+                                                    (None, false) => tf(
+                                                        cur_lang,
+                                                        "findings.waste_overwritten_in",
+                                                        &[&to_layer],
+                                                    ),
+                                                }
+                                            })
+                                            .collect();
+                                        desc.join(" · ")
+                                    })
+                                    .text_xs()
+                                    .text_color(move || theme().muted_foreground),
                                 )
                         }),
                 )
@@ -400,11 +403,6 @@ fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                                 .unwrap_or_else(|| grp.hash.clone());
                             let copies = grp.count.to_string();
                             let wasted = format_bytes(grp.total_wasted);
-                            let meta = tf(
-                                lang.get_untracked(),
-                                "findings.duplicates_copies",
-                                &[&copies, &wasted],
-                            );
                             view()
                                 .flex_col()
                                 .gap_1()
@@ -432,9 +430,15 @@ fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                                         ),
                                 )
                                 .child(
-                                    text(meta)
-                                        .text_xs()
-                                        .text_color(move || theme().muted_foreground),
+                                    text(move || {
+                                        tf(
+                                            lang.get(),
+                                            "findings.duplicates_copies",
+                                            &[&copies, &wasted],
+                                        )
+                                    })
+                                    .text_xs()
+                                    .text_color(move || theme().muted_foreground),
                                 )
                         }),
                 )

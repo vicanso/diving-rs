@@ -451,7 +451,7 @@ fn buttons_section(clicks: Signal<u32>) -> impl IntoElement {
                     .child(ui_icon_button(
                         IconName::Download,
                         "Unavailable download",
-                        None,
+                        None::<SharedString>,
                         ButtonVariant::Default,
                         UiSize::Sm,
                         false,

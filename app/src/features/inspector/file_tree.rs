@@ -319,6 +319,7 @@ fn column_header(state: AppState) -> impl IntoElement {
                 .w(px(34.0))
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
+                .text_center()
                 .text_color(move || theme().muted_foreground),
         )
         .child(when(show_meta, move || {
@@ -400,8 +401,10 @@ fn virtual_tree(
                     if let Some(row) = rows.with(|r| r.get(at.index()).cloned()) {
                         if row.is_dir {
                             press_state.toggle_tree_dir(&row.key, row.expanded);
-                        } else {
+                        } else if row.is_previewable() {
                             press_state.open_file_preview(&row);
+                        } else {
+                            press_state.selected_file_path.set(Some(row.key));
                         }
                     }
                 })
@@ -480,13 +483,13 @@ fn virtual_tree(
                     view()
                         .flex_1()
                         .min_w(px(0.0))
+                        .pl(move || {
+                            let depth = rows.with(|r| r.get(at.index()).map_or(0, |row| row.depth));
+                            px((depth as f32) * 14.0)
+                        })
                         .flex_row()
                         .items_center()
                         .gap_1p5()
-                        .child(view().w(move || {
-                            let depth = rows.with(|r| r.get(at.index()).map_or(0, |row| row.depth));
-                            Length::from(px((depth as f32) * 14.0))
-                        }))
                         .child(dynamic(move || {
                             let meta = rows.with(|r| {
                                 r.get(at.index())
@@ -550,13 +553,17 @@ fn virtual_tree(
                             .text_color(move || theme().foreground),
                         )
                         .child(when(
-                            move || rows.with(|r| r.get(at.index()).is_some_and(|row| !row.is_dir)),
+                            move || {
+                                rows.with(|r| {
+                                    r.get(at.index()).is_some_and(FileTreeRow::is_previewable)
+                                })
+                            },
                             move || {
                                 let s = preview_btn_state.clone();
                                 ui_icon_button(
                                     IconName::Eye,
                                     "Preview file contents",
-                                    Some(t(lang.get_untracked(), "tree.preview")),
+                                    Some(move || SharedString::from(t(lang.get(), "tree.preview"))),
                                     ButtonVariant::Ghost,
                                     UiSize::Xs,
                                     false,
@@ -577,7 +584,9 @@ fn virtual_tree(
                     move || SharedString::from(t(lang.get(), "tree.ctx_preview")),
                     Some(IconName::Eye),
                     None,
-                    move || rows.with(|r| r.get(at.index()).is_none_or(|row| row.is_dir)),
+                    move || {
+                        rows.with(|r| r.get(at.index()).is_none_or(|row| !row.is_previewable()))
+                    },
                     move || {
                         if let Some(row) = rows.with(|r| r.get(at.index()).cloned()) {
                             ctx_preview_state.open_file_preview(&row);
@@ -599,9 +608,12 @@ fn virtual_tree(
                     move || SharedString::from(t(lang.get(), "tree.ctx_save_as")),
                     Some(IconName::Download),
                     None,
-                    move || rows.with(|r| r.get(at.index()).is_none_or(|row| row.is_dir)),
+                    move || {
+                        rows.with(|r| r.get(at.index()).is_none_or(|row| !row.is_previewable()))
+                    },
                     move || {
                         if let Some(row) = rows.with(|r| r.get(at.index()).cloned())
+                            && row.is_previewable()
                             && let Some(layer) =
                                 layer_res.layers.get(selected_layer.get_untracked())
                         {

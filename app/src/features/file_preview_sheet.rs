@@ -8,21 +8,22 @@ use crate::domain::{AppState, FilePreviewContent, format_bytes};
 use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, theme, ui_badge, ui_banner, ui_button,
-    ui_code_viewer, ui_empty_state, ui_separator, ui_sheet, ui_skeleton,
+    ui_code_viewer, ui_empty_state, ui_hex_viewer, ui_separator, ui_sheet, ui_skeleton,
 };
 
 /// Mounts the right-sliding inspection drawer bound to `state.preview_sheet_open`.
 pub fn file_preview_sheet(state: AppState) -> impl IntoElement {
     let sheet_state = state.clone();
+    let lang = state.lang;
     let title = move || -> SharedString {
         state
             .preview_target
             .get()
             .map(|target| SharedString::from(target.path))
-            .unwrap_or_else(|| SharedString::from("File Preview"))
+            .unwrap_or_else(|| SharedString::from(t(lang.get(), "sheet.title_default")))
     };
 
-    ui_sheet(state.preview_sheet_open, title, px(620.0), move || {
+    ui_sheet(state.preview_sheet_open, title, px(700.0), move || {
         sheet_body(sheet_state.clone()).into_element()
     })
 }
@@ -45,7 +46,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
             let copy_state = header_state.clone();
             let copy_action_state = header_state.clone();
             let save_state = header_state.clone();
-            let layer_label = format!("Layer #{}", target.layer_index + 1);
+            let layer_num = (target.layer_index + 1).to_string();
             let size_label = format_bytes(target.size);
             let mode_label = if target.mode.is_empty() {
                 "—".to_owned()
@@ -66,7 +67,16 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                         .flex_wrap()
                         .items_center()
                         .gap_1p5()
-                        .child(ui_badge(layer_label, BadgeTone::Neutral))
+                        .child(ui_badge(
+                            move || {
+                                SharedString::from(tf(
+                                    lang.get(),
+                                    "common.layer_number",
+                                    &[&layer_num],
+                                ))
+                            },
+                            BadgeTone::Neutral,
+                        ))
                         .child(ui_badge(size_label, BadgeTone::Neutral))
                         .child(ui_badge(mode_label, BadgeTone::Neutral))
                         .child(ui_badge(uid_label, BadgeTone::Neutral)),
@@ -166,7 +176,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                     match content_state.preview_content.get() {
                         Some(FilePreviewContent::Empty) => ui_empty_state(
                             IconName::File,
-                            SharedString::from(t(lang.get(), "sheet.empty")),
+                            move || SharedString::from(t(lang.get(), "sheet.empty")),
                             "",
                             None,
                         )
@@ -183,13 +193,17 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             .flex_col()
                             .gap_2()
                             .when(truncated, |col| {
+                                let shown = format_bytes(shown_bytes);
+                                let total = format_bytes(total_size);
                                 col.child(ui_banner(
                                     BannerTone::Info,
-                                    tf(
-                                        lang.get_untracked(),
-                                        "sheet.truncated",
-                                        &[&format_bytes(shown_bytes), &format_bytes(total_size)],
-                                    ),
+                                    move || {
+                                        SharedString::from(tf(
+                                            lang.get(),
+                                            "sheet.truncated",
+                                            &[&shown, &total],
+                                        ))
+                                    },
                                     None,
                                 ))
                             })
@@ -205,27 +219,31 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             shown_bytes,
                             total_size,
                             ..
-                        }) => view()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .flex_col()
-                            .gap_2()
-                            .child(ui_banner(
-                                BannerTone::Info,
-                                tf(
-                                    lang.get_untracked(),
-                                    "sheet.binary",
-                                    &[&format_bytes(shown_bytes), &format_bytes(total_size)],
-                                ),
-                                None,
-                            ))
-                            .child(ui_code_viewer(
-                                Some(SharedString::from(hex_dump)),
-                                None::<SharedString>,
-                                false,
-                                "Binary file hex dump viewer",
-                            ))
-                            .into_element(),
+                        }) => {
+                            let shown = format_bytes(shown_bytes);
+                            let total = format_bytes(total_size);
+                            view()
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .flex_col()
+                                .gap_2()
+                                .child(ui_banner(
+                                    BannerTone::Info,
+                                    move || {
+                                        SharedString::from(tf(
+                                            lang.get(),
+                                            "sheet.binary",
+                                            &[&shown, &total],
+                                        ))
+                                    },
+                                    None,
+                                ))
+                                .child(ui_hex_viewer(
+                                    Some(SharedString::from(hex_dump)),
+                                    "Binary file hex dump viewer",
+                                ))
+                                .into_element()
+                        }
                         None => view().into_element(),
                     }
                 })),

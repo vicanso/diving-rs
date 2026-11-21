@@ -209,7 +209,7 @@ pub fn ui_brand_home_button(
 pub fn ui_icon_button(
     icon: IconName,
     accessibility_label: impl Into<SharedString>,
-    tooltip_text: Option<&'static str>,
+    tooltip_text: Option<impl IntoReactive<SharedString>>,
     variant: ButtonVariant,
     size: UiSize,
     selected: impl IntoReactive<bool>,

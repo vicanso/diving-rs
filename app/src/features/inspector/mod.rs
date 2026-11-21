@@ -39,8 +39,8 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                     .justify_center()
                     .child(ui_empty_state(
                         IconName::Layers,
-                        SharedString::from("No image analyzed yet"),
-                        SharedString::from("Enter an image reference or open a local tar file."),
+                        move || SharedString::from(t(lang.get(), "inspector.empty_title")),
+                        move || SharedString::from(t(lang.get(), "inspector.empty_desc")),
                         Some(
                             ui_button(
                                 move || SharedString::from(t(lang.get(), "nav.back_home")),
@@ -81,7 +81,9 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                     col.child(
                         view().px_4().pt_2p5().child(ui_banner(
                             BannerTone::Warning,
-                            tf(lang.get_untracked(), "stale.banner", &[&stale_time]),
+                            move || {
+                                SharedString::from(tf(lang.get(), "stale.banner", &[&stale_time]))
+                            },
                             Some(
                                 ui_button(
                                     move || SharedString::from(t(lang.get(), "landing.retry")),
@@ -148,7 +150,8 @@ fn kpi_strip(
     let platform = format!("{}/{}", res.os, res.arch);
     let base_os = res.base_os.clone();
     let user = res.user.clone();
-    let runtime = format_runtime_compat(&res.runtime_compat, lang.get_untracked());
+    let runtime_compat = res.runtime_compat.clone();
+    let runtime_tone = format_runtime_compat(&runtime_compat, UiLang::En).map(|(_, tone)| tone);
     let tags: Vec<String> = res
         .tags
         .iter()
@@ -231,10 +234,20 @@ fn kpi_strip(
                 user,
             ))
         })
-        .when_some(runtime, |row, (label, tone)| {
+        .when_some(runtime_tone, |row, tone| {
+            let rc = runtime_compat.clone();
             row.child(kpi_divider()).child(kpi_item(
                 move || SharedString::from(t(lang.get(), "kpi.libc")),
-                ui_badge(label, tone),
+                ui_badge(
+                    move || {
+                        SharedString::from(
+                            format_runtime_compat(&rc, lang.get())
+                                .map(|(label, _)| label)
+                                .unwrap_or_default(),
+                        )
+                    },
+                    tone,
+                ),
             ))
         })
         .when(!tags.is_empty(), |row| {

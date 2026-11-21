@@ -600,7 +600,7 @@ impl AppState {
     }
 
     pub fn open_file_preview(&self, row: &FileTreeRow) {
-        if row.is_dir {
+        if !row.is_previewable() {
             return;
         }
         let Some(res) = self.result.get_untracked() else {

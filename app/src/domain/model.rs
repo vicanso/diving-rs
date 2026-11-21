@@ -288,6 +288,11 @@ impl FileTreeRow {
             Op::None => None,
         }
     }
+
+    /// Whether this row has real file bytes in the layer (directories and removed whiteouts do not).
+    pub fn is_previewable(&self) -> bool {
+        !self.is_dir && !matches!(self.op, Op::Removed)
+    }
 }
 
 /// Per-layer counts of added, modified, and removed leaf items.
@@ -721,10 +726,19 @@ mod tests {
         assert_eq!(rows[0].name, "usr/local");
         assert!(rows[0].is_dir);
         assert_eq!(rows[0].op_kind(), None);
+        assert!(!rows[0].is_previewable());
         assert!(rows[0].expanded);
         assert_eq!(rows[1].key, "usr/local/changed.conf");
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[1].op_kind(), Some(FileOpKind::Modified));
+        assert!(rows[1].is_previewable());
+
+        let removed_tree = vec![file("gone.bin", 0, Op::Removed)];
+        let removed_rows =
+            flatten_file_tree(&removed_tree, &filter, &HashSet::new(), &HashSet::new());
+        assert_eq!(removed_rows.len(), 1);
+        assert_eq!(removed_rows[0].op_kind(), Some(FileOpKind::Removed));
+        assert!(!removed_rows[0].is_previewable());
 
         let all_filter = FileTreeFilter {
             expand_all: true,

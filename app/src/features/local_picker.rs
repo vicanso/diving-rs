@@ -69,7 +69,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                 .child(ui_icon_button(
                     IconName::Refresh,
                     "Refresh local images",
-                    Some("Refresh"),
+                    Some(move || SharedString::from(t(lang.get(), "local.refresh"))),
                     ButtonVariant::Outline,
                     UiSize::Sm,
                     false,
@@ -298,6 +298,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                             .child(
                                                 view()
                                                     .w(px(108.0))
+                                                    .items_start()
                                                     .child(ui_badge(id_short, BadgeTone::Neutral)),
                                             )
                                             .child(
