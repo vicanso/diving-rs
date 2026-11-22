@@ -461,7 +461,7 @@ mod tests {
             Some("")
         );
 
-        // 3. Test Provenance: Esc closes while focused; jump resets Modifications + > 100 KB.
+        // 3. Test Provenance: 1st Esc clears focused query, 2nd Esc closes Provenance; jump resets filters.
         app.press("Modifications").expect("enable Modifications");
         app.press("Trace across layers").expect("open provenance");
         app.wait_for_within("Cross-Layer File Provenance", Duration::from_secs(3))
@@ -471,12 +471,28 @@ mod tests {
         app.wait_for_within("etc/app.conf", Duration::from_secs(3))
             .expect("provenance match");
         app.press_key("escape")
-            .expect("Esc closes focused Provenance dialog");
+            .expect("1st Esc clears focused Provenance search");
+        assert!(
+            app.shows("Cross-Layer File Provenance"),
+            "Provenance should remain open after 1st Esc clears non-empty search text"
+        );
+        assert_eq!(
+            app.screen()
+                .input_text("Cross-layer file provenance search")
+                .expect("read cleared provenance search"),
+            Some("")
+        );
+        app.press_key("escape")
+            .expect("2nd Esc closes Provenance dialog");
         app.wait_for_gone("Cross-Layer File Provenance", Duration::from_secs(3))
             .expect("provenance dismissed");
 
         app.press("Trace across layers")
             .expect("reopen provenance for jump test");
+        app.wait_for_within("Cross-Layer File Provenance", Duration::from_secs(3))
+            .expect("provenance reopened");
+        app.type_text("Cross-layer file provenance search", "app.conf")
+            .expect("re-type provenance query");
         app.wait_for_within("etc/app.conf", Duration::from_secs(3))
             .expect("provenance results visible");
         app.press("etc/app.conf").expect("jump to layer file");
