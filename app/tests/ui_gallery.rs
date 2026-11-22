@@ -56,3 +56,46 @@ fn gallery_dialog_and_sheet_open_and_close_on_escape() {
     app.wait_for_gone("File preview inspection sheet", Duration::from_secs(2))
         .expect("sheet dismisses on escape");
 }
+
+#[test]
+fn gallery_more_actions_menu_opens_on_click_and_triggers_dialog() {
+    let mut app = start_desktop_gallery();
+
+    app.press("More actions")
+        .expect("press More actions menu trigger");
+    app.wait_for("role:menuitem[Open Dialog…]")
+        .expect("menu opens showing Open Dialog… item");
+    assert_eq!(
+        app.screen().matches("role:menuitem[Open Sheet…]"),
+        Ok(true),
+        "expected Open Sheet… menu item"
+    );
+
+    app.press("role:menuitem[Open Dialog…]")
+        .expect("choose Open Dialog… from menu");
+    app.wait_for("Sample inspection modal")
+        .expect("dialog opens from menu item");
+    app.press_key("escape").expect("dismiss dialog");
+    app.wait_for_gone("Sample inspection modal", Duration::from_secs(2))
+        .expect("dialog closes on escape");
+}
+
+#[test]
+fn gallery_search_input_clears_on_escape() {
+    let mut app = start_desktop_gallery();
+
+    app.type_text("Filter files input", "nginx")
+        .expect("type filter keyword");
+    app.wait_for("label:Clear input")
+        .expect("clear button appears when query is non-empty");
+    assert_eq!(
+        app.screen().input_text("Filter files input"),
+        Ok(Some("nginx"))
+    );
+
+    app.press_key("escape")
+        .expect("press escape in search input");
+    app.wait_for_gone("label:Clear input", Duration::from_secs(2))
+        .expect("search input clears on escape");
+    assert_eq!(app.screen().input_text("Filter files input"), Ok(Some("")));
+}

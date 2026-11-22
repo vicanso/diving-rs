@@ -252,12 +252,14 @@ pub fn ui_empty_state(
         )
         .child(
             text(title)
+                .text_center()
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || theme().foreground),
         )
         .child(
             text(description)
+                .text_center()
                 .text_xs()
                 .text_color(move || theme().muted_foreground),
         )

@@ -10,7 +10,9 @@ use crate::ui::button::UiSize;
 use crate::ui::icons::{IconName, ui_icon};
 use crate::ui::motion::{FAST, INSTANT, dur};
 use crate::ui::overlay::popup_surface;
-use crate::ui::theme::{border_strong, radius_control, radius_inset};
+use crate::ui::theme::{
+    border_strong, radius_control, radius_inset, surface_elevated, switch_thumb, switch_track,
+};
 
 /// Option descriptor for segmented controls.
 #[derive(Clone)]
@@ -115,9 +117,9 @@ pub fn ui_switch(
                 .h(px(20.0))
                 .p(px(2.0))
                 .rounded_full()
-                .bg(move || theme().secondary)
+                .bg(switch_track)
                 .border_1()
-                .border_color(move || theme().border)
+                .border_color(border_strong)
                 .transition_colors()
                 .duration(move || dur(FAST))
                 .checked(|s| {
@@ -128,7 +130,8 @@ pub fn ui_switch(
         .thumb_style(|s| {
             s.size(px(14.0))
                 .rounded_full()
-                .bg(move || theme().card)
+                .bg(switch_thumb)
+                .shadow_xs()
                 .transition_transform()
                 .duration(move || dur(FAST))
                 .ease_in_out()
@@ -212,16 +215,14 @@ fn build_select<M>(
         .popup_style(popup_surface)
         .popup_starting_style(|s| s.opacity(0.0).scale(0.97).translate_y(px(-4.0)))
         .popup_ending_style(|s| s.opacity(0.0).scale(0.97))
-        .item_class("rounded-sm focus:bg-accent selected:bg-accent selected:font-medium disabled:opacity-45")
+        .item_class("focus:bg-accent selected:bg-accent selected:font-medium disabled:opacity-45")
+        .item_style(|s| s.rounded(radius_inset))
         .render_item(|item: &SelectEntry| {
-            view()
-                .px_2p5()
-                .py_1p5()
-                .child(
-                    text(item.title.clone())
-                        .text_sm()
-                        .text_color(move || theme().popover_foreground),
-                )
+            view().px_2p5().py_1p5().child(
+                text(item.title.clone())
+                    .text_sm()
+                    .text_color(move || theme().popover_foreground),
+            )
         })
         .trigger(trigger)
 }
@@ -283,17 +284,22 @@ pub fn ui_segmented<T: Clone + PartialEq + 'static>(
 
     tabs()
         .accessibility_label(accessibility_label.into())
+        .self_start()
         .flex_row()
         .items_center()
         .p(px(2.0))
         .gap_0p5()
         .rounded(move || size.radius())
         .bg(move || theme().muted)
+        .border_1()
+        .border_color(move || theme().border)
         .indicator_style(|s| {
             s.top(px(2.0))
                 .bottom(px(2.0))
                 .rounded(radius_inset)
-                .bg(move || theme().card)
+                .bg(surface_elevated)
+                .border_1()
+                .border_color(move || theme().border)
                 .shadow_xs()
         })
         .children(options.into_iter().map(move |opt| {

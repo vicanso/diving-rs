@@ -1,5 +1,6 @@
 //! Motion tokens and reduced-motion helpers matching `DESIGN.md` Section 7.
 
+use nsh_core::animation::{Keyframe, KeyframeTiming, MotionChannel, MotionSpec};
 use nsh_core::element::StyleRefinement;
 use nsh_core::prelude::*;
 
@@ -22,10 +23,27 @@ pub const PRESS_ICON_SCALE: f32 = 0.95;
 /// AffectUI soft-settle cubic bezier (`0.22, 1.0, 0.36, 1.0`).
 pub const SOFT_SETTLE: (f32, f32, f32, f32) = (0.22, 1.0, 0.36, 1.0);
 
-/// Critically damped spring for side sheets and panels (`NSH 0.6.0`).
-#[allow(dead_code)]
+/// Critically damped spring for side sheets, panels, and dialog entrances (`NSH 0.6.0`).
 pub fn panel_spring() -> Spring {
     Spring::from_stiffness(280.0).damping_ratio(1.0)
+}
+
+/// Spring-driven entrance specification for centered dialogs (`12pt` rise, `0.97` scale, fade).
+pub fn dialog_enter_spec() -> MotionSpec {
+    MotionSpec::new(KeyframeTiming::default())
+        .track(
+            MotionChannel::Opacity,
+            [Keyframe::at(0.0, 0.0), Keyframe::at(1.0, 1.0)],
+        )
+        .track(
+            MotionChannel::TranslateY,
+            [Keyframe::at(0.0, 12.0), Keyframe::at(1.0, 0.0)],
+        )
+        .track(
+            MotionChannel::Scale,
+            [Keyframe::at(0.0, 0.97), Keyframe::at(1.0, 1.0)],
+        )
+        .spring(panel_spring())
 }
 
 /// Returns `0.0` when system reduced motion is enabled so transitions snap immediately.

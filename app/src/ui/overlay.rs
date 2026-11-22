@@ -12,10 +12,10 @@ use nsh_core::prelude::*;
 
 use crate::ui::button::{ButtonVariant, UiSize, ui_icon_button};
 use crate::ui::icons::{IconName, ui_icon};
-use crate::ui::motion::{FAST, INSTANT, dur};
+use crate::ui::motion::{FAST, INSTANT, dialog_enter_spec, dur};
 use crate::ui::theme::{
-    backdrop_scrim, danger, danger_soft, font_mono_family, info, info_soft, radius_control,
-    radius_inset, radius_lg, warning, warning_soft,
+    ambient_lang_signal, backdrop_scrim, danger, danger_soft, font_mono_family, info, info_soft,
+    localized_ui_label, radius_control, radius_inset, radius_lg, warning, warning_soft,
 };
 
 /// Re-exported command entry builder for `ui_command_palette`.
@@ -65,9 +65,12 @@ pub fn ui_menu_item(
     disabled: impl IntoReactive<bool>,
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let label = label.into_reactive();
+    let a11y_label = label.clone();
     let disabled = disabled.into_reactive();
     let shortcut_label = shortcut.map(|s| SharedString::from(format_shortcut_hint(s)));
     menu_item()
+        .accessibility_label(move || a11y_label.get())
         .disabled(disabled)
         .on_select(on_select)
         .px_2p5()
@@ -187,11 +190,12 @@ pub fn ui_dialog(
     footer: impl Fn() -> AnyElement + 'static,
 ) -> impl IntoElement {
     let title = title.into_reactive();
+    let lang_sig = ambient_lang_signal();
     when(open, move || {
-        let m = motion().entering(MotionPreset::FadeInUp);
+        let m = motion().entering(dialog_enter_spec());
         let label_title = title.clone();
         dialog()
-            .label(untracked(move || label_title.get()))
+            .label(move || label_title.get())
             .on_cancel(move || open.set(false))
             .flex_1()
             .items_center()
@@ -235,7 +239,9 @@ pub fn ui_dialog(
                             .child(ui_icon_button(
                                 IconName::Close,
                                 "Close dialog",
-                                Some("Close (Esc)"),
+                                Some(move || {
+                                    localized_ui_label(lang_sig, "Close (Esc)", "关闭 (Esc)")
+                                }),
                                 ButtonVariant::Ghost,
                                 UiSize::Sm,
                                 false,
@@ -270,10 +276,11 @@ pub fn ui_sheet(
 ) -> impl IntoElement {
     let title = title.into_reactive();
     let label_title = title.clone();
+    let lang_sig = ambient_lang_signal();
     sheet()
         .open(move || Some(open.get()))
         .side(Placement::Right)
-        .accessibility_label(untracked(move || label_title.get()))
+        .accessibility_label(move || Some(label_title.get()))
         .on_open_change(move |ev: &SheetEvent| {
             if let SheetEvent::OpenChange(next, _) = ev {
                 open.set(*next);
@@ -309,7 +316,7 @@ pub fn ui_sheet(
                 .child(ui_icon_button(
                     IconName::Close,
                     "Close sheet",
-                    Some("Close (Esc)"),
+                    Some(move || localized_ui_label(lang_sig, "Close (Esc)", "关闭 (Esc)")),
                     ButtonVariant::Ghost,
                     UiSize::Sm,
                     false,
@@ -331,7 +338,7 @@ pub enum BannerTone {
 fn banner_icon(tone: BannerTone) -> IconName {
     match tone {
         BannerTone::Warning | BannerTone::Danger => IconName::Alert,
-        BannerTone::Info => IconName::Findings,
+        BannerTone::Info => IconName::Info,
     }
 }
 
@@ -461,7 +468,7 @@ pub fn ui_command_palette<M>(
                             .separator_style(|s| {
                                 s.h(px(1.0)).my_1().mx_2().bg(move || theme().border)
                             })
-                            .item_class("rounded-sm focus:bg-accent")
+                            .item_class("focus:bg-accent")
                             .item_style(|s| s.px_2p5().py_1p5().rounded(radius_inset))
                             .render_group(|group: &CommandGroup| {
                                 view().px_2().pt_2().pb_1().child(

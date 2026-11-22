@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 
 use crate::ui::icons::{IconName, ui_icon};
 use crate::ui::motion::{INSTANT, dur};
-use crate::ui::theme::{radius_control, radius_inset};
+use crate::ui::theme::{radius_control, radius_inset, surface_elevated};
 
 /// Descriptor for one workspace tab.
 #[derive(Clone)]
@@ -39,17 +39,22 @@ pub fn ui_tabs<T: Clone + PartialEq + 'static>(
 
     tabs()
         .accessibility_label(accessibility_label.into())
+        .self_start()
         .flex_row()
         .items_center()
         .p(px(2.5))
         .gap_0p5()
         .rounded(radius_control)
         .bg(move || theme().muted)
+        .border_1()
+        .border_color(move || theme().border)
         .indicator_style(|s| {
             s.top(px(2.5))
                 .bottom(px(2.5))
                 .rounded(radius_inset)
-                .bg(move || theme().card)
+                .bg(surface_elevated)
+                .border_1()
+                .border_color(move || theme().border)
                 .shadow_xs()
         })
         .children(items.into_iter().map(move |item| {

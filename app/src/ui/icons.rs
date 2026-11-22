@@ -3,6 +3,9 @@
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 
+const INFO_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>"#;
+const LOADER_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>"#;
+
 /// Identifiers for every UI icon bundled in `app/assets/icons/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
@@ -15,6 +18,8 @@ pub enum IconName {
     Layers,
     Treemap,
     Findings,
+    Info,
+    Loader,
     Dockerfile,
     Alert,
     Shield,
@@ -53,6 +58,8 @@ impl IconName {
             Self::Layers => include_str!("../../assets/icons/layers.svg"),
             Self::Treemap => include_str!("../../assets/icons/treemap.svg"),
             Self::Findings => include_str!("../../assets/icons/findings.svg"),
+            Self::Info => INFO_SVG,
+            Self::Loader => LOADER_SVG,
             Self::Dockerfile => include_str!("../../assets/icons/dockerfile.svg"),
             Self::Alert => include_str!("../../assets/icons/alert.svg"),
             Self::Shield => include_str!("../../assets/icons/shield.svg"),
@@ -95,6 +102,28 @@ pub fn ui_icon(
         .accessibility_elements_hidden(true)
         .child(
             svg(ImageSrc::svg_markup(name.markup()))
+                .size(size_pt)
+                .text_color(color),
+        )
+}
+
+/// Renders a linear-stroke loading spinner rotating smoothly on the UI thread (static under reduced motion).
+pub fn ui_spinner(size_pt: Points, color: impl IntoReactive<AdaptiveColor>) -> impl IntoElement {
+    let angle = animated_value(0.0);
+    if !reduce_motion() {
+        let _ = Animation::timing(&angle, 360.0, Timing::new(900.0, Easing::Linear))
+            .looped(None)
+            .start();
+    }
+    view()
+        .size(size_pt)
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .accessibility_elements_hidden(true)
+        .bind_rotate(&angle)
+        .child(
+            svg(ImageSrc::svg_markup(IconName::Loader.markup()))
                 .size(size_pt)
                 .text_color(color),
         )

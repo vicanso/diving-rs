@@ -32,7 +32,7 @@ pub fn ui_code_viewer(
                 .soft_wrap(move || soft_wrap.get())
                 .folding(true)
                 .font_family(font_mono_family())
-                .font_size(px(12.5))
+                .font_size(px(12.0))
                 .line_height(px(19.0))
                 .accessibility_label(accessibility_label.into())
                 .flex_1(),
@@ -97,7 +97,7 @@ pub fn ui_diff_viewer(
                     DiffLayout::Unified
                 })
                 .font_family(font_mono_family())
-                .font_size(px(12.5))
+                .font_size(px(12.0))
                 .line_height(px(19.0))
                 .flex_1(),
         )

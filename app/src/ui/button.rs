@@ -1,9 +1,10 @@
 //! Styled buttons, icon buttons, and external links built over `nsh_base`.
 
 use nsh_base::{ButtonElement, button, link, theme};
+use nsh_core::element::StyleRefinement;
 use nsh_core::prelude::*;
 
-use crate::ui::icons::{IconName, ui_icon};
+use crate::ui::icons::{IconName, ui_icon, ui_spinner};
 use crate::ui::motion::{FAST, PRESS_BTN_SCALE, PRESS_ICON_SCALE, SOFT_SETTLE, dur, press_scale};
 use crate::ui::overlay::{format_shortcut_hint, ui_tooltip};
 use crate::ui::theme::{
@@ -96,29 +97,54 @@ fn button_fg(variant: ButtonVariant) -> AdaptiveColor {
     }
 }
 
-fn apply_variant_styles(el: ButtonElement, variant: ButtonVariant) -> ButtonElement {
+trait VariantPressControl: Styled {
+    fn on_hover_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self;
+    fn on_active_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self;
+}
+
+impl VariantPressControl for ButtonElement {
+    fn on_hover_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.hover(f)
+    }
+
+    fn on_active_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.active(f)
+    }
+}
+
+impl VariantPressControl for View {
+    fn on_hover_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.hover(f)
+    }
+
+    fn on_active_style(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.active(f)
+    }
+}
+
+fn apply_variant_styles<T: VariantPressControl>(el: T, variant: ButtonVariant, press: f32) -> T {
     match variant {
         ButtonVariant::Primary => el
             .bg(move || theme().primary)
-            .hover(|s| s.bg(primary_hover))
-            .active(|s| press_scale(s.bg(primary_active), PRESS_BTN_SCALE)),
+            .on_hover_style(|s| s.bg(primary_hover))
+            .on_active_style(move |s| press_scale(s.bg(primary_active), press)),
         ButtonVariant::Default => el
             .bg(move || theme().secondary)
-            .hover(|s| s.bg(secondary_hover))
-            .active(|s| press_scale(s.bg(secondary_active), PRESS_BTN_SCALE)),
+            .on_hover_style(|s| s.bg(secondary_hover))
+            .on_active_style(move |s| press_scale(s.bg(secondary_active), press)),
         ButtonVariant::Outline => el
             .bg(move || theme().card)
             .border_1()
             .border_color(move || theme().border)
-            .hover(|s| s.bg(move || theme().accent).border_color(border_strong))
-            .active(|s| press_scale(s.bg(secondary_hover), PRESS_BTN_SCALE)),
+            .on_hover_style(|s| s.bg(move || theme().accent).border_color(border_strong))
+            .on_active_style(move |s| press_scale(s.bg(secondary_hover), press)),
         ButtonVariant::Ghost => el
-            .hover(|s| s.bg(move || theme().accent))
-            .active(|s| press_scale(s.bg(secondary_hover), PRESS_BTN_SCALE)),
+            .on_hover_style(|s| s.bg(move || theme().accent))
+            .on_active_style(move |s| press_scale(s.bg(secondary_hover), press)),
         ButtonVariant::Danger => el
             .bg(move || theme().destructive)
-            .hover(|s| s.bg(destructive_hover))
-            .active(|s| press_scale(s.bg(destructive_active), PRESS_BTN_SCALE)),
+            .on_hover_style(|s| s.bg(destructive_hover))
+            .on_active_style(move |s| press_scale(s.bg(destructive_active), press)),
     }
 }
 
@@ -139,9 +165,11 @@ pub fn ui_button(
         let loading = loading.clone();
         move || disabled.get() || loading.get()
     };
+    let loading_spinner = loading.clone();
+    let loading_icon = loading.clone();
     let label = label.into_reactive();
     let base = button()
-        .disabled(is_disabled.clone())
+        .disabled(is_disabled)
         .on_press(on_press)
         .min_h(size.min_height())
         .px(size.horizontal_padding())
@@ -157,11 +185,17 @@ pub fn ui_button(
         .ease_bezier(SOFT_SETTLE.0, SOFT_SETTLE.1, SOFT_SETTLE.2, SOFT_SETTLE.3)
         .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
         .disabled_style(|s| s.opacity(0.5))
-        .style_when(loading, |s| s.opacity(0.75))
+        .style_when(loading, |s| s.opacity(0.85))
+        .child(when(
+            move || loading_spinner.get(),
+            move || ui_spinner(size.icon_size(), move || button_fg(variant)),
+        ))
         .when_some(icon, |b, icon_name| {
-            b.child(ui_icon(icon_name, size.icon_size(), move || {
-                button_fg(variant)
-            }))
+            let loading_hide = loading_icon.clone();
+            b.child(when(
+                move || !loading_hide.get(),
+                move || ui_icon(icon_name, size.icon_size(), move || button_fg(variant)),
+            ))
         })
         .child(
             text(label)
@@ -169,7 +203,7 @@ pub fn ui_button(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || button_fg(variant)),
         );
-    apply_variant_styles(base, variant)
+    apply_variant_styles(base, variant, PRESS_BTN_SCALE)
 }
 
 /// Sidebar navigation item with subtle active pill, icon, label, and optional shortcut hint.
@@ -201,7 +235,7 @@ pub fn ui_sidebar_item(
         .duration(move || dur(FAST))
         .selected_style(|s| s.bg(surface_active))
         .hover(|s| s.bg(move || theme().sidebar_accent))
-        .active(|s| press_scale(s.bg(move || theme().sidebar_accent), PRESS_BTN_SCALE))
+        .active(|s| s.bg(secondary_active))
         .focus_visible(|s| {
             s.outline(px(2.0))
                 .outline_color(move || theme().sidebar_ring)
@@ -237,7 +271,7 @@ pub fn ui_sidebar_item(
         .when_some(hint, |row, kbd| {
             row.child(
                 text(kbd)
-                    .text_size(px(11.0))
+                    .text_xs()
                     .font_family(font_mono_family())
                     .text_color(text_tertiary),
             )
@@ -278,7 +312,7 @@ pub fn ui_recent_item(
         .duration(move || dur(FAST))
         .selected_style(|s| s.bg(surface_active))
         .hover(|s| s.bg(move || theme().sidebar_accent))
-        .active(|s| press_scale(s.bg(move || theme().sidebar_accent), PRESS_BTN_SCALE))
+        .active(|s| s.bg(secondary_active))
         .focus_visible(|s| {
             s.outline(px(2.0))
                 .outline_color(move || theme().sidebar_ring)
@@ -302,7 +336,7 @@ pub fn ui_recent_item(
                 .child(
                     text(score_label)
                         .flex_shrink_0()
-                        .text_size(px(11.0))
+                        .text_xs()
                         .font_family(font_mono_family())
                         .font_weight(FontWeight::MEDIUM)
                         .tabular_nums()
@@ -313,7 +347,7 @@ pub fn ui_recent_item(
             col.child(
                 text(meta)
                     .w_full()
-                    .text_size(px(11.0))
+                    .text_xs()
                     .font_family(font_mono_family())
                     .tabular_nums()
                     .number_of_lines(1)
@@ -360,7 +394,7 @@ pub fn ui_action_card(
                 .when_some(hint, |row, kbd| {
                     row.child(
                         text(kbd)
-                            .text_size(px(11.0))
+                            .text_xs()
                             .font_family(font_mono_family())
                             .text_color(text_tertiary),
                     )
@@ -377,7 +411,7 @@ pub fn ui_action_card(
         .child(
             text(subtitle)
                 .w_full()
-                .text_size(px(11.0))
+                .text_xs()
                 .number_of_lines(1)
                 .text_color(move || theme().muted_foreground),
         )
@@ -425,7 +459,7 @@ pub fn ui_image_pill_button(
                 move || {
                     text(arch.clone())
                         .flex_shrink_0()
-                        .text_size(px(11.0))
+                        .text_xs()
                         .font_family(font_mono_family())
                         .text_color(text_tertiary)
                 },
@@ -466,33 +500,47 @@ pub fn ui_icon_button(
         .disabled_style(|s| s.opacity(0.45))
         .child(ui_icon(icon, size.icon_size(), move || button_fg(variant)));
 
-    let styled = match variant {
-        ButtonVariant::Primary => base
-            .bg(move || theme().primary)
-            .hover(|s| s.bg(primary_hover))
-            .active(|s| press_scale(s.bg(primary_active), PRESS_ICON_SCALE)),
-        ButtonVariant::Default => base
-            .bg(move || theme().secondary)
-            .hover(|s| s.bg(secondary_hover))
-            .active(|s| press_scale(s.bg(secondary_active), PRESS_ICON_SCALE)),
-        ButtonVariant::Outline => base
-            .bg(move || theme().card)
-            .border_1()
-            .border_color(move || theme().border)
-            .hover(|s| s.bg(move || theme().accent).border_color(border_strong))
-            .active(|s| press_scale(s.bg(secondary_hover), PRESS_ICON_SCALE)),
-        ButtonVariant::Ghost => base
-            .hover(|s| s.bg(move || theme().accent))
-            .active(|s| press_scale(s.bg(secondary_hover), PRESS_ICON_SCALE)),
-        ButtonVariant::Danger => base
-            .bg(move || theme().destructive)
-            .hover(|s| s.bg(destructive_hover))
-            .active(|s| press_scale(s.bg(destructive_active), PRESS_ICON_SCALE)),
-    };
+    let styled = apply_variant_styles(base, variant, PRESS_ICON_SCALE);
 
     view()
         .when_some(tooltip_text, |el, hint| el.tooltip(ui_tooltip(hint)))
         .child(styled)
+}
+
+/// Renders a square icon-only trigger compatible with `ui_menu` (`nsh_base::menu().trigger(...)`).
+///
+/// Unlike [`ui_icon_button`], this renders a press-neutral `view()` without an inner `button()`
+/// press handler so `nsh_base::menu`'s own trigger `on_press` receives clicks directly.
+pub fn ui_menu_trigger_icon(
+    icon: IconName,
+    accessibility_label: impl Into<SharedString>,
+    tooltip_text: Option<impl IntoReactive<SharedString>>,
+    variant: ButtonVariant,
+    size: UiSize,
+    disabled: impl IntoReactive<bool>,
+) -> impl IntoElement {
+    let disabled = disabled.into_reactive();
+    let disabled_focus = disabled.clone();
+    let frame = size.min_height();
+    let base = view()
+        .role(AccessibilityRole::Button)
+        .label(accessibility_label.into())
+        .focusable(move || !disabled_focus.get())
+        .disabled(move || disabled.get())
+        .size(frame)
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded(move || size.radius())
+        .transition_all()
+        .duration(move || dur(FAST))
+        .ease_bezier(SOFT_SETTLE.0, SOFT_SETTLE.1, SOFT_SETTLE.2, SOFT_SETTLE.3)
+        .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
+        .disabled_style(|s| s.opacity(0.45))
+        .when_some(tooltip_text, |el, hint| el.tooltip(ui_tooltip(hint)))
+        .child(ui_icon(icon, size.icon_size(), move || button_fg(variant)));
+
+    apply_variant_styles(base, variant, PRESS_ICON_SCALE)
 }
 
 /// Renders an external resource link (the only control allowed to use pointing-hand cursor).

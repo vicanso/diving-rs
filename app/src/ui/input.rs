@@ -1,15 +1,23 @@
 //! Styled text fields, search inputs, and labeled form rows built over `nsh_base::input`.
 
+use std::rc::Rc;
+
 use nsh_base::{Input, input, theme};
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::ui::button::{ButtonVariant, UiSize, ui_icon_button};
 use crate::ui::icons::{IconName, ui_icon};
 use crate::ui::motion::{INSTANT, dur};
-use crate::ui::theme::{border_strong, font_mono_family, radius_inset};
+use crate::ui::theme::{
+    ambient_lang_signal, border_strong, font_mono_family, localized_ui_label, radius_inset,
+};
 
 /// Optional submit callback passed to `ui_input`, `ui_bare_input_with_ref`, and `ui_search_input`.
 pub type InputSubmit = Box<dyn Fn(&str)>;
+
+/// Optional Escape callback passed to `ui_search_input_with_escape` when the field is already empty.
+pub type InputEscape = Box<dyn Fn()>;
 
 fn build_raw_input(
     value: Signal<String>,
@@ -130,17 +138,90 @@ pub fn ui_search_input(
     monospace: bool,
     on_submit: Option<InputSubmit>,
 ) -> impl IntoElement {
-    let has_value = move || value.with(|v| !v.is_empty());
+    ui_search_input_with_escape(
+        value,
+        placeholder,
+        accessibility_label,
+        size,
+        shortcut_hint,
+        focus_ref,
+        monospace,
+        on_submit,
+        None,
+    )
+}
+
+/// Search field with `Esc` handling: clears non-empty text (and blurs, or calls `on_escape` when empty).
+#[allow(clippy::too_many_arguments)]
+pub fn ui_search_input_with_escape(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String>,
+    accessibility_label: impl Into<SharedString>,
+    size: UiSize,
+    shortcut_hint: Option<&'static str>,
+    focus_ref: Option<&ElementRef>,
+    monospace: bool,
+    on_submit: Option<InputSubmit>,
+    on_escape: Option<InputEscape>,
+) -> impl IntoElement {
+    let lang_sig = ambient_lang_signal();
+    let has_text = computed(move || value.with(|v| !v.is_empty()));
+    let has_value = move || has_text.get();
+    let focused = signal(false);
+    let local_ref = element_ref();
+    let input_ref = focus_ref.copied().unwrap_or(local_ref);
 
     let raw_input = build_raw_input(
         value,
         placeholder,
         accessibility_label,
         size,
-        focus_ref,
+        Some(&input_ref),
         monospace,
         on_submit,
-    );
+    )
+    .on_focus(move || focused.set(true))
+    .on_blur(move || focused.set(false));
+
+    let esc_cb = on_escape.map(Rc::new);
+    effect(move || {
+        if !focused.get() {
+            return;
+        }
+        let non_empty = has_text.get();
+        let esc_cb = esc_cb.clone();
+        if non_empty || esc_cb.is_some() {
+            on_key_with(
+                "escape",
+                KeyOptions {
+                    when: When::Always,
+                    repeat: false,
+                    ..Default::default()
+                },
+                move |_| {
+                    if !value.with_untracked(|v| v.is_empty()) {
+                        value.set(String::new());
+                        if esc_cb.is_none() {
+                            input_ref.blur();
+                        }
+                    } else if let Some(cb) = &esc_cb {
+                        cb();
+                    }
+                },
+            );
+        } else {
+            on_key_with(
+                "escape",
+                KeyOptions {
+                    when: When::Always,
+                    repeat: false,
+                    pass_through: true,
+                    ..Default::default()
+                },
+                move |_| input_ref.blur(),
+            );
+        }
+    });
 
     view()
         .flex_row()
@@ -193,7 +274,7 @@ pub fn ui_search_input(
             view().flex_shrink_0().child(ui_icon_button(
                 IconName::Close,
                 "Clear input",
-                Some("Clear (Esc)"),
+                Some(move || localized_ui_label(lang_sig, "Clear (Esc)", "清除 (Esc)")),
                 ButtonVariant::Ghost,
                 UiSize::Xs,
                 false,

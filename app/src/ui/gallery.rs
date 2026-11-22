@@ -5,12 +5,12 @@ use nsh_core::prelude::*;
 
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, FileOpKind, IconName, LayerOpcodeKind, SegmentOption,
-    SelectItem, TabOption, UiSize, theme, ui_badge, ui_banner, ui_button, ui_checkbox,
-    ui_code_viewer, ui_context_menu, ui_dialog, ui_diff_viewer, ui_empty_state, ui_field, ui_icon,
-    ui_icon_button, ui_input, ui_link, ui_menu, ui_menu_item, ui_menu_separator, ui_opcode_pill,
-    ui_panel, ui_popover, ui_progress_bar, ui_resizable_split, ui_search_input, ui_segmented,
-    ui_select, ui_separator, ui_sheet, ui_size_bar, ui_skeleton, ui_status_badge, ui_switch,
-    ui_tabs,
+    SelectItem, TabOption, UiSize, register_fonts, theme, ui_badge, ui_banner, ui_button,
+    ui_checkbox, ui_code_viewer, ui_context_menu, ui_dialog, ui_diff_viewer, ui_empty_state,
+    ui_field, ui_icon, ui_icon_button, ui_input, ui_link, ui_menu, ui_menu_item, ui_menu_separator,
+    ui_menu_trigger_icon, ui_opcode_pill, ui_panel, ui_popover, ui_progress_bar,
+    ui_resizable_split, ui_search_input, ui_segmented, ui_select, ui_separator, ui_sheet,
+    ui_size_bar, ui_skeleton, ui_status_badge, ui_switch, ui_tabs,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,7 @@ CMD ["/app"]
 /// Component showcase mounted in M1 before wiring real analysis screens.
 #[component]
 pub fn UiGallery() -> impl IntoElement {
+    register_fonts();
     let theme_choice = signal(ThemeChoice::System);
     let clicks = signal(0_u32);
     let dialog_open = signal(false);
@@ -266,15 +267,13 @@ fn gallery_title_bar(
                     move || sheet_open.set(true),
                 ))
                 .child(
-                    ui_menu(ui_icon_button(
+                    ui_menu(ui_menu_trigger_icon(
                         IconName::More,
                         "More actions",
                         Some("More actions"),
                         ButtonVariant::Ghost,
                         UiSize::Sm,
                         false,
-                        false,
-                        || {},
                     ))
                     .child(ui_menu_item(
                         "Open Dialog…",
