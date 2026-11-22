@@ -15,7 +15,7 @@ use crate::store::{
     is_safe_blob_id, sha256_hex, CacheConfig, CacheStore, CleanupStats, RecentCache,
 };
 use crate::trace::{clone_value_from_task_local, TRACE_ID};
-use futures::future::{FutureExt, Shared};
+use futures::future::{try_join, FutureExt, Shared};
 use rustls::crypto::CryptoProvider;
 use snafu::ResultExt;
 use std::collections::HashMap;
@@ -568,18 +568,19 @@ impl Analyzer {
         preview_image(&ctx, info, opts.credentials).await
     }
 
-    /// Compare two images sequentially (so shared layers download once) and
-    /// compute their [`ImageDiff`].
+    /// Compare two images concurrently (singleflight still deduplicates any
+    /// shared layers) and compute their [`ImageDiff`].
     pub async fn diff(&self, base: &str, target: &str, opts: AnalyzeOptions) -> Result<ImageDiff> {
         let base_info = parse_image_info(base);
         let target_info = parse_image_info(target);
         self.check_allowed(&base_info)?;
         self.check_allowed(&target_info)?;
 
-        let (base_res, target_res) = tokio::try_join!(
+        let (base_res, target_res) = try_join(
             self.analyze_info(base_info, opts.clone()),
             self.analyze_info(target_info, opts),
-        )?;
+        )
+        .await?;
         tokio::task::spawn_blocking(move || diff_images(&base_res, &target_res))
             .await
             .map_err(|e| Error::Other {
