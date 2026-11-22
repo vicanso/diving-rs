@@ -92,7 +92,8 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("sidebar.new_analysis", "New Analysis", "新建分析"),
     ("sidebar.local_images", "Local Images", "本地镜像"),
     ("sidebar.compare", "Image Diff", "镜像对比"),
-    ("sidebar.open_file", "Open File…", "打开本地包…"),
+    ("sidebar.open_file", "Open File…", "打开本地文件…"),
+    ("action.open_folder", "Open OCI folder…", "打开 OCI 目录…"),
     ("sidebar.section_recent", "Recent", "最近分析"),
     (
         "sidebar.recent_empty",
@@ -198,6 +199,8 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("kpi.base_os", "Base OS", "基础系统"),
     ("kpi.user", "User", "运行用户"),
     ("kpi.libc", "Runtime libc", "运行时 libc"),
+    ("kpi.libc_needs", "needs {0}", "需要 {0}"),
+    ("kpi.libc_host", "host {0}", "宿主 {0}"),
     ("kpi.libc_ok", "ok", "兼容"),
     ("kpi.libc_too_old", "host glibc too old", "宿主 glibc 过低"),
     (
@@ -237,6 +240,8 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("common.copy", "Copy", "复制"),
     ("common.copied", "Copied", "已复制"),
     ("common.close", "Close", "关闭"),
+    ("common.close_esc", "Close (Esc)", "关闭 (Esc)"),
+    ("common.clear_esc", "Clear (Esc)", "清空 (Esc)"),
     ("common.save_as", "Save as…", "另存为…"),
     ("common.done", "Done", "完成"),
     ("common.cancel", "Cancel", "取消"),
@@ -304,10 +309,21 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ),
     (
         "sheet.binary",
-        "Binary file — showing leading bytes as hex dump.",
-        "二进制文件 — 以十六进制形式展示文件头部内容。",
+        "Binary file — showing first {0} of {1} as hex dump.",
+        "二进制文件 — 以十六进制展示前 {0}（共 {1}）。",
     ),
     ("sheet.empty", "Empty file (0 bytes).", "空文件（0 字节）。"),
+    ("sheet.symlink", "Symbolic link", "符号链接"),
+    (
+        "sheet.symlink_target",
+        "Symbolic link → {0}",
+        "符号链接 → {0}",
+    ),
+    (
+        "sheet.symlink_no_target",
+        "Symbolic link (no target recorded).",
+        "符号链接（未记录目标路径）。",
+    ),
     // Treemap & Findings & Dockerfile
     (
         "treemap.m3_pending",
@@ -421,6 +437,35 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "No unstripped binaries detected.",
         "未检测到未剥离符号的二进制文件。",
     ),
+    (
+        "findings.unstripped_detail",
+        "{0} (debug {1})",
+        "{0}（调试信息 {1}）",
+    ),
+    ("severity.high", "HIGH", "高"),
+    ("severity.medium", "MEDIUM", "中"),
+    ("severity.low", "LOW", "低"),
+    ("severity.info", "INFO", "提示"),
+    ("category.size", "Size", "体积"),
+    ("category.necessity", "Necessity", "必要性"),
+    ("category.security", "Security", "安全"),
+    (
+        "tag.pkg_cache",
+        "Contains Package Manager Cache",
+        "含包管理器缓存",
+    ),
+    (
+        "tag.dev_artifacts",
+        "Development Artifacts",
+        "含开发构建产物",
+    ),
+    ("tag.potential_secrets", "Potential Secrets", "疑似存在密钥"),
+    ("tag.runs_as_root", "Runs as Root", "以 root 运行"),
+    (
+        "tag.high_layer_count",
+        "High Layer Count: {0}",
+        "镜像层数过多：{0}",
+    ),
     ("dockerfile.wrap", "Wrap lines", "自动换行"),
     ("dockerfile.export", "Export…", "导出…"),
     ("dockerfile.metadata", "Image Metadata", "镜像元数据"),
@@ -440,6 +485,16 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "error.local_list_cancelled",
         "Local image listing worker cancelled",
         "本地镜像列表加载已取消",
+    ),
+    (
+        "error.local_archive_prefix",
+        "Unable to read local archive: {0}",
+        "无法读取本地镜像归档：{0}",
+    ),
+    (
+        "error.io_prefix",
+        "File I/O error: {0}",
+        "文件读写失败：{0}",
     ),
     // Status bar & notices
     (
@@ -502,6 +557,16 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("diff.layers_section", "Layers Diff", "镜像层差异"),
     (
         "diff.shared_layers",
+        "{0} shared base layers ({1})",
+        "共享 {0} 个基础层（{1}）",
+    ),
+    (
+        "diff.shared_base_layers_one",
+        "{0} shared base layer ({1})",
+        "共享 {0} 个基础层（{1}）",
+    ),
+    (
+        "diff.shared_base_layers",
         "{0} shared base layers ({1})",
         "共享 {0} 个基础层（{1}）",
     ),
@@ -658,6 +723,171 @@ pub fn tf(lang: UiLang, key: &'static str, args: &[&str]) -> String {
     out
 }
 
+/// Maps `diving_core::Lang` into the desktop UI `UiLang`.
+pub fn ui_lang_from_core(lang: Lang) -> UiLang {
+    match lang {
+        Lang::En => UiLang::En,
+        Lang::Zh => UiLang::Zh,
+    }
+}
+
+/// Localizes bracketed risk tags produced by `diving-core` (e.g. `"[Potential Secrets]"`).
+pub fn localize_risk_tag(lang: UiLang, raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches(|c| c == '[' || c == ']').trim();
+    match trimmed {
+        "Contains Package Manager Cache" => t(lang, "tag.pkg_cache").to_owned(),
+        "Development Artifacts" => t(lang, "tag.dev_artifacts").to_owned(),
+        "Potential Secrets" => t(lang, "tag.potential_secrets").to_owned(),
+        "Runs as Root" => t(lang, "tag.runs_as_root").to_owned(),
+        _ if trimmed.starts_with("High Layer Count:") => {
+            let count = trimmed
+                .strip_prefix("High Layer Count:")
+                .map(str::trim)
+                .unwrap_or_default();
+            tf(lang, "tag.high_layer_count", &[count])
+        }
+        _ => trimmed.to_owned(),
+    }
+}
+
+/// Localizes recommendation severity codes (`high` / `medium` / `low` / `info`) consistently.
+pub fn localize_severity(lang: UiLang, raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "high" => t(lang, "severity.high").to_owned(),
+        "medium" => t(lang, "severity.medium").to_owned(),
+        "low" => t(lang, "severity.low").to_owned(),
+        "info" => t(lang, "severity.info").to_owned(),
+        _ => raw.trim().to_owned(),
+    }
+}
+
+/// Localizes recommendation categories (`size` / `necessity` / `security`).
+pub fn localize_category(lang: UiLang, raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "size" => t(lang, "category.size").to_owned(),
+        "necessity" => t(lang, "category.necessity").to_owned(),
+        "security" => t(lang, "category.security").to_owned(),
+        _ => raw.trim().to_owned(),
+    }
+}
+
+/// Formats shared base layer counts with EN singular/plural grammar and localized ZH copy.
+pub fn format_shared_base_layers(lang: UiLang, count: usize, size_label: &str) -> String {
+    let key = if count == 1 {
+        "diff.shared_base_layers_one"
+    } else {
+        "diff.shared_base_layers"
+    };
+    tf(lang, key, &[&count.to_string(), size_label])
+}
+
+/// Converts raw `diving-core` error prefixes (`Tar fail:`, `Io fail:`) into friendlier copy.
+pub fn format_user_error(lang: UiLang, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("Tar fail:") {
+        return tf(lang, "error.local_archive_prefix", &[rest.trim()]);
+    }
+    if let Some(rest) = trimmed.strip_prefix("IO fail:") {
+        return tf(lang, "error.io_prefix", &[rest.trim()]);
+    }
+    trimmed.to_owned()
+}
+
+/// Strips inline Markdown emphasis (`**bold**`, `*italic*`) and inline code backticks (`` `code` ``)
+/// while preserving path globs such as `/var/lib/apt/lists/*` or `*.pem`.
+pub fn strip_inline_markdown(raw: &str) -> String {
+    let no_backticks = strip_paired_backticks(raw);
+    let chars: Vec<char> = no_backticks.chars().collect();
+    let mut out = String::with_capacity(no_backticks.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = find_closing_double_star(&chars, i + 2) {
+                for &ch in &chars[i + 2..end] {
+                    out.push(ch);
+                }
+                i = end + 2;
+                continue;
+            }
+        } else if chars[i] == '*'
+            && i.checked_sub(1).is_none_or(|p| chars[p] != '/')
+            && i + 1 < chars.len()
+            && chars[i + 1] != '*'
+            && !chars[i + 1].is_whitespace()
+            && let Some(end) = find_closing_single_star(&chars, i + 1)
+        {
+            for &ch in &chars[i + 1..end] {
+                out.push(ch);
+            }
+            i = end + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+fn strip_paired_backticks(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`'
+            && let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '`')
+        {
+            let end = i + 1 + rel_end;
+            if !chars[i + 1..end].contains(&'\n') {
+                for &ch in &chars[i + 1..end] {
+                    out.push(ch);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn find_closing_double_star(chars: &[char], start: usize) -> Option<usize> {
+    if start >= chars.len() || chars[start].is_whitespace() {
+        return None;
+    }
+    let mut j = start;
+    while j + 1 < chars.len() {
+        if chars[j] == '\n' {
+            return None;
+        }
+        if chars[j] == '*' && chars[j + 1] == '*' && !chars[j - 1].is_whitespace() {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn find_closing_single_star(chars: &[char], start: usize) -> Option<usize> {
+    let mut j = start;
+    while j < chars.len() {
+        if chars[j] == '\n' {
+            return None;
+        }
+        if chars[j] == '*'
+            && chars[j - 1] != '/'
+            && !chars[j - 1].is_whitespace()
+            && chars.get(j + 1).is_none_or(|&n| n != '*')
+        {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +911,81 @@ mod tests {
         let zh = tf(UiLang::Zh, "preview.meta", &["linux/amd64", "5", "42 MB"]);
         assert_eq!(en, "linux/amd64 · 5 layers · 42 MB compressed");
         assert_eq!(zh, "linux/amd64 · 5 层 · 压缩后 42 MB");
+
+        let bin_en = tf(UiLang::En, "sheet.binary", &["8 KiB", "64 KiB"]);
+        let bin_zh = tf(UiLang::Zh, "sheet.binary", &["8 KiB", "64 KiB"]);
+        assert_eq!(
+            bin_en,
+            "Binary file — showing first 8 KiB of 64 KiB as hex dump."
+        );
+        assert_eq!(bin_zh, "二进制文件 — 以十六进制展示前 8 KiB（共 64 KiB）。");
+    }
+
+    #[test]
+    fn risk_tags_severities_categories_and_shared_layers_localize() {
+        assert_eq!(
+            localize_risk_tag(UiLang::En, "[Potential Secrets]"),
+            "Potential Secrets"
+        );
+        assert_eq!(
+            localize_risk_tag(UiLang::Zh, "[Potential Secrets]"),
+            "疑似存在密钥"
+        );
+        assert_eq!(
+            localize_risk_tag(UiLang::Zh, "[High Layer Count: 42]"),
+            "镜像层数过多：42"
+        );
+
+        assert_eq!(localize_severity(UiLang::En, "high"), "HIGH");
+        assert_eq!(localize_severity(UiLang::Zh, "high"), "高");
+        assert_eq!(localize_category(UiLang::En, "security"), "Security");
+        assert_eq!(localize_category(UiLang::Zh, "security"), "安全");
+
+        assert_eq!(
+            format_shared_base_layers(UiLang::En, 1, "5 MB"),
+            "1 shared base layer (5 MB)"
+        );
+        assert_eq!(
+            format_shared_base_layers(UiLang::En, 3, "12 MB"),
+            "3 shared base layers (12 MB)"
+        );
+        assert_eq!(
+            format_shared_base_layers(UiLang::Zh, 1, "5 MB"),
+            "共享 1 个基础层（5 MB）"
+        );
+
+        assert_eq!(
+            format_user_error(UiLang::En, "Tar fail: unexpected EOF"),
+            "Unable to read local archive: unexpected EOF"
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "Tar fail: unexpected EOF"),
+            "无法读取本地镜像归档：unexpected EOF"
+        );
+    }
+
+    #[test]
+    fn strip_inline_markdown_cleans_backticks_and_emphasis_preserving_globs() {
+        assert_eq!(
+            strip_inline_markdown("Add a dedicated user and `USER nonroot` before CMD."),
+            "Add a dedicated user and USER nonroot before CMD."
+        );
+        assert_eq!(
+            strip_inline_markdown("Create and clean up in the *same* RUN instruction."),
+            "Create and clean up in the same RUN instruction."
+        );
+        assert_eq!(
+            strip_inline_markdown("在*同一条* RUN 指令内创建并清理数据。"),
+            "在同一条 RUN 指令内创建并清理数据。"
+        );
+        assert_eq!(
+            strip_inline_markdown("**Shared layers:** none"),
+            "Shared layers: none"
+        );
+        assert_eq!(
+            strip_inline_markdown("apt: `rm -rf /var/lib/apt/lists/*` in the same RUN"),
+            "apt: rm -rf /var/lib/apt/lists/* in the same RUN"
+        );
+        assert_eq!(strip_inline_markdown("*.pem and *.key"), "*.pem and *.key");
     }
 }

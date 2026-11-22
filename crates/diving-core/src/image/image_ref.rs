@@ -128,6 +128,17 @@ pub fn repository_path(user: &str, name: &str) -> String {
     }
 }
 
+/// Strips a leading `/` before a Windows drive letter (`"/C:/foo"` -> `"C:/foo"`),
+/// which `file:///C:/...` drop/URI parsers emit on Windows.
+fn strip_windows_drive_leading_slash(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        &path[1..]
+    } else {
+        path
+    }
+}
+
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
     if let Some(path) = value.strip_prefix(FILE_PROTOCOL) {
@@ -136,6 +147,7 @@ pub fn parse_image_info(image: &str) -> ImageInfo {
             Some((path, arch)) => (path, arch),
             None => (path, ""),
         };
+        let path = strip_windows_drive_leading_slash(path);
         return ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
             name: path.to_string(),
@@ -314,6 +326,23 @@ mod tests {
         let info = parse_image_info("file:///tmp/image.tar");
         assert_eq!(info.registry, REGISTRY_LOCAL_FILE);
         assert_eq!(info.name, "/tmp/image.tar");
+    }
+
+    #[test]
+    fn test_parse_image_info_windows_drive_letter_paths() {
+        let triple = parse_image_info("file:///C:/images/app.tar");
+        assert_eq!(triple.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(triple.name, "C:/images/app.tar");
+        assert_eq!(triple.arch, "");
+
+        let lower_arch = parse_image_info("file:///d:/oci/layout?arch=arm64");
+        assert_eq!(lower_arch.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(lower_arch.name, "d:/oci/layout");
+        assert_eq!(lower_arch.arch, "arm64");
+
+        let double_slash = parse_image_info("file://C:\\images\\app.tar");
+        assert_eq!(double_slash.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(double_slash.name, "C:\\images\\app.tar");
     }
 
     #[test]

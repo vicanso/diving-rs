@@ -5,7 +5,7 @@ use nsh_core::element::desktop::{MenuItem, set_application_menu};
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, InspectorTab};
+use crate::domain::{AppRoute, AppState, InspectorTab, visible_layer_indices};
 use crate::i18n::{UiLang, t};
 
 /// Registers global keyboard bindings and reactive desktop menu items inside the root `App` owner.
@@ -18,18 +18,17 @@ pub fn install_desktop_menus_and_keys(state: AppState) {
             let lang = menu_state.lang.get();
             let appearance = menu_state.appearance.get();
             let has_result = menu_state.result.get().is_some();
-            let has_image = !menu_state.current_image.get().is_empty();
+            let can_reanalyze = menu_state.can_reanalyze();
             let on_diff = menu_state.route.get() == AppRoute::Diff;
-            let has_diff = menu_state.diff_result.get().is_some();
+            let can_export = menu_state.can_export_markdown();
             let active_tab = menu_state.active_tab.get();
-            let can_export = if on_diff { has_diff } else { has_result };
 
             let items = build_app_menu(
                 &menu_state,
                 lang,
                 appearance,
                 has_result,
-                has_image,
+                can_reanalyze,
                 on_diff,
                 can_export,
                 active_tab,
@@ -135,49 +134,62 @@ fn bind_global_keys(state: AppState) {
         step_selected_layer(&down_state, 1);
     });
 
-    let esc_state = state;
-    on_key_with(
-        "escape",
-        KeyOptions {
-            when: When::NotEditing,
-            pass_through: true,
-            ..Default::default()
-        },
-        move |_| {
-            if !any_overlay_open(&esc_state) {
-                if esc_state.header_search_open.get_untracked() {
-                    esc_state.close_header_search();
-                } else if esc_state.route.get_untracked() == AppRoute::Inspector
-                    && esc_state.active_tab.get_untracked() == InspectorTab::FileTree
-                    && !esc_state.tree_keyword.get_untracked().is_empty()
-                {
-                    esc_state.tree_keyword.set(String::new());
-                }
-            }
-        },
-    );
-}
-
-fn any_overlay_open(state: &AppState) -> bool {
-    state.compare_dialog_open.get_untracked()
-        || state.local_picker_open.get_untracked()
-        || state.command_palette_open.get_untracked()
-        || state.preview_sheet_open.get_untracked()
+    let esc_state = state.clone();
+    // Keep Command Palette out of this memo so when Command Palette opens over
+    // another overlay (e.g., File Preview Sheet), `effect` does not re-run and
+    // `nsh_base::command`'s newer Escape binding continues to fire first.
+    let esc_active = computed(move || {
+        esc_state.provenance_open.get()
+            || esc_state.compare_dialog_open.get()
+            || esc_state.local_picker_open.get()
+            || esc_state.preview_sheet_open.get()
+            || esc_state.header_search_open.get()
+            || (esc_state.route.get() == AppRoute::Inspector
+                && esc_state.active_tab.get() == InspectorTab::FileTree
+                && !esc_state.tree_keyword.get().is_empty())
+    });
+    let esc_handler_state = state;
+    effect(move || {
+        if !esc_active.get() {
+            return;
+        }
+        let s = esc_handler_state.clone();
+        on_key_with(
+            "escape",
+            KeyOptions {
+                when: When::Always,
+                ..Default::default()
+            },
+            move |_| {
+                s.dismiss_top_overlay_or_search();
+            },
+        );
+    });
 }
 
 fn step_selected_layer(state: &AppState, delta: isize) {
-    if any_overlay_open(state) || state.route.get_untracked() != AppRoute::Inspector {
+    if state.any_overlay_open()
+        || state.route.get_untracked() != AppRoute::Inspector
+        || state.active_tab.get_untracked() != InspectorTab::FileTree
+    {
         return;
     }
     let Some(res) = state.result.get_untracked() else {
         return;
     };
-    let len = res.layers.len();
-    if len == 0 {
+    let visible = visible_layer_indices(&res.layers, state.layer_filter.get_untracked());
+    if visible.is_empty() {
         return;
     }
     let cur = state.selected_layer.get_untracked();
-    let next = (cur as isize + delta).clamp(0, (len - 1) as isize) as usize;
+    let next = match visible.iter().position(|&idx| idx == cur) {
+        Some(pos) => {
+            let target_pos = (pos as isize + delta).clamp(0, (visible.len() - 1) as isize) as usize;
+            visible[target_pos]
+        }
+        None if delta >= 0 => visible[0],
+        None => *visible.last().unwrap_or(&visible[0]),
+    };
     state.select_layer(next);
 }
 
@@ -187,12 +199,13 @@ fn build_app_menu(
     lang: UiLang,
     appearance: Appearance,
     has_result: bool,
-    has_image: bool,
+    can_reanalyze: bool,
     on_diff: bool,
     can_export: bool,
     active_tab: InspectorTab,
 ) -> Vec<MenuItem> {
     let open_file_s = state.clone();
+    let open_folder_s = state.clone();
     let new_s = state.clone();
     let local_s = state.clone();
     let compare_s = state.clone();
@@ -235,6 +248,8 @@ fn build_app_menu(
             MenuItem::new(t(lang, "menu.open_local_file"))
                 .shortcut("mod+o")
                 .on_select(move || open_file_s.open_local_file_dialog()),
+            MenuItem::new(t(lang, "action.open_folder"))
+                .on_select(move || open_folder_s.open_local_folder()),
             MenuItem::new(t(lang, "menu.browse_local_images"))
                 .shortcut("mod+shift+o")
                 .on_select(move || local_s.open_local_picker()),
@@ -244,7 +259,7 @@ fn build_app_menu(
             MenuItem::separator(),
             MenuItem::new(t(lang, "cmd.reanalyze"))
                 .shortcut("mod+r")
-                .disabled(!has_image)
+                .disabled(!can_reanalyze)
                 .on_select(move || reanalyze_s.reanalyze_current_image()),
             MenuItem::new(t(lang, "cmd.export_md"))
                 .shortcut("mod+e")

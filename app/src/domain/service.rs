@@ -22,6 +22,7 @@ use crate::domain::model::{
     FilePreviewContent, ImageSourceKind, classify_file_preview, image_source_kind,
 };
 use crate::domain::treemap::{FsNode, build_final_tree};
+use crate::i18n::{format_user_error, ui_lang_from_core};
 
 const FILE_PREVIEW_LIMIT: u64 = 128 * 1024;
 const FILE_EXPORT_LIMIT: u64 = 100 * 1024 * 1024;
@@ -209,6 +210,7 @@ impl DivingService {
                     let _ = progress_tx.send(AnalyzeMessage::Progress(ev));
                 }));
 
+            let ui_lang = ui_lang_from_core(lang);
             let outcome = main_analyzer.analyze(&main_target, opts).await;
             main_done.store(true, Ordering::SeqCst);
             match outcome {
@@ -216,7 +218,10 @@ impl DivingService {
                     let _ = main_tx.send(AnalyzeMessage::Finished(result));
                 }
                 Err(err) => {
-                    let _ = main_tx.send(AnalyzeMessage::Failed(err.to_string()));
+                    let _ = main_tx.send(AnalyzeMessage::Failed(format_user_error(
+                        ui_lang,
+                        &err.to_string(),
+                    )));
                 }
             }
         });
@@ -280,16 +285,21 @@ impl DivingService {
                 analyzer.analyze(&target_ref, target_opts),
             );
 
+            let ui_lang = ui_lang_from_core(lang);
             let outcome = match (base_res, target_res) {
                 (Ok(base), Ok(target)) => {
                     let diff = Arc::new(diff_images(&base, &target));
                     DiffRunResult::Ready { diff, base, target }
                 }
-                (Err(b_err), Ok(_)) => DiffRunResult::BaseFailed(b_err.to_string()),
-                (Ok(_), Err(t_err)) => DiffRunResult::TargetFailed(t_err.to_string()),
+                (Err(b_err), Ok(_)) => {
+                    DiffRunResult::BaseFailed(format_user_error(ui_lang, &b_err.to_string()))
+                }
+                (Ok(_), Err(t_err)) => {
+                    DiffRunResult::TargetFailed(format_user_error(ui_lang, &t_err.to_string()))
+                }
                 (Err(b_err), Err(t_err)) => DiffRunResult::BothFailed {
-                    base: b_err.to_string(),
-                    target: t_err.to_string(),
+                    base: format_user_error(ui_lang, &b_err.to_string()),
+                    target: format_user_error(ui_lang, &t_err.to_string()),
                 },
             };
             let _ = tx.send(DiffMessage::Finished(outcome));
@@ -518,6 +528,12 @@ impl DivingService {
 
 fn format_image_target(image: &str, arch: Option<&str>) -> String {
     let trimmed = image.trim();
+    if matches!(
+        image_source_kind(trimmed),
+        ImageSourceKind::LocalDocker | ImageSourceKind::LocalPodman
+    ) {
+        return trimmed.to_owned();
+    }
     match arch.map(str::trim).filter(|a| !a.is_empty()) {
         Some(arch) if !trimmed.contains("?arch=") => format!("{trimmed}?arch={arch}"),
         _ => trimmed.to_owned(),

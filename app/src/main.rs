@@ -22,7 +22,6 @@ fn main() -> impl Termination {
         platform::AppSource::Rust(platform::Root::of::<App>().tokens(app_tokens())),
         platform::AppOptions {
             title: "Diving".to_owned(),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "io.github.vicanso.diving".to_owned(),
             size: (1280, 820),
             ..Default::default()

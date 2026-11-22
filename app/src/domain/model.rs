@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use bytesize::ByteSize;
 use diving_core::{
-    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op, REGISTRY_LOCAL_DOCKER,
-    REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, RuntimeCompat, parse_image_info,
+    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer, Op,
+    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, Recommendation,
+    RuntimeCompat, parse_image_info,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::{UiLang, t};
+use crate::i18n::{UiLang, t, tf};
 use crate::ui::{BadgeTone, FileOpKind, LayerOpcodeKind};
 
 /// Active top-level route inside the desktop shell.
@@ -72,6 +73,50 @@ pub enum LayerFilterMode {
     All,
     HasFiles,
     Large,
+}
+
+/// Unpack-size threshold (`1 MiB`) used by [`LayerFilterMode::Large`].
+pub const LARGE_LAYER_BYTES: u64 = 1_048_576;
+
+/// Whether a single image layer matches the active [`LayerFilterMode`].
+pub fn layer_matches_filter(layer: &ImageLayer, mode: LayerFilterMode) -> bool {
+    match mode {
+        LayerFilterMode::All => true,
+        LayerFilterMode::HasFiles => !layer.empty,
+        LayerFilterMode::Large => layer.unpack_size >= LARGE_LAYER_BYTES,
+    }
+}
+
+/// Returns the 0-based indices of layers visible under `mode`.
+pub fn visible_layer_indices(layers: &[ImageLayer], mode: LayerFilterMode) -> Vec<usize> {
+    layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| layer_matches_filter(layer, mode))
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Re-computes localized recommendation diffs on an existing [`ImageDiff`] after language switch.
+pub fn relocalize_image_diff(
+    diff: &ImageDiff,
+    base_recs: &[Recommendation],
+    target_recs: &[Recommendation],
+) -> ImageDiff {
+    let base_ids: HashSet<&str> = base_recs.iter().map(|r| r.id.as_str()).collect();
+    let target_ids: HashSet<&str> = target_recs.iter().map(|r| r.id.as_str()).collect();
+    let mut updated = diff.clone();
+    updated.new_recommendations = target_recs
+        .iter()
+        .filter(|r| !base_ids.contains(r.id.as_str()))
+        .cloned()
+        .collect();
+    updated.resolved_recommendations = base_recs
+        .iter()
+        .filter(|r| !target_ids.contains(r.id.as_str()))
+        .cloned()
+        .collect();
+    updated
 }
 
 /// Active visualization mode inside the `Treemap` tab.
@@ -292,6 +337,11 @@ impl FileTreeRow {
     /// Whether this row has real file bytes in the layer (directories and removed whiteouts do not).
     pub fn is_previewable(&self) -> bool {
         !self.is_dir && !matches!(self.op, Op::Removed)
+    }
+
+    /// Whether this row represents a symbolic link rather than a regular file.
+    pub fn is_symlink(&self) -> bool {
+        !self.is_dir && (self.mode.starts_with('l') || !self.link.is_empty())
     }
 }
 
@@ -519,6 +569,25 @@ pub fn flatten_indexed_tree(
                     max_size,
                     out,
                 );
+                // Directories can pass `min_size_bytes` via summed descendant sizes even
+                // when every individual child is smaller; when expanded, reveal those
+                // children instead of dropping the directory itself.
+                if out.len() == before_children && filter.min_size_bytes > 0 {
+                    let relaxed = FileTreeFilter {
+                        min_size_bytes: 0,
+                        ..filter.clone()
+                    };
+                    walk(
+                        &item.children,
+                        depth + 1,
+                        &relaxed,
+                        keyword_lower,
+                        expanded_set,
+                        collapsed_set,
+                        max_size,
+                        out,
+                    );
+                }
                 if out.len() == before_children && keyword_lower.is_empty() {
                     out.truncate(insert_idx);
                 }
@@ -636,6 +705,38 @@ pub fn format_hex_dump(bytes: &[u8]) -> String {
     out
 }
 
+/// Builds preview content for a symbolic link row so users see its target instead of `Empty`.
+pub fn symlink_preview_content(link: &str, lang: UiLang) -> FilePreviewContent {
+    let body = if link.trim().is_empty() {
+        t(lang, "sheet.symlink_no_target").to_owned()
+    } else {
+        tf(lang, "sheet.symlink_target", &[link.trim()])
+    };
+    let len = body.len() as u64;
+    FilePreviewContent::Text {
+        text: body,
+        language: None,
+        shown_bytes: len,
+        total_size: len,
+        truncated: false,
+    }
+}
+
+/// Classifies a file entry (distinguishing symlinks first) for the File Preview Sheet.
+pub fn classify_file_entry(
+    path: &str,
+    link: &str,
+    mode: &str,
+    bytes: &[u8],
+    total_size: u64,
+    lang: UiLang,
+) -> FilePreviewContent {
+    if mode.starts_with('l') || (!link.is_empty() && bytes.is_empty() && total_size == 0) {
+        return symlink_preview_content(link, lang);
+    }
+    classify_file_preview(path, bytes, total_size)
+}
+
 /// Classifies raw file bytes read from a layer tar into UTF-8 text, hex dump, or empty.
 pub fn classify_file_preview(path: &str, bytes: &[u8], total_size: u64) -> FilePreviewContent {
     if bytes.is_empty() && total_size == 0 {
@@ -645,14 +746,23 @@ pub fn classify_file_preview(path: &str, bytes: &[u8], total_size: u64) -> FileP
     let truncated = total_size > shown_bytes;
     let looks_binary = bytes.contains(&0);
 
-    if !looks_binary && let Ok(text) = from_utf8(bytes) {
-        return FilePreviewContent::Text {
-            text: text.to_owned(),
-            language: detect_code_language(path),
-            shown_bytes,
-            total_size,
-            truncated,
+    if !looks_binary {
+        let valid_text = match from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(err) if truncated && err.error_len().is_none() && err.valid_up_to() > 0 => {
+                from_utf8(&bytes[..err.valid_up_to()]).ok()
+            }
+            Err(_) => None,
         };
+        if let Some(text) = valid_text {
+            return FilePreviewContent::Text {
+                text: text.to_owned(),
+                language: detect_code_language(path),
+                shown_bytes: text.len() as u64,
+                total_size,
+                truncated,
+            };
+        }
     }
 
     let hex_slice = &bytes[..bytes.len().min(8 * 1024)];
@@ -812,10 +922,16 @@ pub fn format_runtime_compat(rc: &RuntimeCompat, lang: UiLang) -> Option<(String
         format!("{}: {}", rc.entrypoint, rc.libc)
     };
     if !rc.required_glibc.is_empty() {
-        cell.push_str(&format!(" (needs {})", rc.required_glibc));
+        cell.push_str(&format!(
+            " ({})",
+            tf(lang, "kpi.libc_needs", &[&rc.required_glibc])
+        ));
     }
     if !rc.os_glibc.is_empty() {
-        cell.push_str(&format!(" → host {}", rc.os_glibc));
+        cell.push_str(&format!(
+            " → {}",
+            tf(lang, "kpi.libc_host", &[&rc.os_glibc])
+        ));
     }
 
     let (status_key, tone) = match rc.issue.as_str() {
@@ -1040,5 +1156,140 @@ mod tests {
         remove_recent(&mut recent, "redis:alpine", "arm64");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].image, "nginx:alpine");
+    }
+
+    #[test]
+    fn flatten_file_tree_preserves_expanded_dir_under_min_size_filter() {
+        let tree = vec![dir(
+            "bundle",
+            180_000,
+            Op::Added,
+            vec![dir(
+                "chunks",
+                180_000,
+                Op::Added,
+                vec![
+                    file("a.js", 90_000, Op::Added),
+                    file("b.js", 90_000, Op::Added),
+                ],
+            )],
+        )];
+        let filter = FileTreeFilter {
+            min_size_bytes: 100 * 1024,
+            compact_paths: true,
+            ..Default::default()
+        };
+
+        let collapsed_rows = flatten_file_tree(&tree, &filter, &HashSet::new(), &HashSet::new());
+        assert_eq!(collapsed_rows.len(), 1);
+        assert_eq!(collapsed_rows[0].key, "bundle/chunks");
+        assert!(!collapsed_rows[0].expanded);
+
+        let expanded: HashSet<String> = ["bundle/chunks".to_owned()].into_iter().collect();
+        let expanded_rows = flatten_file_tree(&tree, &filter, &expanded, &HashSet::new());
+        assert_eq!(expanded_rows.len(), 3);
+        assert_eq!(expanded_rows[0].key, "bundle/chunks");
+        assert!(expanded_rows[0].expanded);
+        assert_eq!(expanded_rows[1].key, "bundle/chunks/a.js");
+        assert_eq!(expanded_rows[2].key, "bundle/chunks/b.js");
+    }
+
+    #[test]
+    fn classify_file_preview_handles_truncated_utf8_boundary() {
+        // 131_071 ASCII bytes + first byte of a 3-byte CJK character = 131_072 bytes (128 KiB slice).
+        let cjk = "中".as_bytes();
+        let mut buf = vec![b'a'; 128 * 1024 - 1];
+        buf.push(cjk[0]);
+        assert_eq!(buf.len(), 128 * 1024);
+
+        let preview = classify_file_preview("notes/cjk.txt", &buf, (128 * 1024 + 10) as u64);
+        match preview {
+            FilePreviewContent::Text {
+                text,
+                shown_bytes,
+                truncated,
+                ..
+            } => {
+                assert!(truncated);
+                assert_eq!(shown_bytes as usize, 128 * 1024 - 1);
+                assert_eq!(text.len(), 128 * 1024 - 1);
+            }
+            other => panic!("expected Text preview on UTF-8 boundary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_file_entry_distinguishes_symlinks() {
+        let preview =
+            classify_file_entry("usr/bin/sh", "busybox", "lrwxrwxrwx", &[], 0, UiLang::En);
+        assert_eq!(
+            preview,
+            FilePreviewContent::Text {
+                text: "Symbolic link → busybox".to_owned(),
+                language: None,
+                shown_bytes: "Symbolic link → busybox".len() as u64,
+                total_size: "Symbolic link → busybox".len() as u64,
+                truncated: false,
+            }
+        );
+
+        let zh = classify_file_entry("usr/bin/sh", "", "lrwxrwxrwx", &[], 0, UiLang::Zh);
+        assert_eq!(
+            zh,
+            FilePreviewContent::Text {
+                text: "符号链接（未记录目标路径）。".to_owned(),
+                language: None,
+                shown_bytes: "符号链接（未记录目标路径）。".len() as u64,
+                total_size: "符号链接（未记录目标路径）。".len() as u64,
+                truncated: false,
+            }
+        );
+    }
+
+    #[test]
+    fn visible_layer_indices_respects_filter_modes() {
+        let layers = vec![
+            ImageLayer {
+                empty: true,
+                unpack_size: 0,
+                ..Default::default()
+            },
+            ImageLayer {
+                empty: false,
+                unpack_size: 512,
+                ..Default::default()
+            },
+            ImageLayer {
+                empty: false,
+                unpack_size: LARGE_LAYER_BYTES,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            visible_layer_indices(&layers, LayerFilterMode::All),
+            [0, 1, 2]
+        );
+        assert_eq!(
+            visible_layer_indices(&layers, LayerFilterMode::HasFiles),
+            [1, 2]
+        );
+        assert_eq!(visible_layer_indices(&layers, LayerFilterMode::Large), [2]);
+    }
+
+    #[test]
+    fn format_runtime_compat_localizes_needs_and_host() {
+        let rc = RuntimeCompat {
+            entrypoint: "/app/server".to_owned(),
+            libc: "glibc".to_owned(),
+            required_glibc: "2.38".to_owned(),
+            needed_libs: Vec::new(),
+            os_glibc: "2.36".to_owned(),
+            issue: "glibc-too-old".to_owned(),
+        };
+        let (zh, tone) = format_runtime_compat(&rc, UiLang::Zh).expect("zh compat");
+        assert_eq!(tone, BadgeTone::Danger);
+        assert!(zh.contains("需要 2.38"));
+        assert!(zh.contains("宿主 2.36"));
+        assert!(zh.contains("宿主 glibc 过低"));
     }
 }

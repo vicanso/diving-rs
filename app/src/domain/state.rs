@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use chrono::Local;
 use diving_core::{
-    DockerAnalyzeResult, DockerAnalyzeSummary, ImageDiff, ImagePreview, LocalContainerImage,
-    LocalRuntime, ProgressEvent, diff_images,
+    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImagePreview,
+    LocalContainerImage, LocalRuntime, ProgressEvent, build_recommendations, diff_images,
 };
 use nsh_core::element::Owner;
 use nsh_core::file_dialog::{OpenDialog, SaveDialog};
@@ -19,8 +19,9 @@ use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
 
 use crate::domain::model::{
-    AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, InspectorTab,
-    LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes, remove_recent,
+    AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
+    InspectorTab, LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes,
+    image_source_kind, relocalize_image_diff, remove_recent, symlink_preview_content,
     upsert_recent,
 };
 use crate::domain::service::{
@@ -149,6 +150,8 @@ pub struct AppState {
     pub command_palette_open: Signal<bool>,
     pub provenance_open: Signal<bool>,
     pub provenance_query: Signal<String>,
+    result_seq: Signal<u64>,
+    compare_synced_source: Signal<(String, Option<SharedString>)>,
     root_owner: Owner,
     active_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
     active_diff_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
@@ -273,6 +276,8 @@ impl AppState {
             command_palette_open: signal(false),
             provenance_open: signal(false),
             provenance_query: signal(String::new()),
+            result_seq: signal(0),
+            compare_synced_source: signal((String::new(), None)),
             root_owner: Owner::current(),
             active_task: Rc::new(RefCell::new(None)),
             active_diff_task: Rc::new(RefCell::new(None)),
@@ -295,6 +300,52 @@ impl AppState {
     pub fn set_lang(&self, next: UiLang) {
         self.lang.set(next);
         let _ = Storage::set_item(KEY_LANG, next.as_storage_str());
+        let core_lang = next.to_core_lang();
+
+        if let Some(cur) = self.result.get_untracked() {
+            let mut updated = (*cur).clone();
+            updated.recommendations = build_recommendations(&updated, core_lang);
+            let updated = Arc::new(updated);
+            let summary = SharedRef::new(updated.summary());
+            self.result.set(Some(updated));
+            self.summary.set(Some(summary));
+        }
+
+        let mut base_recs = None;
+        if let Some(base) = self.diff_base_result.get_untracked() {
+            let mut updated = (*base).clone();
+            updated.recommendations = build_recommendations(&updated, core_lang);
+            base_recs = Some(updated.recommendations.clone());
+            self.diff_base_result.set(Some(Arc::new(updated)));
+        }
+
+        let mut target_recs = None;
+        if let Some(target) = self.diff_target_result.get_untracked() {
+            let mut updated = (*target).clone();
+            updated.recommendations = build_recommendations(&updated, core_lang);
+            target_recs = Some(updated.recommendations.clone());
+            self.diff_target_result.set(Some(Arc::new(updated)));
+        }
+
+        if let (Some(diff), Some(b), Some(t)) = (
+            self.diff_result.get_untracked(),
+            base_recs.as_deref(),
+            target_recs.as_deref(),
+        ) {
+            self.diff_result
+                .set(Some(SharedRef::new(relocalize_image_diff(&diff.0, b, t))));
+        }
+
+        if self.preview_sheet_open.get_untracked()
+            && let Some(target) = self.preview_target.get_untracked()
+            && target.mode.starts_with('l')
+            && let Some(res) = self.result.get_untracked()
+            && let Some(tree) = res.file_tree_list.get(target.layer_index)
+            && let Some(link) = find_tree_item_link(tree, &target.path)
+        {
+            self.preview_content
+                .set(Some(symlink_preview_content(&link, next)));
+        }
     }
 
     pub fn set_appearance(&self, next: Appearance) {
@@ -341,6 +392,89 @@ impl AppState {
         });
     }
 
+    /// Dismisses the active floating status notice immediately.
+    pub fn dismiss_status_notice(&self) {
+        self.notice_seq
+            .set(self.notice_seq.get_untracked().wrapping_add(1));
+        self.status_notice.set(None);
+    }
+
+    /// Whether any modal dialog, sheet, or command palette is currently open.
+    pub fn any_overlay_open(&self) -> bool {
+        self.command_palette_open.get_untracked()
+            || self.provenance_open.get_untracked()
+            || self.compare_dialog_open.get_untracked()
+            || self.local_picker_open.get_untracked()
+            || self.preview_sheet_open.get_untracked()
+    }
+
+    /// Closes all modal dialogs, sheets, and header search overlays.
+    pub fn close_all_modals(&self) {
+        self.command_palette_open.set(false);
+        self.provenance_open.set(false);
+        self.compare_dialog_open.set(false);
+        self.local_picker_open.set(false);
+        self.preview_sheet_open.set(false);
+        self.header_search_open.set(false);
+    }
+
+    /// Dismisses only the single top-most open modal/overlay or active search/filter input.
+    pub fn dismiss_top_overlay_or_search(&self) -> bool {
+        if self.command_palette_open.get_untracked() {
+            self.command_palette_open.set(false);
+            return true;
+        }
+        if self.provenance_open.get_untracked() {
+            self.provenance_open.set(false);
+            return true;
+        }
+        if self.compare_dialog_open.get_untracked() {
+            self.compare_dialog_open.set(false);
+            return true;
+        }
+        if self.local_picker_open.get_untracked() {
+            self.local_picker_open.set(false);
+            return true;
+        }
+        if self.preview_sheet_open.get_untracked() {
+            self.preview_sheet_open.set(false);
+            return true;
+        }
+        if self.header_search_open.get_untracked() {
+            self.close_header_search();
+            return true;
+        }
+        if self.route.get_untracked() == AppRoute::Inspector
+            && self.active_tab.get_untracked() == InspectorTab::FileTree
+            && !self.tree_keyword.get_untracked().is_empty()
+        {
+            self.tree_keyword.set(String::new());
+            return true;
+        }
+        false
+    }
+
+    /// Whether `Mod+R` / menu "Re-analyze" can run in the current route state.
+    pub fn can_reanalyze(&self) -> bool {
+        match self.route.get() {
+            AppRoute::Diff => {
+                !self.diff_base_ref.get().is_empty() && !self.diff_target_ref.get().is_empty()
+            }
+            AppRoute::Inspector | AppRoute::Landing => {
+                !self.current_image.get().is_empty() || !self.image_input.get().trim().is_empty()
+            }
+            AppRoute::Gallery => false,
+        }
+    }
+
+    /// Whether `Mod+E` / menu "Export Markdown report…" can run in the current route state.
+    pub fn can_export_markdown(&self) -> bool {
+        match self.route.get() {
+            AppRoute::Diff => self.diff_result.get().is_some(),
+            _ => self.result.get().is_some(),
+        }
+    }
+
     pub fn remove_recent_entry(&self, image: &str, arch: &str) {
         let mut updated = self.recent_images.get_untracked();
         remove_recent(&mut updated, image, arch);
@@ -367,27 +501,35 @@ impl AppState {
         if self.diff_loading.get_untracked() {
             self.cancel_diff();
         }
-        self.preview_sheet_open.set(false);
-        self.header_search_open.set(false);
+        self.close_all_modals();
         self.route.set(AppRoute::Landing);
     }
 
     pub fn open_gallery(&self) {
-        self.preview_sheet_open.set(false);
-        self.header_search_open.set(false);
+        self.close_all_modals();
         self.route.set(AppRoute::Gallery);
     }
 
     pub fn open_header_search(&self) {
-        self.header_search_open.set(true);
-        let input_ref = self.search_input_ref;
-        self.schedule_app_timeout(Duration::from_millis(20), move || {
-            input_ref.focus();
-        });
+        match self.route.get_untracked() {
+            AppRoute::Inspector => {
+                self.header_search_open.set(true);
+                let input_ref = self.search_input_ref;
+                self.schedule_app_timeout(Duration::from_millis(20), move || {
+                    input_ref.focus();
+                });
+            }
+            AppRoute::Diff => self.open_compare_dialog(),
+            AppRoute::Landing => {
+                self.search_input_ref.focus();
+            }
+            AppRoute::Gallery => {}
+        }
     }
 
     pub fn close_header_search(&self) {
         self.header_search_open.set(false);
+        self.search_input_ref.blur();
     }
 
     pub fn submit_current_input(&self) {
@@ -447,6 +589,14 @@ impl AppState {
 
         let next_id = self.request_id.get_untracked().wrapping_add(1);
         self.request_id.set(next_id);
+        let synced_arch = arch
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned)
+            .or_else(|| parse_explicit_arch_query(&trimmed))
+            .map(SharedString::from);
+        self.arch_input.set(synced_arch);
         self.image_input.set(trimmed.clone());
         self.pending_image.set(Some(trimmed.clone()));
         self.analyze_error.set(None);
@@ -598,6 +748,9 @@ impl AppState {
         res: Arc<DockerAnalyzeResult>,
     ) {
         let first_non_empty = res.layers.iter().position(|l| !l.empty).unwrap_or(0);
+        let next_result_seq = self.result_seq.get_untracked().wrapping_add(1);
+        self.result_seq.set(next_result_seq);
+        self.close_all_modals();
         self.pending_image.set(None);
         self.current_image.set(image.to_owned());
         self.image_input.set(image.to_owned());
@@ -612,18 +765,13 @@ impl AppState {
         self.analyze_error.set(None);
 
         // Precompute the merged final filesystem tree off the UI thread for instant Treemap tab switches.
-        let res_for_tree = Arc::clone(&res);
         let tree_rx = self.service.build_final_tree_async(res);
         let tree_state = self.clone();
         self.spawn_app_task(async move {
-            if let Ok(tree) = tree_rx.await {
-                let still_current = tree_state
-                    .result
-                    .get_untracked()
-                    .is_some_and(|cur| Arc::ptr_eq(&cur, &res_for_tree));
-                if still_current {
-                    tree_state.final_tree.set(Some(SharedRef(tree)));
-                }
+            if let Ok(tree) = tree_rx.await
+                && tree_state.result_seq.get_untracked() == next_result_seq
+            {
+                tree_state.final_tree.set(Some(SharedRef(tree)));
             }
         });
 
@@ -744,6 +892,16 @@ impl AppState {
             uid: row.uid,
             gid: row.gid,
         }));
+        if row.is_symlink() {
+            self.preview_loading.set(false);
+            self.preview_content.set(Some(symlink_preview_content(
+                &row.link,
+                self.lang.get_untracked(),
+            )));
+            self.preview_error.set(None);
+            self.preview_sheet_open.set(true);
+            return;
+        }
         self.preview_loading.set(true);
         self.preview_content.set(None);
         self.preview_error.set(None);
@@ -837,7 +995,25 @@ impl AppState {
             if let Ok(Some(paths)) = picked
                 && let Some(first) = paths.into_iter().next()
             {
-                let ref_str = format!("file://{}", first.display());
+                let path_str = first.display().to_string();
+                let ref_str = format!("file://{}", strip_windows_drive_leading_slash(&path_str));
+                state.analyze(ref_str, None);
+            }
+        });
+    }
+
+    /// Opens a folder picker dialog so Windows and Linux users can select OCI layout directories.
+    pub fn open_local_folder(&self) {
+        let lang = self.lang.get_untracked();
+        let title = t(lang, "action.open_folder").to_owned();
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let picked = pick_paths(OpenDialog::folders().title(title)).await;
+            if let Ok(Some(paths)) = picked
+                && let Some(first) = paths.into_iter().next()
+            {
+                let path_str = first.display().to_string();
+                let ref_str = format!("file://{}", strip_windows_drive_leading_slash(&path_str));
                 state.analyze(ref_str, None);
             }
         });
@@ -938,21 +1114,21 @@ impl AppState {
     }
 
     pub fn focus_search_input(&self) {
-        if matches!(
-            self.route.get_untracked(),
-            AppRoute::Inspector | AppRoute::Diff
-        ) {
-            self.open_header_search();
-        } else {
-            self.search_input_ref.focus();
+        if self.any_overlay_open() {
+            return;
         }
+        self.open_header_search();
     }
 
     pub fn focus_tree_filter(&self) {
-        if self.route.get_untracked() == AppRoute::Inspector {
-            self.active_tab.set(InspectorTab::FileTree);
-            self.tree_filter_ref.focus();
+        if self.any_overlay_open() || self.route.get_untracked() != AppRoute::Inspector {
+            return;
         }
+        self.active_tab.set(InspectorTab::FileTree);
+        let filter_ref = self.tree_filter_ref;
+        self.schedule_app_timeout(Duration::from_millis(20), move || {
+            filter_ref.focus();
+        });
     }
 
     pub fn toggle_command_palette(&self) {
@@ -971,6 +1147,8 @@ impl AppState {
         self.route.set(AppRoute::Inspector);
         self.active_tab.set(InspectorTab::FileTree);
         self.select_layer(layer_index);
+        self.tree_modifications_only.set(false);
+        self.tree_min_size.set(0);
         self.tree_keyword.set(path.clone());
         self.selected_file_path.set(Some(path));
     }
@@ -984,7 +1162,7 @@ impl AppState {
         let image_ref = if trimmed.starts_with("file://") {
             percent_decode_file_uri(trimmed)
         } else {
-            format!("file://{trimmed}")
+            format!("file://{}", strip_windows_drive_leading_slash(trimmed))
         };
         self.analyze(image_ref, None);
     }
@@ -1032,10 +1210,20 @@ impl AppState {
 
     pub fn open_compare_dialog(&self) {
         let current = self.current_image.get_untracked();
-        if !current.is_empty() && self.compare_target_input.get_untracked().trim().is_empty() {
-            self.compare_target_input.set(current);
-            self.compare_target_arch
-                .set(self.arch_input.get_untracked());
+        let current_arch = self.arch_input.get_untracked();
+        let source = (current.clone(), current_arch.clone());
+        if !current.is_empty()
+            && self.route.get_untracked() != AppRoute::Diff
+            && (self.compare_target_input.get_untracked().trim().is_empty()
+                || self.compare_synced_source.get_untracked() != source)
+        {
+            self.compare_target_input.set(current.clone());
+            self.compare_target_arch.set(current_arch);
+            if self.compare_base_input.get_untracked().trim() == current {
+                self.compare_base_input.set(String::new());
+                self.compare_base_arch.set(None);
+            }
+            self.compare_synced_source.set(source);
         }
         self.compare_dialog_open.set(true);
     }
@@ -1101,6 +1289,9 @@ impl AppState {
         );
         self.diff_base_ref.set(base.clone());
         self.diff_target_ref.set(target.clone());
+        self.diff_result.set(None);
+        self.diff_base_result.set(None);
+        self.diff_target_result.set(None);
         self.diff_error.set(None);
         self.diff_base_progress.set(None);
         self.diff_target_progress.set(None);
@@ -1203,18 +1394,32 @@ impl AppState {
     }
 
     pub fn open_diff_side(&self, is_target: bool) {
-        let (image_ref, res) = if is_target {
+        let (image_ref, explicit_arch, res) = if is_target {
             (
                 self.diff_target_ref.get_untracked(),
+                self.compare_target_arch.get_untracked(),
                 self.diff_target_result.get_untracked(),
             )
         } else {
             (
                 self.diff_base_ref.get_untracked(),
+                self.compare_base_arch.get_untracked(),
                 self.diff_base_result.get_untracked(),
             )
         };
         if let Some(res) = res {
+            self.abort_active_task();
+            self.request_id
+                .set(self.request_id.get_untracked().wrapping_add(1));
+            let synced_arch = explicit_arch
+                .filter(|a| !a.as_str().trim().is_empty())
+                .or_else(|| parse_explicit_arch_query(&image_ref).map(SharedString::from))
+                .or_else(|| {
+                    (image_source_kind(&image_ref) == ImageSourceKind::Registry
+                        && !res.arch.is_empty())
+                    .then(|| SharedString::from(res.arch.clone()))
+                });
+            self.arch_input.set(synced_arch);
             let summary = SharedRef::new(res.summary());
             self.activate_result(&image_ref, summary, res);
         }
@@ -1365,10 +1570,97 @@ fn percent_decode_file_uri(uri: &str) -> String {
         i += 1;
     }
     let decoded = String::from_utf8(out).unwrap_or_else(|_| rest.to_owned());
-    format!("file://{decoded}")
+    let normalized = strip_windows_drive_leading_slash(&decoded);
+    format!("file://{normalized}")
+}
+
+fn strip_windows_drive_leading_slash(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        &path[1..]
+    } else {
+        path
+    }
+}
+
+fn parse_explicit_arch_query(image_ref: &str) -> Option<String> {
+    if matches!(
+        image_source_kind(image_ref),
+        ImageSourceKind::LocalDocker | ImageSourceKind::LocalPodman
+    ) {
+        return None;
+    }
+    let query = image_ref.split_once('?')?.1;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=')
+            && k.trim() == "arch"
+        {
+            let arch = v.trim();
+            if !arch.is_empty() {
+                return Some(arch.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn find_tree_item_link(items: &[FileTreeItem], path: &str) -> Option<String> {
+    fn walk(items: &[FileTreeItem], prefix: &str, target: &str) -> Option<String> {
+        for item in items {
+            let key = if prefix.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{prefix}/{}", item.name)
+            };
+            if key == target && item.children.is_empty() {
+                return Some(item.link.clone());
+            }
+            if target.starts_with(&key)
+                && target.as_bytes().get(key.len()) == Some(&b'/')
+                && let Some(found) = walk(&item.children, &key, target)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(items, "", path)
 }
 
 fn short_digest(digest: &str) -> &str {
     let trimmed = digest.strip_prefix("sha256:").unwrap_or(digest);
     trimmed.get(..12).unwrap_or(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_uri_and_explicit_arch_helpers_work() {
+        assert_eq!(
+            percent_decode_file_uri("file:///C:/Users/demo/my%20image.tar"),
+            "file://C:/Users/demo/my image.tar"
+        );
+        assert_eq!(
+            percent_decode_file_uri("file:///D%3A/oci-layout"),
+            "file://D:/oci-layout"
+        );
+        assert_eq!(
+            percent_decode_file_uri("file:///Users/demo/image.tar"),
+            "file:///Users/demo/image.tar"
+        );
+        assert_eq!(
+            parse_explicit_arch_query("redis:alpine?arch=arm64"),
+            Some("arm64".to_owned())
+        );
+        assert_eq!(
+            parse_explicit_arch_query("file://C:/tmp/oci?arch=amd64"),
+            Some("amd64".to_owned())
+        );
+        assert_eq!(
+            parse_explicit_arch_query("docker://redis:alpine?arch=arm64"),
+            None
+        );
+    }
 }

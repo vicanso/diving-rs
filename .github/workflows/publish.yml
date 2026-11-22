@@ -449,6 +449,8 @@ jobs:
           echo "--- SHA256SUMS.txt ---"
           cat SHA256SUMS.txt
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt -R "$GITHUB_REPOSITORY" --clobber
+      - name: Publish release
+        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
 
   # Build each architecture on its native runner and push only the per-arch
   # digest. The `docker-merge` job below assembles the final multi-arch

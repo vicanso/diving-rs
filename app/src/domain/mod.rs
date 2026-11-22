@@ -7,12 +7,14 @@ pub mod treemap;
 
 pub use model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileProvenanceHit, FileTreeFilter, FileTreeRow,
-    ImageSourceKind, IndexedTree, IndexedTreeNode, InspectorTab, LayerFileCounts, LayerFilterMode,
-    RecentImageEntry, SharedRef, TreemapViewMode, WhatIfProjection, build_indexed_tree,
-    classify_file_preview, classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
-    findings_total_count, flatten_file_tree, flatten_indexed_tree, format_bytes,
-    format_command_lines, format_runtime_compat, image_source_kind, remove_recent,
-    search_file_provenance, upsert_recent,
+    ImageSourceKind, IndexedTree, IndexedTreeNode, InspectorTab, LARGE_LAYER_BYTES,
+    LayerFileCounts, LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode,
+    WhatIfProjection, build_indexed_tree, classify_file_entry, classify_file_preview,
+    classify_layer_opcode, compute_what_if_projection, count_layer_file_ops, findings_total_count,
+    flatten_file_tree, flatten_indexed_tree, format_bytes, format_command_lines,
+    format_runtime_compat, image_source_kind, layer_matches_filter, relocalize_image_diff,
+    remove_recent, search_file_provenance, symlink_preview_content, upsert_recent,
+    visible_layer_indices,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
 pub use state::{AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo};
