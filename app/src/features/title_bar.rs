@@ -9,7 +9,7 @@ use crate::i18n::{UiLang, t};
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, SelectItem, TabOption, UiSize, radius_control, theme,
     ui_bare_input_with_ref, ui_borderless_select, ui_button, ui_icon_button, ui_image_pill_button,
-    ui_menu, ui_menu_item, ui_menu_separator, ui_segmented, ui_tabs,
+    ui_menu, ui_menu_item, ui_menu_separator, ui_menu_trigger_icon, ui_segmented, ui_tabs,
 };
 
 fn appearance_icon(appearance: Appearance) -> IconName {
@@ -25,24 +25,24 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let lang = state.lang;
     let route = state.route;
     let has_result = state.result;
-    let diff_result = state.diff_result;
+    let diff_error = state.diff_error;
     let open_state = state.clone();
+    let folder_state = state.clone();
     let local_state = state.clone();
     let cmp_menu_state = state.clone();
+    let export_disabled_state = state.clone();
     let export_state = state.clone();
     let export_json_state = state.clone();
     let clean_state = state.clone();
     let gallery_state = state;
 
-    ui_menu(ui_icon_button(
+    ui_menu(ui_menu_trigger_icon(
         IconName::More,
         "More actions",
         Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
         ButtonVariant::Ghost,
         size,
         false,
-        false,
-        || {},
     ))
     .child(ui_menu_item(
         move || SharedString::from(t(lang.get(), "menu.open_local_file")),
@@ -50,6 +50,13 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
         Some("mod+o"),
         false,
         move || open_state.open_local_file_dialog(),
+    ))
+    .child(ui_menu_item(
+        move || SharedString::from(t(lang.get(), "action.open_folder")),
+        Some(IconName::FolderOpen),
+        None,
+        false,
+        move || folder_state.open_local_folder(),
     ))
     .child(ui_menu_item(
         move || SharedString::from(t(lang.get(), "menu.browse_local_images")),
@@ -70,11 +77,8 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
         Some(IconName::Download),
         Some("mod+e"),
         move || {
-            if route.get() == AppRoute::Diff {
-                diff_result.get().is_none()
-            } else {
-                has_result.get().is_none()
-            }
+            !export_disabled_state.can_export_markdown()
+                || (route.get() == AppRoute::Diff && diff_error.get().is_some())
         },
         move || {
             if export_state.route.get_untracked() == AppRoute::Diff {
@@ -114,58 +118,87 @@ pub fn content_header_bar(state: AppState) -> impl IntoElement {
     let sidebar_open = state.app_sidebar_open;
     let lang = state.lang;
 
+    when(
+        move || route.get() != AppRoute::Gallery,
+        move || {
+            let bar_state = state.clone();
+            view()
+                .h(px(48.0))
+                .w_full()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .pl(move || {
+                    if sidebar_open.get() {
+                        px(16.0)
+                    } else {
+                        px(title_bar().left.0.max(14.0))
+                    }
+                })
+                .pr(move || px(title_bar().right.0.max(14.0)))
+                .bg(move || theme().background)
+                .border_b_1()
+                .border_color(move || {
+                    if route.get() == AppRoute::Landing {
+                        AdaptiveColor::from(transparent_black())
+                    } else {
+                        theme().border
+                    }
+                })
+                .window_drag(true)
+                .child(dynamic(move || {
+                    let left_state = bar_state.clone();
+                    let left_nav = when(
+                        move || !sidebar_open.get(),
+                        move || collapsed_left_nav(left_state.clone(), lang),
+                    );
+
+                    match route.get() {
+                        AppRoute::Landing => {
+                            landing_header(bar_state.clone(), left_nav).into_element()
+                        }
+                        AppRoute::Inspector => {
+                            inspector_header(bar_state.clone(), left_nav).into_element()
+                        }
+                        AppRoute::Diff => diff_header(bar_state.clone(), left_nav).into_element(),
+                        AppRoute::Gallery => view().into_element(),
+                    }
+                }))
+        },
+    )
+}
+
+fn collapsed_left_nav(state: AppState, lang: Signal<UiLang>) -> impl IntoElement {
+    let toggle_state = state.clone();
+    let new_state = state;
+
     view()
-        .h(px(48.0))
-        .w_full()
-        .flex_shrink_0()
         .flex_row()
         .items_center()
-        .justify_between()
-        .gap_3()
-        .pl(move || {
-            if sidebar_open.get() {
-                px(16.0)
-            } else {
-                px(title_bar().left.0.max(14.0))
-            }
-        })
-        .pr(move || px(title_bar().right.0.max(14.0)))
-        .bg(move || theme().background)
-        .border_b_1()
-        .border_color(move || {
-            if route.get() == AppRoute::Landing {
-                AdaptiveColor::from(transparent_black())
-            } else {
-                theme().border
-            }
-        })
-        .window_drag(true)
-        .child(dynamic(move || {
-            let toggle_state = state.clone();
-            let toggle_btn = when(
-                move || !sidebar_open.get(),
-                move || {
-                    let s = toggle_state.clone();
-                    ui_icon_button(
-                        IconName::PanelLeft,
-                        "Toggle sidebar",
-                        Some(move || SharedString::from(t(lang.get(), "sidebar.toggle_tooltip"))),
-                        ButtonVariant::Ghost,
-                        UiSize::Sm,
-                        false,
-                        false,
-                        move || s.toggle_app_sidebar(),
-                    )
-                },
-            );
-
-            match route.get() {
-                AppRoute::Landing => landing_header(state.clone(), toggle_btn).into_element(),
-                AppRoute::Inspector => inspector_header(state.clone(), toggle_btn).into_element(),
-                AppRoute::Diff => diff_header(state.clone(), toggle_btn).into_element(),
-                AppRoute::Gallery => gallery_header(state.clone(), toggle_btn).into_element(),
-            }
-        }))
+        .gap_1()
+        .flex_shrink_0()
+        .child(ui_icon_button(
+            IconName::PanelLeft,
+            "Toggle sidebar",
+            Some(move || SharedString::from(t(lang.get(), "sidebar.toggle_tooltip"))),
+            ButtonVariant::Ghost,
+            UiSize::Sm,
+            false,
+            false,
+            move || toggle_state.toggle_app_sidebar(),
+        ))
+        .child(ui_icon_button(
+            IconName::Plus,
+            "New analysis",
+            Some(move || SharedString::from(t(lang.get(), "sidebar.new_analysis"))),
+            ButtonVariant::Ghost,
+            UiSize::Sm,
+            false,
+            false,
+            move || new_state.navigate_home(),
+        ))
 }
 
 fn collapsed_utilities(state: AppState) -> impl IntoElement {
@@ -179,7 +212,7 @@ fn collapsed_utilities(state: AppState) -> impl IntoElement {
     view()
         .flex_row()
         .items_center()
-        .gap_1p5()
+        .gap_1()
         .flex_shrink_0()
         .window_drag(false)
         .child(ui_icon_button(
@@ -219,7 +252,7 @@ fn collapsed_utilities(state: AppState) -> impl IntoElement {
         .child(more_actions_menu(menu_state, UiSize::Sm))
 }
 
-fn landing_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElement {
+fn landing_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement {
     let sidebar_open = state.app_sidebar_open;
     let util_state = state;
 
@@ -234,7 +267,7 @@ fn landing_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoEle
                 .flex_row()
                 .items_center()
                 .window_drag(false)
-                .child(toggle_btn),
+                .child(left_nav),
         )
         .child(when(
             move || !sidebar_open.get(),
@@ -242,7 +275,7 @@ fn landing_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoEle
         ))
 }
 
-fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElement {
+fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement {
     let lang = state.lang;
     let sidebar_open = state.app_sidebar_open;
     let header_search_open = state.header_search_open;
@@ -251,8 +284,10 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
 
     let cmp_state = state.clone();
     let refresh_state = state.clone();
+    let refresh_disabled_state = state.clone();
     let export_state = state.clone();
-    let menu_state = state.clone();
+    let export_disabled_state = state.clone();
+    let util_state = state.clone();
     let inline_state = state.clone();
     let pill_state = state.clone();
     let tabs_state = state;
@@ -264,16 +299,16 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
         .flex_row()
         .items_center()
         .justify_between()
-        .gap_3()
+        .gap(move || if compact.get() { px(8.0) } else { px(12.0) })
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
                 .min_w(px(0.0))
-                .when(header_search_open.get(), |el| el.flex_1().max_w(px(460.0)))
+                .style_when(header_search_open, |s| s.flex_1().max_w(px(460.0)))
                 .window_drag(false)
-                .child(toggle_btn)
+                .child(left_nav)
                 .child(dynamic(move || {
                     if header_search_open.get() {
                         inline_header_search_bar(inline_state.clone()).into_element()
@@ -281,24 +316,33 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
                         let open_search = pill_state.clone();
                         let cur_img = pill_state.current_image;
                         let cur_res = pill_state.result;
-                        ui_image_pill_button(
-                            move || {
-                                let name = cur_img.get();
-                                if name.is_empty() {
-                                    SharedString::from(t(lang.get(), "common.image_placeholder"))
-                                } else {
-                                    SharedString::from(name)
-                                }
-                            },
-                            move || {
-                                SharedString::from(
-                                    cur_res.get().map(|r| r.arch.clone()).unwrap_or_default(),
-                                )
-                            },
-                            move || SharedString::from(t(lang.get(), "header.switch_image_hint")),
-                            move || open_search.open_header_search(),
-                        )
-                        .into_element()
+                        view()
+                            .min_w(px(0.0))
+                            .flex_shrink(1.0)
+                            .style_when(move || compact.get(), |s| s.max_w(px(136.0)))
+                            .child(ui_image_pill_button(
+                                move || {
+                                    let name = cur_img.get();
+                                    if name.is_empty() {
+                                        SharedString::from(t(
+                                            lang.get(),
+                                            "common.image_placeholder",
+                                        ))
+                                    } else {
+                                        SharedString::from(name)
+                                    }
+                                },
+                                move || {
+                                    SharedString::from(
+                                        cur_res.get().map(|r| r.arch.clone()).unwrap_or_default(),
+                                    )
+                                },
+                                move || {
+                                    SharedString::from(t(lang.get(), "header.switch_image_hint"))
+                                },
+                                move || open_search.open_header_search(),
+                            ))
+                            .into_element()
                     }
                 })),
         )
@@ -310,7 +354,7 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
             view()
                 .flex_row()
                 .items_center()
-                .gap_1p5()
+                .gap_1()
                 .flex_shrink_0()
                 .window_drag(false)
                 .child(dynamic(move || {
@@ -348,7 +392,7 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
                     ButtonVariant::Ghost,
                     UiSize::Sm,
                     false,
-                    is_loading,
+                    move || is_loading.get() || !refresh_disabled_state.can_reanalyze(),
                     move || refresh_state.reanalyze_current_image(),
                 ))
                 .child(ui_icon_button(
@@ -358,12 +402,12 @@ fn inspector_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoE
                     ButtonVariant::Ghost,
                     UiSize::Sm,
                     false,
-                    move || has_result.get().is_none(),
+                    move || !export_disabled_state.can_export_markdown(),
                     move || export_state.export_markdown_report(),
                 ))
                 .child(when(
                     move || !sidebar_open.get(),
-                    move || more_actions_menu(menu_state.clone(), UiSize::Sm),
+                    move || collapsed_utilities(util_state.clone()),
                 )),
         )
 }
@@ -455,7 +499,7 @@ fn inline_header_search_bar(state: AppState) -> impl IntoElement {
         .child(ui_icon_button(
             IconName::Close,
             "Close image switcher",
-            Some("Close (Esc)"),
+            Some(move || SharedString::from(t(lang.get(), "common.close_esc"))),
             ButtonVariant::Ghost,
             UiSize::Xs,
             false,
@@ -516,14 +560,18 @@ fn inspector_header_tabs(state: AppState) -> impl IntoElement {
     ))
 }
 
-fn diff_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElement {
+fn diff_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement {
     let lang = state.lang;
+    let sidebar_open = state.app_sidebar_open;
     let diff_result = state.diff_result;
+    let diff_error = state.diff_error;
     let swap_state = state.clone();
     let open_base_state = state.clone();
     let open_target_state = state.clone();
     let cmp_state = state.clone();
-    let export_state = state;
+    let export_state = state.clone();
+    let util_state = state;
+    let compact = computed(move || window().width < px(1120.0));
 
     view()
         .flex_1()
@@ -531,14 +579,14 @@ fn diff_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElemen
         .flex_row()
         .items_center()
         .justify_between()
-        .gap_3()
+        .gap_2()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_2()
                 .window_drag(false)
-                .child(toggle_btn)
+                .child(left_nav)
                 .child(
                     text(move || t(lang.get(), "diff.title"))
                         .text_sm()
@@ -546,100 +594,196 @@ fn diff_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElemen
                         .text_color(move || theme().foreground),
                 ),
         )
-        .child(when(
-            move || diff_result.get().is_some(),
-            move || {
-                let s_swap = swap_state.clone();
-                let s_base = open_base_state.clone();
-                let s_target = open_target_state.clone();
-                let s_cmp = cmp_state.clone();
-                let s_export = export_state.clone();
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .flex_shrink_0()
-                    .window_drag(false)
-                    .child(ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.swap")),
-                        ButtonVariant::Outline,
-                        UiSize::Sm,
-                        Some(IconName::Swap),
-                        false,
-                        false,
-                        move || s_swap.swap_diff(),
-                    ))
-                    .child(ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.open_base")),
-                        ButtonVariant::Outline,
-                        UiSize::Sm,
-                        None,
-                        false,
-                        false,
-                        move || s_base.open_diff_side(false),
-                    ))
-                    .child(ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.open_target")),
-                        ButtonVariant::Outline,
-                        UiSize::Sm,
-                        None,
-                        false,
-                        false,
-                        move || s_target.open_diff_side(true),
-                    ))
-                    .child(ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.compare_with")),
-                        ButtonVariant::Outline,
-                        UiSize::Sm,
-                        None,
-                        false,
-                        false,
-                        move || s_cmp.open_compare_dialog(),
-                    ))
-                    .child(ui_button(
-                        move || SharedString::from(t(lang.get(), "diff.export_md")),
-                        ButtonVariant::Default,
-                        UiSize::Sm,
-                        Some(IconName::Download),
-                        false,
-                        false,
-                        move || s_export.export_diff_markdown(),
-                    ))
-            },
-        ))
-}
-
-fn gallery_header(state: AppState, toggle_btn: impl IntoElement) -> impl IntoElement {
-    let lang = state.lang;
-    let back_state = state;
-
-    view()
-        .flex_1()
-        .min_w(px(0.0))
-        .flex_row()
-        .items_center()
-        .justify_between()
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
+                .flex_shrink_0()
                 .window_drag(false)
-                .child(toggle_btn)
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "nav.back_home")),
-                    ButtonVariant::Ghost,
-                    UiSize::Sm,
-                    None,
-                    false,
-                    false,
-                    move || back_state.navigate_home(),
+                .child(when(
+                    move || diff_result.get().is_some() && diff_error.get().is_none(),
+                    move || {
+                        let s_swap = swap_state.clone();
+                        let s_base = open_base_state.clone();
+                        let s_target = open_target_state.clone();
+                        let s_cmp = cmp_state.clone();
+                        let s_export = export_state.clone();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .flex_shrink_0()
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "diff.swap")),
+                                ButtonVariant::Outline,
+                                UiSize::Sm,
+                                Some(IconName::Swap),
+                                false,
+                                false,
+                                move || s_swap.swap_diff(),
+                            ))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "diff.open_base")),
+                                ButtonVariant::Outline,
+                                UiSize::Sm,
+                                None,
+                                false,
+                                false,
+                                move || s_base.open_diff_side(false),
+                            ))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "diff.open_target")),
+                                ButtonVariant::Outline,
+                                UiSize::Sm,
+                                None,
+                                false,
+                                false,
+                                move || s_target.open_diff_side(true),
+                            ))
+                            .child(dynamic(move || {
+                                let s = s_cmp.clone();
+                                if compact.get() {
+                                    ui_icon_button(
+                                        IconName::Compare,
+                                        "Compare with…",
+                                        Some(move || {
+                                            SharedString::from(t(lang.get(), "diff.compare_with"))
+                                        }),
+                                        ButtonVariant::Ghost,
+                                        UiSize::Sm,
+                                        false,
+                                        false,
+                                        move || s.open_compare_dialog(),
+                                    )
+                                    .into_element()
+                                } else {
+                                    ui_button(
+                                        move || {
+                                            SharedString::from(t(lang.get(), "diff.compare_with"))
+                                        },
+                                        ButtonVariant::Outline,
+                                        UiSize::Sm,
+                                        None,
+                                        false,
+                                        false,
+                                        move || s.open_compare_dialog(),
+                                    )
+                                    .into_element()
+                                }
+                            }))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "diff.export_md")),
+                                ButtonVariant::Default,
+                                UiSize::Sm,
+                                Some(IconName::Download),
+                                false,
+                                false,
+                                move || s_export.export_diff_markdown(),
+                            ))
+                    },
                 ))
-                .child(
-                    text(move || t(lang.get(), "nav.ui_gallery"))
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(move || theme().foreground),
-                ),
+                .child(when(
+                    move || !sidebar_open.get(),
+                    move || collapsed_utilities(util_state.clone()),
+                )),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::{DockerAnalyzeResult, ImageDiff};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::{DivingService, SharedRef};
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn CollapsedHeaderHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.app_sidebar_open.set(false);
+        state.route.set(AppRoute::Inspector);
+        state.current_image.set("redis:alpine".to_owned());
+        state
+            .result
+            .set(Some(Arc::new(DockerAnalyzeResult::default())));
+        state.summary.set(Some(SharedRef::new(
+            DockerAnalyzeResult::default().summary(),
+        )));
+
+        let diff_state = state.clone();
+        let gallery_state = state.clone();
+
+        view()
+            .flex_col()
+            .child(content_header_bar(state))
+            .child(ui_button(
+                "GoDiff",
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || {
+                    diff_state.route.set(AppRoute::Diff);
+                    diff_state
+                        .diff_result
+                        .set(Some(SharedRef::new(ImageDiff::default())));
+                },
+            ))
+            .child(ui_button(
+                "GoGallery",
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || gallery_state.open_gallery(),
+            ))
+    }
+
+    #[test]
+    fn collapsed_header_exposes_utilities_more_menu_and_hides_on_gallery() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<CollapsedHeaderHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start collapsed header harness");
+        app.wait_for_within("label:New analysis", Duration::from_secs(3))
+            .expect("collapsed + button on Inspector");
+        assert_eq!(app.screen().matches("label:Open Command Palette"), Ok(true));
+        assert_eq!(app.screen().matches("label:Switch color theme"), Ok(true));
+        assert!(app.shows("EN"));
+
+        // Clicking More actions opens the popup menu cleanly.
+        app.press("label:More actions")
+            .expect("press More actions trigger");
+        app.wait_for_within("role:menuitem[Open OCI folder…]", Duration::from_secs(3))
+            .expect("More actions menu opened");
+        app.press_key("escape").expect("close menu");
+
+        // Switch to Diff and verify utilities remain mounted.
+        app.press("GoDiff").expect("switch to Diff");
+        app.wait_for_within("Swap", Duration::from_secs(3))
+            .expect("Diff actions visible");
+        assert_eq!(app.screen().matches("label:New analysis"), Ok(true));
+        assert_eq!(app.screen().matches("label:Open Command Palette"), Ok(true));
+        assert_eq!(app.screen().matches("label:More actions"), Ok(true));
+
+        // Switch to Gallery: content_header_bar unmounts to avoid double header.
+        app.press("GoGallery").expect("switch to Gallery");
+        app.wait_for_gone("Swap", Duration::from_secs(3))
+            .expect("header collapsed on Gallery");
+        assert_eq!(app.screen().matches("label:New analysis"), Ok(false));
+    }
 }

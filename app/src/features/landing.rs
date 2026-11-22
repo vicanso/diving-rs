@@ -4,7 +4,7 @@ use nsh_core::prelude::*;
 
 use crate::domain::{AppState, format_bytes};
 use crate::features::arch_select_items;
-use crate::i18n::{t, tf};
+use crate::i18n::{format_user_error, t, tf};
 use crate::ui::{
     BannerTone, ButtonVariant, IconName, UiSize, border_strong, font_mono_family, radius_control,
     radius_lg, text_tertiary, theme, ui_action_card, ui_banner, ui_bare_input_with_ref,
@@ -22,17 +22,20 @@ const SAMPLE_IMAGES: &[&str] = &[
 pub fn landing_view(state: AppState) -> impl IntoElement {
     let err_cond = state.clone();
     let err_view = state.clone();
-    let notice_cond = state.clone();
-    let notice_view = state.clone();
     let preview_cond = state.clone();
     let preview_view = state.clone();
-    let compact_height = window().height < px(700.0);
 
     scroll().flex_1().child(
         view()
             .w_full()
             .items_center()
-            .pt(if compact_height { px(36.0) } else { px(88.0) })
+            .pt(move || {
+                if window().height < px(700.0) {
+                    px(36.0)
+                } else {
+                    px(88.0)
+                }
+            })
             .pb_8()
             .px_6()
             .child(
@@ -50,19 +53,6 @@ pub fn landing_view(state: AppState) -> impl IntoElement {
                         move || error_banner(err_view.clone()),
                     ))
                     .child(when(
-                        move || notice_cond.status_notice.get().is_some(),
-                        move || {
-                            let s = notice_view.clone();
-                            ui_banner(
-                                BannerTone::Info,
-                                move || {
-                                    SharedString::from(s.status_notice.get().unwrap_or_default())
-                                },
-                                None,
-                            )
-                        },
-                    ))
-                    .child(when(
                         move || {
                             preview_cond.is_loading.get()
                                 && (preview_cond.show_preview_card.get()
@@ -77,23 +67,40 @@ pub fn landing_view(state: AppState) -> impl IntoElement {
 fn launcher_heading(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     view()
-        .flex_row()
-        .items_center()
-        .gap_3()
+        .flex_col()
+        .gap_2()
         .child(
             view()
-                .size(px(32.0))
+                .flex_row()
                 .items_center()
-                .justify_center()
-                .rounded(radius_control)
-                .bg(move || theme().primary.opacity(0.12))
-                .child(ui_icon(IconName::Logo, px(18.0), move || theme().primary)),
+                .gap_2p5()
+                .child(
+                    view()
+                        .size(px(28.0))
+                        .items_center()
+                        .justify_center()
+                        .rounded(radius_control)
+                        .bg(move || theme().primary.opacity(0.12))
+                        .child(ui_icon(IconName::Logo, px(16.0), move || theme().primary)),
+                )
+                .child(
+                    text(move || t(lang.get(), "landing.eyebrow"))
+                        .text_xs()
+                        .font_family(font_mono_family())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || theme().muted_foreground),
+                ),
         )
         .child(
             text(move || t(lang.get(), "landing.title"))
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_2xl()
+                .font_weight(FontWeight::BOLD)
                 .text_color(move || theme().foreground),
+        )
+        .child(
+            text(move || t(lang.get(), "landing.lead"))
+                .text_sm()
+                .text_color(move || theme().muted_foreground),
         )
 }
 
@@ -235,7 +242,10 @@ fn error_banner(state: AppState) -> impl IntoElement {
     let retry_state = state.clone();
     ui_banner(
         BannerTone::Danger,
-        move || SharedString::from(state.analyze_error.get().unwrap_or_default()),
+        move || {
+            let raw = state.analyze_error.get().unwrap_or_default();
+            SharedString::from(format_user_error(lang.get(), &raw))
+        },
         Some(
             ui_button(
                 move || SharedString::from(t(lang.get(), "landing.retry")),
@@ -324,4 +334,45 @@ fn progressive_preview_card(state: AppState) -> impl IntoElement {
                 }
             })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::DivingService;
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn LandingHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state
+            .analyze_error
+            .set(Some("Tar fail: unexpected EOF".to_owned()));
+        landing_view(state)
+    }
+
+    #[test]
+    fn landing_renders_eyebrow_lead_and_friendly_tar_error() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<LandingHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start landing harness");
+        app.wait_for_within("Docker · OCI · layers", Duration::from_secs(3))
+            .expect("landing eyebrow rendered");
+        assert!(app.shows("Inspect container image"));
+        assert!(app.shows("Inspect layer waste, file trees, secrets, and runtime compatibility across Docker/OCI images."));
+        assert!(app.shows("Unable to read local archive: unexpected EOF"));
+        assert!(!app.shows("Tar fail:"));
+    }
 }

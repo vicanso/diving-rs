@@ -87,10 +87,10 @@ fn section_heading(label: impl IntoReactive<SharedString>) -> impl IntoElement {
     text(label)
         .px_2()
         .pb_1()
-        .text_size(px(11.0))
-        .font_weight(FontWeight::MEDIUM)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
         .letter_spacing(px(0.3))
-        .text_color(text_tertiary)
+        .text_color(move || theme().muted_foreground)
 }
 
 fn sidebar_workbench_nav(state: AppState) -> impl IntoElement {
@@ -100,6 +100,7 @@ fn sidebar_workbench_nav(state: AppState) -> impl IntoElement {
     let local_state = state.clone();
     let cmp_state = state.clone();
     let file_state = state.clone();
+    let folder_state = state.clone();
 
     view()
         .px_2p5()
@@ -144,6 +145,30 @@ fn sidebar_workbench_nav(state: AppState) -> impl IntoElement {
             false,
             move || file_state.open_local_file_dialog(),
         ))
+        .child(ui_sidebar_item(
+            move || SharedString::from(t(lang.get(), "action.open_folder")),
+            IconName::FolderOpen,
+            None,
+            false,
+            move || folder_state.open_local_folder(),
+        ))
+}
+
+fn format_recent_meta(entry: &RecentImageEntry, lang: UiLang) -> String {
+    let stale_suffix = if entry.stale {
+        format!(" · {}", t(lang, "recent.stale_badge"))
+    } else {
+        String::new()
+    };
+    if entry.arch.is_empty() {
+        format!("{}{stale_suffix}", format_bytes(entry.total_size))
+    } else {
+        format!(
+            "{} · {}{stale_suffix}",
+            entry.arch,
+            format_bytes(entry.total_size)
+        )
+    }
 }
 
 fn sidebar_recent_list(state: AppState) -> impl IntoElement {
@@ -151,6 +176,8 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
     let recent = state.recent_images;
     let route = state.route;
     let current_image = state.current_image;
+    let arch_input = state.arch_input;
+    let result_sig = state.result;
     let clear_state = state.clone();
 
     view()
@@ -171,15 +198,18 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
                     move || !recent.get().is_empty(),
                     move || {
                         let s = clear_state.clone();
-                        ui_button(
-                            move || SharedString::from(t(lang.get(), "recent.clear_all")),
-                            ButtonVariant::Ghost,
-                            UiSize::Xs,
-                            None,
-                            false,
-                            false,
-                            move || s.clear_recent_images(),
-                        )
+                        view()
+                            .opacity(0.72)
+                            .hover(|st| st.opacity(1.0))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "recent.clear_all")),
+                                ButtonVariant::Ghost,
+                                UiSize::Xs,
+                                None,
+                                false,
+                                false,
+                                move || s.clear_recent_images(),
+                            ))
                     },
                 )),
         )
@@ -204,54 +234,57 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
                         move || recent.get(),
                         |entry: &RecentImageEntry| format!("{}@{}", entry.image, entry.arch),
                         move |entry, _| {
-                            let click_state = state.clone();
-                            let remove_state = state.clone();
-                            let snap = entry.get_untracked();
-                            let click_entry = snap.clone();
-                            let remove_img = snap.image.clone();
-                            let remove_arch = snap.arch.clone();
-                            let entry_name = snap.image.clone();
-                            let stale_suffix = if snap.stale {
-                                format!(" · {}", t(lang.get_untracked(), "recent.stale_badge"))
-                            } else {
-                                String::new()
-                            };
-                            let meta = if snap.arch.is_empty() {
-                                format!("{}{stale_suffix}", format_bytes(snap.total_size))
-                            } else {
-                                format!(
-                                    "{} · {}{stale_suffix}",
-                                    snap.arch,
-                                    format_bytes(snap.total_size)
-                                )
-                            };
-                            let score_label = format!("{}%", snap.score);
+                            let row_state = state.clone();
+                            dynamic(move || {
+                                let snap = entry.get();
+                                let ui_lang = lang.get();
+                                let click_state = row_state.clone();
+                                let remove_state = row_state.clone();
+                                let click_entry = snap.clone();
+                                let remove_img = snap.image.clone();
+                                let remove_arch = snap.arch.clone();
+                                let entry_name = snap.image.clone();
+                                let entry_arch = snap.arch.clone();
+                                let meta = format_recent_meta(&snap, ui_lang);
+                                let score_label = format!("{}%", snap.score);
 
-                            ui_context_menu(
-                                ui_recent_item(
-                                    SharedString::from(snap.image),
-                                    SharedString::from(meta),
-                                    SharedString::from(score_label),
-                                    snap.score,
+                                ui_context_menu(
+                                    ui_recent_item(
+                                        SharedString::from(snap.image),
+                                        SharedString::from(meta),
+                                        SharedString::from(score_label),
+                                        snap.score,
+                                        move || {
+                                            let active_arch = arch_input
+                                                .get()
+                                                .map(|a| a.as_str().trim().to_owned())
+                                                .filter(|a| !a.is_empty())
+                                                .or_else(|| {
+                                                    result_sig.get().map(|r| r.arch.clone())
+                                                })
+                                                .unwrap_or_default();
+                                            route.get() == AppRoute::Inspector
+                                                && current_image.get() == entry_name
+                                                && active_arch == entry_arch
+                                        },
+                                        move || {
+                                            let arch = (!click_entry.arch.is_empty())
+                                                .then(|| click_entry.arch.clone());
+                                            click_state.analyze(click_entry.image.clone(), arch);
+                                        },
+                                    ),
+                                    |_| {},
+                                )
+                                .child(ui_menu_item(
+                                    move || SharedString::from(t(lang.get(), "recent.remove")),
+                                    Some(IconName::Close),
+                                    None,
+                                    false,
                                     move || {
-                                        route.get() == AppRoute::Inspector
-                                            && current_image.get() == entry_name
+                                        remove_state.remove_recent_entry(&remove_img, &remove_arch)
                                     },
-                                    move || {
-                                        let arch = (!click_entry.arch.is_empty())
-                                            .then(|| click_entry.arch.clone());
-                                        click_state.analyze(click_entry.image.clone(), arch);
-                                    },
-                                ),
-                                |_| {},
-                            )
-                            .child(ui_menu_item(
-                                move || SharedString::from(t(lang.get(), "recent.remove")),
-                                Some(IconName::Close),
-                                None,
-                                false,
-                                move || remove_state.remove_recent_entry(&remove_img, &remove_arch),
-                            ))
+                                ))
+                            })
                         },
                     )),
             ),
@@ -294,7 +327,7 @@ fn sidebar_footer(state: AppState) -> impl IntoElement {
                         )
                         .child(
                             text(move || t(lang.get(), "app.version_badge"))
-                                .text_size(px(11.0))
+                                .text_xs()
                                 .font_family(font_mono_family())
                                 .text_color(text_tertiary),
                         ),
@@ -350,4 +383,76 @@ fn sidebar_footer(state: AppState) -> impl IntoElement {
                     move |next| lang_state.set_lang(next),
                 )),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::DockerAnalyzeResult;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::DivingService;
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn SidebarRecentHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.route.set(AppRoute::Inspector);
+        state.current_image.set("redis:alpine".to_owned());
+        state.arch_input.set(Some(SharedString::from("arm64")));
+        let res = DockerAnalyzeResult {
+            arch: "arm64".to_owned(),
+            ..Default::default()
+        };
+        state.result.set(Some(Arc::new(res)));
+        state.recent_images.set(vec![
+            RecentImageEntry {
+                image: "redis:alpine".to_owned(),
+                arch: "amd64".to_owned(),
+                score: 98,
+                total_size: 1024 * 1024,
+                analyzed_at: "2026-11-22 10:00".to_owned(),
+                stale: true,
+            },
+            RecentImageEntry {
+                image: "redis:alpine".to_owned(),
+                arch: "arm64".to_owned(),
+                score: 99,
+                total_size: 2 * 1024 * 1024,
+                analyzed_at: "2026-11-22 10:01".to_owned(),
+                stale: true,
+            },
+        ]);
+        app_sidebar(state)
+    }
+
+    #[test]
+    fn sidebar_recent_rows_relocalize_and_match_arch_distinctly() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(400.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<SidebarRecentHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start sidebar recent harness");
+        app.wait_for_within("Open OCI folder…", Duration::from_secs(3))
+            .expect("folder action visible in sidebar");
+        assert!(app.shows("amd64 · 1.0 MiB · stale"));
+        assert!(app.shows("arm64 · 2.0 MiB · stale"));
+        assert_eq!(app.screen().selected("role:button[/98%/]"), Ok(false));
+        assert_eq!(app.screen().selected("role:button[/99%/]"), Ok(true));
+
+        app.press("中").expect("switch sidebar lang to ZH");
+        app.wait_for_within("打开 OCI 目录…", Duration::from_secs(3))
+            .expect("folder action localized");
+        app.wait_for_within("arm64 · 2.0 MiB · 快照", Duration::from_secs(3))
+            .expect("stale badge in recent row reactively relocalized");
+    }
 }

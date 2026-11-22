@@ -5,9 +5,14 @@ use std::sync::Arc;
 use diving_core::{ChangeSet, DiffLayer, ImageDiff, Recommendation};
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, DiffErrorState, DiffFileTab, classify_layer_opcode, format_bytes};
+use crate::domain::{
+    AppState, DiffErrorState, DiffFileTab, SharedRef, classify_layer_opcode, format_bytes,
+};
 use crate::features::arch_select_items;
-use crate::i18n::{UiLang, t, tf};
+use crate::i18n::{
+    UiLang, format_shared_base_layers, format_user_error, localize_category, localize_severity,
+    strip_inline_markdown, t, tf,
+};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, TabOption, UiSize, diverge_down, diverge_up,
     font_mono_family, radius_control, radius_inset, theme, ui_badge, ui_banner, ui_button,
@@ -16,6 +21,8 @@ use crate::ui::{
 };
 
 const MINUS_SIGN: char = '−';
+const DIFF_FILE_ROW_HEIGHT: f32 = 28.0;
+const DIFF_FILE_MAX_HEIGHT: f32 = 280.0;
 
 /// Formats signed byte difference using explicit `+` or typographic `−` minus sign.
 pub fn format_signed_bytes(delta: i64) -> String {
@@ -264,8 +271,8 @@ pub fn diff_workspace(state: AppState) -> impl IntoElement {
 
 fn diff_loading_view(state: AppState) -> impl IntoElement {
     let lang = state.lang;
-    let base = state.diff_base_ref.get_untracked();
-    let target = state.diff_target_ref.get_untracked();
+    let base_ref = state.diff_base_ref;
+    let target_ref = state.diff_target_ref;
     let base_progress = state.diff_base_progress;
     let target_progress = state.diff_target_progress;
     let cancel_state = state;
@@ -279,7 +286,7 @@ fn diff_loading_view(state: AppState) -> impl IntoElement {
                     .items_center()
                     .gap_2()
                     .child(
-                        text(format!("{base} → {target}"))
+                        text(move || format!("{} → {}", base_ref.get(), target_ref.get()))
                             .text_xs()
                             .font_family(font_mono_family())
                             .text_color(move || theme().muted_foreground),
@@ -384,7 +391,7 @@ fn diff_error_view(state: AppState, err: DiffErrorState) -> impl IntoElement {
                 col.child(ui_panel_titled(
                     move || SharedString::from(t(lang.get(), "diff.base_label")),
                     None,
-                    text(msg)
+                    text(move || format_user_error(lang.get(), &msg))
                         .text_xs()
                         .font_family(font_mono_family())
                         .text_color(move || theme().foreground),
@@ -394,7 +401,7 @@ fn diff_error_view(state: AppState, err: DiffErrorState) -> impl IntoElement {
                 col.child(ui_panel_titled(
                     move || SharedString::from(t(lang.get(), "diff.target_label")),
                     None,
-                    text(msg)
+                    text(move || format_user_error(lang.get(), &msg))
                         .text_xs()
                         .font_family(font_mono_family())
                         .text_color(move || theme().foreground),
@@ -607,7 +614,9 @@ fn diff_side_card(
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(ui_badge(arch, BadgeTone::Neutral))
+                        .when(!arch.is_empty(), |r| {
+                            r.child(ui_badge(arch, BadgeTone::Neutral))
+                        })
                         .when_some(stale, |r, s| r.child(ui_badge(s, BadgeTone::Warning))),
                 ),
         )
@@ -650,11 +659,7 @@ fn layers_diff_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement 
                 },
                 move || {
                     SharedString::from(if shared_count > 0 {
-                        tf(
-                            lang.get(),
-                            "diff.shared_layers",
-                            &[&shared_count.to_string(), &shared_size],
-                        )
+                        format_shared_base_layers(lang.get(), shared_count, &shared_size)
                     } else {
                         t(lang.get(), "diff.no_shared_layers").to_owned()
                     })
@@ -858,6 +863,16 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
     let changed_count = diff.changed.count;
     let total = added_count + removed_count + changed_count;
 
+    let bucket_data = computed(move || {
+        let bucket: &ChangeSet = match active.get() {
+            DiffFileTab::Added => &diff.added,
+            DiffFileTab::Removed => &diff.removed,
+            DiffFileTab::Resized => &diff.changed,
+        };
+        (bucket.count, SharedRef::new(bucket.files.clone()))
+    });
+    let is_empty = computed(move || bucket_data.with(|(_, files)| files.is_empty()));
+
     ui_panel_titled(
         move || SharedString::from(format!("{} ({total})", t(lang.get(), "diff.files_section"))),
         Some(
@@ -901,12 +916,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
             .into_element(),
         ),
         dynamic(move || {
-            let bucket: &ChangeSet = match active.get() {
-                DiffFileTab::Added => &diff.added,
-                DiffFileTab::Removed => &diff.removed,
-                DiffFileTab::Resized => &diff.changed,
-            };
-            if bucket.files.is_empty() {
+            if is_empty.get() {
                 return ui_empty_state(
                     IconName::File,
                     move || SharedString::from(t(lang.get(), "diff.files_empty")),
@@ -916,41 +926,42 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                 .into_element();
             }
 
-            let rows = Arc::new(bucket.files.clone());
-            let shown_len = rows.len();
-            let total_len = bucket.count;
-
             view()
                 .flex_col()
                 .gap_2()
-                .when(total_len > shown_len, |col| {
-                    col.child(ui_banner(
-                        BannerTone::Info,
-                        move || {
-                            SharedString::from(tf(
-                                lang.get(),
-                                "diff.truncated_files",
-                                &[&shown_len.to_string(), &total_len.to_string()],
-                            ))
-                        },
-                        None,
-                    ))
-                })
-                .child(
-                    view().h(px(280.0)).child(
-                        virtual_list(
-                            {
-                                let rows = Arc::clone(&rows);
-                                move || rows.len()
+                .child(when(
+                    move || bucket_data.with(|(total_len, files)| *total_len > files.len()),
+                    move || {
+                        ui_banner(
+                            BannerTone::Info,
+                            move || {
+                                let (total_len, shown_len) =
+                                    bucket_data.with(|(t_len, files)| (*t_len, files.len()));
+                                SharedString::from(tf(
+                                    lang.get(),
+                                    "diff.truncated_files",
+                                    &[&shown_len.to_string(), &total_len.to_string()],
+                                ))
                             },
-                            {
-                                let rows = Arc::clone(&rows);
+                            None,
+                        )
+                    },
+                ))
+                .child(
+                    view()
+                        .h(move || {
+                            let len = bucket_data.with(|(_, files)| files.len());
+                            let h_pt = (len as f32 * DIFF_FILE_ROW_HEIGHT)
+                                .clamp(DIFF_FILE_ROW_HEIGHT, DIFF_FILE_MAX_HEIGHT);
+                            px(h_pt)
+                        })
+                        .child(
+                            virtual_list(
+                                move || bucket_data.with(|(_, files)| files.len()),
                                 move |at| {
-                                    let row = &rows[at.index()];
-                                    let delta = row.delta();
                                     view()
                                         .w_full()
-                                        .min_h(px(28.0))
+                                        .h(px(DIFF_FILE_ROW_HEIGHT))
                                         .flex_row()
                                         .items_center()
                                         .gap_3()
@@ -958,24 +969,51 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                         .border_b_1()
                                         .border_color(move || theme().border.opacity(0.45))
                                         .child(ui_badge(
-                                            format!("L{}", row.layer),
+                                            move || {
+                                                SharedString::from(bucket_data.with(
+                                                    |(_, files)| {
+                                                        files
+                                                            .get(at.index())
+                                                            .map_or_else(String::new, |row| {
+                                                                format!("L{}", row.layer)
+                                                            })
+                                                    },
+                                                ))
+                                            },
                                             BadgeTone::Neutral,
                                         ))
                                         .child(
-                                            text(format!("/{}", row.path))
-                                                .flex_1()
-                                                .min_w(px(0.0))
-                                                .text_xs()
-                                                .font_family(font_mono_family())
-                                                .number_of_lines(1)
-                                                .text_color(move || theme().foreground),
+                                            text(move || {
+                                                bucket_data.with(|(_, files)| {
+                                                    files
+                                                        .get(at.index())
+                                                        .map_or_else(String::new, |row| {
+                                                            format!("/{}", row.path)
+                                                        })
+                                                })
+                                            })
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .number_of_lines(1)
+                                            .text_color(move || theme().foreground),
                                         )
                                         .child(
-                                            text(format!(
-                                                "{} → {}",
-                                                format_bytes(row.base_size),
-                                                format_bytes(row.target_size)
-                                            ))
+                                            text(move || {
+                                                bucket_data.with(|(_, files)| {
+                                                    files.get(at.index()).map_or_else(
+                                                        String::new,
+                                                        |row| {
+                                                            format!(
+                                                                "{} → {}",
+                                                                format_bytes(row.base_size),
+                                                                format_bytes(row.target_size)
+                                                            )
+                                                        },
+                                                    )
+                                                })
+                                            })
                                             .w(px(140.0))
                                             .text_xs()
                                             .font_family(font_mono_family())
@@ -984,27 +1022,41 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                             .text_color(move || theme().muted_foreground),
                                         )
                                         .child(
-                                            text(format_signed_bytes(delta))
-                                                .w(px(88.0))
-                                                .text_xs()
-                                                .font_family(font_mono_family())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .tabular_nums()
-                                                .text_right()
-                                                .text_color(move || delta_color(delta)),
+                                            text(move || {
+                                                bucket_data.with(|(_, files)| {
+                                                    files.get(at.index()).map_or_else(
+                                                        || "0 B".to_owned(),
+                                                        |row| format_signed_bytes(row.delta()),
+                                                    )
+                                                })
+                                            })
+                                            .w(px(88.0))
+                                            .text_xs()
+                                            .font_family(font_mono_family())
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .tabular_nums()
+                                            .text_right()
+                                            .text_color(move || {
+                                                let delta = bucket_data.with(|(_, files)| {
+                                                    files.get(at.index()).map_or(0, |r| r.delta())
+                                                });
+                                                delta_color(delta)
+                                            }),
                                         )
-                                }
-                            },
-                        )
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .estimated_item_size(px(28.0))
-                        .keys(move || {
-                            rows.iter()
-                                .map(|f| format!("{}:{}", f.layer, f.path))
-                                .collect::<Vec<String>>()
-                        }),
-                    ),
+                                },
+                            )
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .estimated_item_size(px(DIFF_FILE_ROW_HEIGHT))
+                            .keys(move || {
+                                bucket_data.with(|(_, files)| {
+                                    files
+                                        .iter()
+                                        .map(|f| format!("{}:{}", f.layer, f.path))
+                                        .collect::<Vec<String>>()
+                                })
+                            }),
+                        ),
                 )
                 .into_element()
         }),
@@ -1031,18 +1083,24 @@ fn recommendations_diff_panel(state: AppState, diff: Arc<ImageDiff>) -> impl Int
                 .flex_row()
                 .flex_wrap()
                 .gap_4()
-                .child(rec_diff_column(
-                    lang,
-                    "diff.recs_new",
-                    &diff.new_recommendations,
-                    BadgeTone::Danger,
-                ))
-                .child(rec_diff_column(
-                    lang,
-                    "diff.recs_resolved",
-                    &diff.resolved_recommendations,
-                    BadgeTone::Success,
-                ))
+                .when(!diff.new_recommendations.is_empty(), |row| {
+                    row.child(rec_diff_column(
+                        lang,
+                        "diff.recs_new",
+                        &diff.new_recommendations,
+                        BadgeTone::Danger,
+                        false,
+                    ))
+                })
+                .when(!diff.resolved_recommendations.is_empty(), |row| {
+                    row.child(rec_diff_column(
+                        lang,
+                        "diff.recs_resolved",
+                        &diff.resolved_recommendations,
+                        BadgeTone::Success,
+                        true,
+                    ))
+                })
                 .into_element()
         },
     )
@@ -1053,6 +1111,7 @@ fn rec_diff_column(
     heading_key: &'static str,
     recs: &[Recommendation],
     tone: BadgeTone,
+    is_resolved: bool,
 ) -> impl IntoElement {
     let count = recs.len();
     view()
@@ -1077,6 +1136,21 @@ fn rec_diff_column(
                 .child(ui_badge(count.to_string(), tone)),
         )
         .children(recs.iter().map(|rec| {
+            let severity = rec.severity.clone();
+            let severity_for_label = severity.clone();
+            let category = rec.category.clone();
+            let sev_tone = if is_resolved {
+                BadgeTone::Success
+            } else {
+                match severity.as_str() {
+                    "high" => BadgeTone::Danger,
+                    "medium" => BadgeTone::Warning,
+                    _ => BadgeTone::Info,
+                }
+            };
+            let title = strip_inline_markdown(&rec.title);
+            let detail = strip_inline_markdown(&rec.detail);
+
             view()
                 .flex_col()
                 .gap_1()
@@ -1084,27 +1158,33 @@ fn rec_diff_column(
                 .child(
                     view()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(ui_badge(
-                            rec.severity.to_ascii_uppercase(),
-                            match rec.severity.as_str() {
-                                "high" => BadgeTone::Danger,
-                                "medium" => BadgeTone::Warning,
-                                _ => BadgeTone::Info,
+                            move || {
+                                SharedString::from(localize_severity(
+                                    lang.get(),
+                                    &severity_for_label,
+                                ))
                             },
+                            sev_tone,
+                        ))
+                        .child(ui_badge(
+                            move || SharedString::from(localize_category(lang.get(), &category)),
+                            BadgeTone::Neutral,
                         ))
                         .child(
-                            text(rec.title.clone())
+                            text(title)
                                 .flex_1()
-                                .min_w(px(0.0))
+                                .min_w(px(120.0))
                                 .text_xs()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || theme().foreground),
                         ),
                 )
                 .child(
-                    text(rec.detail.clone())
+                    text(detail)
                         .text_xs()
                         .text_color(move || theme().muted_foreground),
                 )
@@ -1117,4 +1197,116 @@ fn rec_diff_column(
                     )
                 })
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use diving_core::{ChangeSet, DiffSide, FileChange, ImageDiff, Recommendation};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::{AppRoute, DivingService};
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn DiffVirtualScrollHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.route.set(AppRoute::Diff);
+        let added_files: Vec<FileChange> = (0..100)
+            .map(|i| FileChange {
+                path: format!("usr/share/item-{i:03}.dat"),
+                base_size: 0,
+                target_size: (i as u64 + 1) * 1024,
+                layer: (i % 4) + 1,
+            })
+            .collect();
+        let diff = ImageDiff {
+            base: DiffSide {
+                name: "demo:v1".to_owned(),
+                arch: "amd64".to_owned(),
+                total_size: 10_000,
+                size: 5_000,
+                layer_count: 1,
+                file_count: 1,
+                ..Default::default()
+            },
+            target: DiffSide {
+                name: "demo:v2".to_owned(),
+                arch: "amd64".to_owned(),
+                total_size: 20_000,
+                size: 9_000,
+                layer_count: 2,
+                file_count: 101,
+                ..Default::default()
+            },
+            size_delta: 10_000,
+            shared_layers: 1,
+            shared_size: 4096,
+            added: ChangeSet {
+                count: 100,
+                bytes: 500_000,
+                files: added_files,
+            },
+            removed: ChangeSet {
+                count: 1,
+                bytes: -1024,
+                files: vec![FileChange {
+                    path: "tmp/only-one.txt".to_owned(),
+                    base_size: 1024,
+                    target_size: 0,
+                    layer: 1,
+                }],
+            },
+            resolved_recommendations: vec![Recommendation {
+                id: "runasroot".to_owned(),
+                severity: "high".to_owned(),
+                category: "security".to_owned(),
+                title: "Use `USER nonroot`".to_owned(),
+                detail: "Run as *nonroot* user.".to_owned(),
+                est_saved_bytes: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        state.diff_result.set(Some(SharedRef::new(diff)));
+        diff_workspace(state)
+    }
+
+    #[test]
+    fn diff_virtual_list_recycles_cleanly_across_100_rows_and_localizes_recs() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<DiffVirtualScrollHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start diff virtual scroll harness");
+        app.wait_for_within("1 shared base layer (4.0 KiB)", Duration::from_secs(3))
+            .expect("singular shared layer grammar rendered");
+        assert!(app.shows("Use USER nonroot"));
+        assert!(app.shows("Run as nonroot user."));
+        assert!(app.shows("Security"));
+        assert!(app.shows("/usr/share/item-000.dat"));
+
+        // Scroll File Changes virtual_list past row 80 to verify cell recycling renders updated rows.
+        app.scroll("/usr/share/item-000.dat", px(2400.0))
+            .expect("scroll File Changes virtual list");
+        app.wait_for_within("/usr/share/item-095.dat", Duration::from_secs(3))
+            .expect("recycled virtual_list renders bottom rows");
+
+        // Switch to 1-row Removed tab without tearing down virtual_list
+        app.press("Removed (1)").expect("switch to Removed tab");
+        app.wait_for_within("/tmp/only-one.txt", Duration::from_secs(3))
+            .expect("removed row renders accurately after tab switch");
+
+        app.press("Added (100)").expect("switch back to Added tab");
+        app.wait_for_within("/usr/share/item-000.dat", Duration::from_secs(3))
+            .expect("added row 000 restored");
+    }
 }
