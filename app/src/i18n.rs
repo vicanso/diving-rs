@@ -496,6 +496,16 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "File I/O error: {0}",
         "文件读写失败：{0}",
     ),
+    (
+        "error.daemon_run_prefix",
+        "Unable to run {0}: {1}",
+        "无法运行 {0}：{1}",
+    ),
+    (
+        "error.daemon_cmd_failed_prefix",
+        "{0} failed: {1}",
+        "{0} 执行失败：{1}",
+    ),
     // Status bar & notices
     (
         "status.hints_files",
@@ -781,7 +791,7 @@ pub fn format_shared_base_layers(lang: UiLang, count: usize, size_label: &str) -
     tf(lang, key, &[&count.to_string(), size_label])
 }
 
-/// Converts raw `diving-core` error prefixes (`Tar fail:`, `Io fail:`) into friendlier copy.
+/// Converts raw `diving-core` error prefixes (`Tar fail:`, `IO fail:`, daemon CLI errors) into friendlier copy.
 pub fn format_user_error(lang: UiLang, raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("Tar fail:") {
@@ -789,6 +799,38 @@ pub fn format_user_error(lang: UiLang, raw: &str) -> String {
     }
     if let Some(rest) = trimmed.strip_prefix("IO fail:") {
         return tf(lang, "error.io_prefix", &[rest.trim()]);
+    }
+    if let Some(rest) = trimmed.strip_prefix("failed to run ")
+        && let Some((cmd, detail)) = rest.split_once(':')
+    {
+        let clean_cmd = cmd.trim().trim_matches('`');
+        if !clean_cmd.is_empty() {
+            return tf(lang, "error.daemon_run_prefix", &[clean_cmd, detail.trim()]);
+        }
+    }
+    if let Some((cmd, detail)) = trimmed.split_once(" failed:") {
+        let clean_cmd = cmd.trim().trim_matches('`');
+        if !clean_cmd.is_empty() {
+            return tf(
+                lang,
+                "error.daemon_cmd_failed_prefix",
+                &[clean_cmd, detail.trim()],
+            );
+        }
+    }
+    if let Some((cmd, status)) = trimmed.split_once(" failed (") {
+        let clean_cmd = cmd.trim().trim_matches('`');
+        if matches!(
+            clean_cmd.split_whitespace().next(),
+            Some("docker" | "podman")
+        ) {
+            let clean_status = status.trim_end_matches(')').trim();
+            return tf(
+                lang,
+                "error.daemon_cmd_failed_prefix",
+                &[clean_cmd, clean_status],
+            );
+        }
     }
     trimmed.to_owned()
 }
@@ -961,6 +1003,39 @@ mod tests {
         assert_eq!(
             format_user_error(UiLang::Zh, "Tar fail: unexpected EOF"),
             "无法读取本地镜像归档：unexpected EOF"
+        );
+        assert_eq!(
+            format_user_error(
+                UiLang::En,
+                "failed to run `docker images`: No such file or directory (os error 2)"
+            ),
+            "Unable to run docker images: No such file or directory (os error 2)"
+        );
+        assert_eq!(
+            format_user_error(
+                UiLang::Zh,
+                "failed to run `docker images`: No such file or directory (os error 2)"
+            ),
+            "无法运行 docker images：No such file or directory (os error 2)"
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "failed to run `podman save`: permission denied"),
+            "无法运行 podman save：permission denied"
+        );
+        assert_eq!(
+            format_user_error(UiLang::En, "docker images failed: daemon not running"),
+            "docker images failed: daemon not running"
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "podman images failed: exit status 125"),
+            "podman images 执行失败：exit status 125"
+        );
+        assert_eq!(
+            format_user_error(
+                UiLang::Zh,
+                "docker save alpine:latest failed (exit status: 1)"
+            ),
+            "docker save alpine:latest 执行失败：exit status: 1"
         );
     }
 
