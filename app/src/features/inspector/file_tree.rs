@@ -15,8 +15,8 @@ use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SelectItem, UiSize, font_mono_family, radius_inset,
     surface_active, text_tertiary, theme, ui_badge, ui_button, ui_checkbox, ui_context_menu,
-    ui_empty_state, ui_icon, ui_icon_button, ui_menu_item, ui_opcode_pill, ui_search_input,
-    ui_select, ui_size_bar, ui_status_badge,
+    ui_empty_state, ui_icon, ui_icon_button, ui_menu_item, ui_opcode_pill,
+    ui_search_input_with_escape, ui_select, ui_size_bar, ui_status_badge,
 };
 
 fn min_size_items(lang: UiLang) -> Vec<SelectItem> {
@@ -95,6 +95,13 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
     let command_expanded = state.command_expanded;
     let command_wrap = state.command_wrap;
     let copied = signal(false);
+    let copy_seq = signal(0_u64);
+
+    effect(move || {
+        let _ = selected_layer.get();
+        copy_seq.set(copy_seq.get_untracked().wrapping_add(1));
+        copied.set(false);
+    });
 
     view()
         .w_full()
@@ -122,6 +129,7 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
             };
             let hidden_count = total_lines.saturating_sub(6);
             let digest_to_copy = layer.digest.clone();
+            let digest_empty = digest_to_copy.is_empty();
 
             view()
                 .flex_col()
@@ -188,44 +196,60 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                                         move || command_expanded.update(|v| *v = !*v),
                                     ))
                                 })
-                                .child(ui_button(
-                                    move || SharedString::from(t(lang.get(), "cmd.wrap")),
-                                    if command_wrap.get() {
+                                .child(dynamic(move || {
+                                    let variant = if command_wrap.get() {
                                         ButtonVariant::Default
                                     } else {
                                         ButtonVariant::Ghost
-                                    },
-                                    UiSize::Xs,
-                                    None,
-                                    false,
-                                    false,
-                                    move || command_wrap.update(|v| *v = !*v),
-                                ))
-                                .child(ui_button(
-                                    move || {
-                                        SharedString::from(if copied.get() {
-                                            t(lang.get(), "common.copied")
+                                    };
+                                    ui_button(
+                                        move || SharedString::from(t(lang.get(), "cmd.wrap")),
+                                        variant,
+                                        UiSize::Xs,
+                                        None,
+                                        false,
+                                        false,
+                                        move || command_wrap.update(|v| *v = !*v),
+                                    )
+                                    .into_element()
+                                }))
+                                .child(dynamic(move || {
+                                    let is_copied = copied.get();
+                                    let digest = digest_to_copy.clone();
+                                    ui_button(
+                                        move || {
+                                            SharedString::from(if copied.get() {
+                                                t(lang.get(), "common.copied")
+                                            } else {
+                                                t(lang.get(), "cmd.copy_digest")
+                                            })
+                                        },
+                                        ButtonVariant::Outline,
+                                        UiSize::Xs,
+                                        Some(if is_copied {
+                                            IconName::Check
                                         } else {
-                                            t(lang.get(), "cmd.copy_digest")
-                                        })
-                                    },
-                                    ButtonVariant::Outline,
-                                    UiSize::Xs,
-                                    Some(if copied.get() {
-                                        IconName::Check
-                                    } else {
-                                        IconName::Copy
-                                    }),
-                                    false,
-                                    false,
-                                    move || {
-                                        set_clipboard(digest_to_copy.clone());
-                                        copied.set(true);
-                                        set_timeout(Duration::from_millis(1500), move || {
-                                            copied.set(false);
-                                        });
-                                    },
-                                )),
+                                            IconName::Copy
+                                        }),
+                                        digest_empty,
+                                        false,
+                                        move || {
+                                            if digest.is_empty() {
+                                                return;
+                                            }
+                                            set_clipboard(digest.clone());
+                                            let next_seq = copy_seq.get_untracked().wrapping_add(1);
+                                            copy_seq.set(next_seq);
+                                            copied.set(true);
+                                            set_timeout(Duration::from_millis(1500), move || {
+                                                if copy_seq.try_get() == Some(next_seq) {
+                                                    copied.try_set(false);
+                                                }
+                                            });
+                                        },
+                                    )
+                                    .into_element()
+                                })),
                         ),
                 )
                 .child(
@@ -236,14 +260,13 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                         .rounded(radius_inset)
                         .bg(move || theme().muted)
                         .children(visible_lines.into_iter().map(move |line| {
-                            let mut txt = text(line)
+                            text(line)
                                 .text_xs()
                                 .font_family(font_mono_family())
-                                .text_color(move || theme().foreground);
-                            if !command_wrap.get() {
-                                txt = txt.number_of_lines(1);
-                            }
-                            txt
+                                .text_color(move || theme().foreground)
+                                .number_of_lines(
+                                    move || if command_wrap.get() { 0_u32 } else { 1_u32 },
+                                )
                         })),
                 )
                 .into_element()
@@ -254,100 +277,131 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let expand_state = state.clone();
     let collapse_state = state.clone();
+    let prov_state = state.clone();
+    let esc_keyword = state.tree_keyword;
+    let esc_ref = state.tree_filter_ref;
     let min_size_str = move || Some(SharedString::from(state.tree_min_size.get().to_string()));
 
     view()
         .w_full()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_2()
+        .flex_col()
+        .gap_1p5()
         .px_4()
-        .py_1p5()
+        .py_2()
         .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
-        .child(view().flex_1().min_w(px(140.0)).child(ui_search_input(
-            state.tree_keyword,
-            move || t(lang.get(), "tree.filter_placeholder").to_owned(),
-            "Filter files in layer",
-            UiSize::Sm,
-            Some("/"),
-            Some(&state.tree_filter_ref),
-            true,
-            None,
-        )))
-        .child({
-            let prov_state = state.clone();
-            ui_button(
-                move || SharedString::from(t(lang.get(), "provenance.button")),
-                ButtonVariant::Outline,
-                UiSize::Xs,
-                Some(IconName::Search),
-                false,
-                false,
-                move || prov_state.open_provenance_search(),
-            )
-        })
-        .child(ui_checkbox(
-            move || SharedString::from(t(lang.get(), "tree.modifications_only")),
-            state.tree_modifications_only,
-            false,
-            false,
-            move |next| state.tree_modifications_only.set(next),
-        ))
-        .child(view().w(px(96.0)).child(ui_select(
-            move || min_size_items(lang.get()),
-            min_size_str,
-            move || SharedString::from(t(lang.get(), "tree.size_all")),
-            "Minimum file size filter",
-            UiSize::Sm,
-            false,
-            move |next| {
-                let parsed = next
-                    .and_then(|s| s.as_str().parse::<u64>().ok())
-                    .unwrap_or(0);
-                state.tree_min_size.set(parsed);
-            },
-        )))
-        .child(ui_checkbox(
-            move || SharedString::from(t(lang.get(), "tree.compact_paths")),
-            state.tree_compact_paths,
-            false,
-            false,
-            move |next| state.tree_compact_paths.set(next),
-        ))
-        .child(ui_checkbox(
-            move || SharedString::from(t(lang.get(), "tree.show_meta_cols")),
-            state.tree_show_meta_cols,
-            false,
-            false,
-            move |next| state.tree_show_meta_cols.set(next),
-        ))
         .child(
             view()
+                .w_full()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
-                .gap_1()
-                .flex_shrink_0()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(220.0))
+                        .child(ui_search_input_with_escape(
+                            state.tree_keyword,
+                            move || t(lang.get(), "tree.filter_placeholder").to_owned(),
+                            "Filter files in layer",
+                            UiSize::Sm,
+                            Some("/"),
+                            Some(&state.tree_filter_ref),
+                            true,
+                            None,
+                            Some(Box::new(move || {
+                                esc_keyword.set(String::new());
+                                esc_ref.blur();
+                            })),
+                        )),
+                )
+                .child(view().w(px(108.0)).flex_shrink_0().child(ui_select(
+                    move || min_size_items(lang.get()),
+                    min_size_str,
+                    move || SharedString::from(t(lang.get(), "tree.size_all")),
+                    "Minimum file size filter",
+                    UiSize::Sm,
+                    false,
+                    move |next| {
+                        let parsed = next
+                            .and_then(|s| s.as_str().parse::<u64>().ok())
+                            .unwrap_or(0);
+                        state.tree_min_size.set(parsed);
+                    },
+                )))
                 .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "tree.expand_all")),
-                    ButtonVariant::Ghost,
-                    UiSize::Xs,
-                    None,
+                    move || SharedString::from(t(lang.get(), "provenance.button")),
+                    ButtonVariant::Outline,
+                    UiSize::Sm,
+                    Some(IconName::Search),
                     false,
                     false,
-                    move || expand_state.expand_all_dirs(),
-                ))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "tree.collapse_all")),
-                    ButtonVariant::Ghost,
-                    UiSize::Xs,
-                    None,
-                    false,
-                    false,
-                    move || collapse_state.collapse_all_dirs(),
+                    move || prov_state.open_provenance_search(),
                 )),
+        )
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_3()
+                        .child(ui_checkbox(
+                            move || SharedString::from(t(lang.get(), "tree.modifications_only")),
+                            state.tree_modifications_only,
+                            false,
+                            false,
+                            move |next| state.tree_modifications_only.set(next),
+                        ))
+                        .child(ui_checkbox(
+                            move || SharedString::from(t(lang.get(), "tree.compact_paths")),
+                            state.tree_compact_paths,
+                            false,
+                            false,
+                            move |next| state.tree_compact_paths.set(next),
+                        ))
+                        .child(ui_checkbox(
+                            move || SharedString::from(t(lang.get(), "tree.show_meta_cols")),
+                            state.tree_show_meta_cols,
+                            false,
+                            false,
+                            move |next| state.tree_show_meta_cols.set(next),
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "tree.expand_all")),
+                            ButtonVariant::Ghost,
+                            UiSize::Sm,
+                            None,
+                            false,
+                            false,
+                            move || expand_state.expand_all_dirs(),
+                        ))
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "tree.collapse_all")),
+                            ButtonVariant::Ghost,
+                            UiSize::Sm,
+                            None,
+                            false,
+                            false,
+                            move || collapse_state.collapse_all_dirs(),
+                        )),
+                ),
         )
 }
 
@@ -577,7 +631,7 @@ fn virtual_tree(
                         .min_w(px(0.0))
                         .pl(move || {
                             let depth = rows.with(|r| r.get(at.index()).map_or(0, |row| row.depth));
-                            px((depth as f32) * 14.0)
+                            px((depth as f32) * 16.0)
                         })
                         .flex_row()
                         .items_center()
@@ -746,4 +800,165 @@ fn virtual_tree(
             None,
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use diving_core::{Analyzer, FileTreeItem, ImageLayer, Op};
+    use nsh_core::clipboard::{ClipboardBackend, MemoryClipboard};
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::DivingService;
+    use crate::ui::app_tokens;
+
+    fn file_tree_fixture() -> Arc<DockerAnalyzeResult> {
+        Arc::new(DockerAnalyzeResult {
+            layers: vec![
+                ImageLayer {
+                    digest: "sha256:layer0".to_owned(),
+                    cmd: "COPY etc /etc".to_owned(),
+                    size: 120,
+                    unpack_size: 240,
+                    empty: false,
+                    ..Default::default()
+                },
+                ImageLayer {
+                    digest: String::new(),
+                    cmd: "ENV FOO=bar".to_owned(),
+                    size: 0,
+                    unpack_size: 0,
+                    empty: true,
+                    ..Default::default()
+                },
+            ],
+            file_tree_list: vec![
+                vec![FileTreeItem {
+                    name: "etc".to_owned(),
+                    size: 120,
+                    op: Op::Added,
+                    mode: "drwxr-xr-x".to_owned(),
+                    children: vec![FileTreeItem {
+                        name: "app.conf".to_owned(),
+                        size: 120,
+                        op: Op::Added,
+                        mode: "-rw-r--r--".to_owned(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                Vec::new(),
+            ],
+            ..Default::default()
+        })
+    }
+
+    #[component]
+    fn FileTreeHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = file_tree_fixture();
+        state.result.set(Some(res.clone()));
+        state.selected_layer.set(0);
+        state.tree_expand_all.set(true);
+        let mounted = signal(true);
+        let switch_state = state.clone();
+
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(ui_button(
+                        "Switch layer 1",
+                        ButtonVariant::Ghost,
+                        UiSize::Sm,
+                        None,
+                        false,
+                        false,
+                        move || switch_state.select_layer(1),
+                    ))
+                    .child(ui_button(
+                        "Unmount file tree",
+                        ButtonVariant::Ghost,
+                        UiSize::Sm,
+                        None,
+                        false,
+                        false,
+                        move || mounted.set(false),
+                    )),
+            )
+            .child(when(mounted, move || {
+                file_tree_tab(state.clone(), res.clone())
+            }))
+    }
+
+    #[test]
+    fn copy_digest_timer_safe_on_unmount_resets_on_layer_switch_and_disables_when_empty() {
+        let clipboard = Arc::new(MemoryClipboard::new(None));
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            clock: Clock::manual(SystemTime::UNIX_EPOCH),
+            clipboard: Some(clipboard.clone()),
+            ..EngineConfig::new(Root::of::<FileTreeHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start file_tree harness");
+
+        // Verify filter placeholder is not truncated and Copy digest works & resets on layer switch.
+        app.wait_for_within("Copy digest", Duration::from_secs(2))
+            .expect("Copy digest visible");
+        assert_eq!(app.screen().enabled("Copy digest"), Ok(true));
+
+        // Verify child row (`app.conf`) aligns its icon at +16px from parent folder (`etc`) chevron.
+        app.wait_for_within("app.conf", Duration::from_secs(2))
+            .expect("child row visible");
+        let nodes = app.screen().layout_nodes();
+        let etc_x = nodes
+            .iter()
+            .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == "etc"))
+            .map(|n| n.bounds.origin.x.0)
+            .expect("etc text node");
+        let app_x = nodes
+            .iter()
+            .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == "app.conf"))
+            .map(|n| n.bounds.origin.x.0)
+            .expect("app.conf text node");
+        // Parent folder has chevron(12)+gap(4)+folder(14)+gap(6)=36 before text;
+        // child file at depth 1 has pl(16)+file(14)+gap(6)=36 before text -> exact 0px offset!
+        assert!(
+            (etc_x - app_x).abs() < 0.5,
+            "child file text ({app_x}) must align on same spine as parent folder text ({etc_x})"
+        );
+
+        app.press("Copy digest").expect("press Copy digest");
+        assert_eq!(clipboard.text().as_deref(), Some("sha256:layer0"));
+        app.wait_for_within("Copied", Duration::from_secs(1))
+            .expect("Copied state shown");
+
+        // Switching to layer 1 resets Copied immediately and disables Copy digest for empty digest.
+        app.press("Switch layer 1").expect("switch to layer 1");
+        app.wait_for_within("Copy digest", Duration::from_secs(2))
+            .expect("Copied reset on layer switch");
+        assert_eq!(app.screen().enabled("Copy digest"), Ok(false));
+
+        // Unmounting within 1.5s after copying on layer 0 must not panic.
+        app.press("Unmount file tree").expect("unmount tab");
+        app.wait_for_gone("Copy digest", Duration::from_secs(2))
+            .expect("file tree unmounted");
+        app.fast_forward(Duration::from_millis(1600))
+            .expect("1.5s copy timer after file tree unmount must not panic");
+    }
 }

@@ -6,14 +6,14 @@ use diving_core::{DockerAnalyzeResult, DockerAnalyzeSummary};
 use nsh_core::prelude::*;
 
 use crate::domain::{AppState, compute_what_if_projection, format_bytes};
-use crate::i18n::{UiLang, t, tf};
+use crate::i18n::{UiLang, localize_category, localize_severity, strip_inline_markdown, t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme,
     ui_badge, ui_banner, ui_button, ui_empty_state, ui_panel_titled, ui_separator,
 };
 
 fn severity_badge_tone(severity: &str) -> BadgeTone {
-    match severity {
+    match severity.trim().to_ascii_lowercase().as_str() {
         "high" => BadgeTone::Danger,
         "medium" => BadgeTone::Warning,
         "low" => BadgeTone::Info,
@@ -149,8 +149,8 @@ fn recommendations_panel(
                     let tone = severity_badge_tone(&rec.severity);
                     let severity = rec.severity.clone();
                     let category = rec.category.clone();
-                    let title = rec.title.clone();
-                    let detail = rec.detail.clone();
+                    let title = strip_inline_markdown(&rec.title);
+                    let detail = strip_inline_markdown(&rec.detail);
                     let hint = rec.dockerfile_hint.clone();
                     let paths = rec.paths.clone();
                     let est_saved = rec.est_saved_bytes;
@@ -175,8 +175,30 @@ fn recommendations_panel(
                                         .flex_wrap()
                                         .items_center()
                                         .gap_2()
-                                        .child(ui_badge(severity, tone))
-                                        .child(ui_badge(category, BadgeTone::Neutral))
+                                        .child(ui_badge(
+                                            {
+                                                let sev = severity.clone();
+                                                move || {
+                                                    SharedString::from(localize_severity(
+                                                        lang.get(),
+                                                        &sev,
+                                                    ))
+                                                }
+                                            },
+                                            tone,
+                                        ))
+                                        .child(ui_badge(
+                                            {
+                                                let cat = category.clone();
+                                                move || {
+                                                    SharedString::from(localize_category(
+                                                        lang.get(),
+                                                        &cat,
+                                                    ))
+                                                }
+                                            },
+                                            BadgeTone::Neutral,
+                                        ))
                                         .when(is_heuristic, |r| {
                                             r.child(ui_badge(
                                                 move || {
@@ -385,7 +407,7 @@ fn sensitive_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
                 .gap_2()
                 .children(res.sensitive_files.iter().enumerate().map(|(idx, item)| {
                     let path = item.path.clone();
-                    let reason = item.reason.clone();
+                    let reason = strip_inline_markdown(&item.reason);
                     let layer = format!("L{}", item.layer_index + 1);
                     let size = format_bytes(item.size);
                     view()
@@ -610,11 +632,8 @@ fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                     .enumerate()
                     .map(|(idx, bin)| {
                         let path = bin.path.clone();
-                        let detail = format!(
-                            "{} (debug {})",
-                            format_bytes(bin.size),
-                            format_bytes(bin.debug_bytes)
-                        );
+                        let bin_size = format_bytes(bin.size);
+                        let debug_size = format_bytes(bin.debug_bytes);
                         view()
                             .flex_row()
                             .items_center()
@@ -632,14 +651,107 @@ fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                                     .text_color(move || theme().foreground),
                             )
                             .child(
-                                text(detail)
-                                    .text_xs()
-                                    .font_family(font_mono_family())
-                                    .tabular_nums()
-                                    .text_color(move || theme().muted_foreground),
+                                text(move || {
+                                    tf(
+                                        lang.get(),
+                                        "findings.unstripped_detail",
+                                        &[&bin_size, &debug_size],
+                                    )
+                                })
+                                .text_xs()
+                                .font_family(font_mono_family())
+                                .tabular_nums()
+                                .text_color(move || theme().muted_foreground),
                             )
                     }),
             )
             .into_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::{Analyzer, Recommendation, UnstrippedBinary};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::DivingService;
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn FindingsI18nHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = Arc::new(DockerAnalyzeResult {
+            recommendations: vec![Recommendation {
+                id: "runasroot".to_owned(),
+                category: "security".to_owned(),
+                severity: "high".to_owned(),
+                title: "Container *runs* as root".to_owned(),
+                detail: "Add `USER nonroot` in the *same* step.".to_owned(),
+                dockerfile_hint: "USER nonroot".to_owned(),
+                paths: Vec::new(),
+                est_saved_bytes: 0,
+                heuristic: false,
+            }],
+            unstripped_binaries: vec![UnstrippedBinary {
+                layer_index: 0,
+                path: "/usr/bin/app".to_owned(),
+                size: 1024,
+                debug_bytes: 512,
+                symbol_bytes: 0,
+            }],
+            ..Default::default()
+        });
+        let summary = Arc::new(res.summary());
+        let lang_state = state.clone();
+
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(ui_button(
+                "Switch ZH",
+                ButtonVariant::Ghost,
+                UiSize::Sm,
+                None,
+                false,
+                false,
+                move || lang_state.lang.set(UiLang::Zh),
+            ))
+            .child(findings_tab(state, res, summary))
+    }
+
+    #[test]
+    fn findings_localizes_severity_category_unstripped_and_strips_markdown() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<FindingsI18nHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start findings harness");
+        app.wait_for_within("HIGH", Duration::from_secs(2))
+            .expect("uppercase EN severity badge");
+        assert!(app.shows("Security"));
+        assert!(app.shows("Container runs as root"));
+        assert!(app.shows("Add USER nonroot in the same step."));
+        assert!(!app.shows("`USER nonroot`"));
+        assert!(!app.shows("*same*"));
+        assert!(app.shows("1.0 KiB (debug 512 B)"));
+
+        app.press("Switch ZH").expect("switch to ZH");
+        app.wait_for_within("高", Duration::from_secs(2))
+            .expect("ZH severity localized");
+        assert!(app.shows("安全"));
+        assert!(app.shows("1.0 KiB（调试信息 512 B）"));
+    }
 }

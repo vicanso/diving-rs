@@ -5,15 +5,15 @@ use std::sync::Arc;
 use diving_core::DockerAnalyzeResult;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, LayerFilterMode, classify_layer_opcode, format_bytes};
+use crate::domain::{
+    AppState, LayerFilterMode, classify_layer_opcode, format_bytes, layer_matches_filter,
+};
 use crate::i18n::t;
 use crate::ui::{
     IconName, SegmentOption, UiSize, font_mono_family, radius_inset, surface_active, text_tertiary,
     theme, ui_context_menu, ui_empty_state, ui_menu_item, ui_opcode_pill, ui_segmented,
     ui_size_bar,
 };
-
-const LARGE_LAYER_BYTES: u64 = 1_048_576;
 
 /// Renders the master `LayerTimeline` sidebar panel.
 pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
@@ -31,11 +31,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
         let mode = layer_filter.get();
         all_entries
             .iter()
-            .filter(|(_, layer)| match mode {
-                LayerFilterMode::All => true,
-                LayerFilterMode::HasFiles => !layer.empty,
-                LayerFilterMode::Large => layer.size > LARGE_LAYER_BYTES,
-            })
+            .filter(|(_, layer)| layer_matches_filter(layer, mode))
             .cloned()
             .collect::<Vec<_>>()
     });
@@ -80,7 +76,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                             .text_color(move || theme().muted_foreground),
                         ),
                 )
-                .child(ui_segmented(
+                .child(view().self_start().child(ui_segmented(
                     vec![
                         SegmentOption::new(LayerFilterMode::All, move || {
                             SharedString::from(t(lang.get(), "layers.filter_all"))
@@ -96,7 +92,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                     UiSize::Sm,
                     "Filter image layers",
                     move |mode| layer_filter.set(mode),
-                )),
+                ))),
         )
         .child(
             scroll().flex_1().min_h(px(0.0)).child(
@@ -196,6 +192,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                         .text_color(move || theme().foreground),
                                 );
 
+                            let digest_empty = digest_for_copy.is_empty();
                             ui_context_menu(row, |_| {})
                                 .child(ui_menu_item(
                                     move || {
@@ -212,11 +209,98 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                     },
                                     Some(IconName::Copy),
                                     None,
-                                    false,
-                                    move || set_clipboard(digest_for_copy.clone()),
+                                    digest_empty,
+                                    move || {
+                                        if !digest_for_copy.is_empty() {
+                                            set_clipboard(digest_for_copy.clone());
+                                        }
+                                    },
                                 ))
                         },
                     )),
             ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::{Analyzer, ImageLayer};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::DivingService;
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn LayerTimelineHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = DockerAnalyzeResult {
+            layers: vec![ImageLayer {
+                digest: String::new(),
+                cmd: "ENV A=1".to_owned(),
+                size: 0,
+                unpack_size: 0,
+                empty: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        view()
+            .w(px(340.0))
+            .h(px(480.0))
+            .bg(move || theme().background)
+            .child(layer_timeline_panel(state, Arc::new(res)))
+    }
+
+    #[test]
+    fn layer_timeline_segmented_filter_stays_compact() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<LayerTimelineHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start layer_timeline harness");
+        app.wait_for_within("Layers", Duration::from_secs(2))
+            .expect("layer timeline rendered");
+        let nodes = app.screen().layout_nodes();
+        let all_node = nodes
+            .iter()
+            .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == "All"))
+            .expect("All segment text node");
+        let large_node = nodes
+            .iter()
+            .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == "> 1 MB"))
+            .expect("> 1 MB segment text node");
+        let mut cursor_parent = all_node.parent;
+        let mut segmented_width = 0.0_f32;
+        while let Some(node) = nodes.iter().find(|n| n.id == cursor_parent) {
+            let b = node.bounds;
+            if b.origin.x.0 <= all_node.bounds.origin.x.0
+                && b.origin.x.0 + b.size.width.0
+                    >= large_node.bounds.origin.x.0 + large_node.bounds.size.width.0
+            {
+                segmented_width = b.size.width.0;
+                break;
+            }
+            if node.parent == node.id {
+                break;
+            }
+            cursor_parent = node.parent;
+        }
+        // Segmented track fits compactly inside 340pt panel without stretching full width (316pt).
+        assert!(
+            segmented_width > 60.0 && segmented_width < 260.0,
+            "expected compact segmented track width, got {segmented_width}"
+        );
+    }
 }

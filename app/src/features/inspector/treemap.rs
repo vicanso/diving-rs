@@ -7,15 +7,14 @@ use nsh_core::prelude::*;
 
 use crate::domain::{
     AppState, FileTreeRow, FsNode, SharedRef, TreemapHoverInfo, TreemapTile, TreemapViewMode,
-    build_final_tree, dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles,
-    top_three_layers,
+    dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles, top_three_layers,
 };
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_control,
     radius_inset, theme, treemap_ink, treemap_slot, ui_badge, ui_button, ui_empty_state, ui_icon,
-    ui_segmented, ui_size_bar,
+    ui_segmented, ui_size_bar, ui_spinner,
 };
 
 const MIN_LABEL_W: f32 = 56.0;
@@ -25,24 +24,51 @@ const MIN_SIZE_LABEL_H: f32 = 38.0;
 
 /// Renders the `Treemap` workspace tab with Map/Table toggle, drill-down breadcrumbs, and Top-3 layer legend.
 pub fn treemap_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
-    let root_node = state
-        .final_tree
-        .get_untracked()
-        .unwrap_or_else(|| SharedRef::new(build_final_tree(&res.file_tree_list)));
-    let top_layers = top_three_layers(&root_node.0);
+    let lang = state.lang;
+    let final_tree = state.final_tree;
 
     view()
         .flex_1()
         .min_w(px(0.0))
         .min_h(px(0.0))
         .flex_col()
-        .child(treemap_toolbar(
-            state.clone(),
-            root_node.clone(),
-            top_layers.clone(),
-        ))
-        .child(treemap_body(state.clone(), res, root_node, top_layers))
-        .child(treemap_info_footer(state))
+        .child(dynamic(move || {
+            let Some(root_node) = final_tree.get() else {
+                return view()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(ui_spinner(px(20.0), move || theme().primary))
+                    .child(
+                        text(move || t(lang.get(), "landing.analyzing"))
+                            .text_xs()
+                            .text_color(move || theme().muted_foreground),
+                    )
+                    .into_element();
+            };
+            let top_layers = top_three_layers(&root_node.0);
+
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .flex_col()
+                .child(treemap_toolbar(
+                    state.clone(),
+                    root_node.clone(),
+                    top_layers.clone(),
+                ))
+                .child(treemap_body(
+                    state.clone(),
+                    res.clone(),
+                    root_node,
+                    top_layers,
+                ))
+                .child(treemap_info_footer(state.clone()))
+                .into_element()
+        }))
 }
 
 fn treemap_toolbar(
@@ -199,7 +225,11 @@ fn treemap_body(
 ) -> impl IntoElement {
     let top_layer_ids: Vec<usize> = top_layers.into_iter().map(|(id, _)| id).collect();
     let size_state = state.clone();
+    let measured_canvas = signal(None::<(f32, f32)>);
     let canvas_size = computed(move || {
+        if let Some((w, h)) = measured_canvas.get() {
+            return (w, h);
+        }
         let win = window();
         let app_sidebar_w = if size_state.app_sidebar_open.get() {
             APP_SIDEBAR_WIDTH
@@ -209,9 +239,7 @@ fn treemap_body(
         let raw_w = (win.width.0 - app_sidebar_w - size_state.sidebar_width.get().0 - 40.0)
             .clamp(320.0, 1280.0);
         let raw_h = (win.height.0 - 216.0).clamp(260.0, 680.0);
-        let w = ((raw_w / 24.0).floor() * 24.0).max(320.0) as u32;
-        let h = ((raw_h / 24.0).floor() * 24.0).max(260.0) as u32;
-        (w, h)
+        (raw_w.floor().max(280.0), raw_h.floor().max(200.0))
     });
 
     view()
@@ -220,6 +248,16 @@ fn treemap_body(
         .min_h(px(0.0))
         .overflow_hidden()
         .flex_col()
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let next_w = (bounds.size.width.0 - 32.0).floor().max(280.0);
+            let next_h = (bounds.size.height.0 - 32.0).floor().max(200.0);
+            let changed = measured_canvas
+                .get_untracked()
+                .is_none_or(|(pw, ph)| (pw - next_w).abs() > 1.0 || (ph - next_h).abs() > 1.0);
+            if changed {
+                measured_canvas.set(Some((next_w, next_h)));
+            }
+        })
         .child(dynamic(move || {
             let lang = state.lang;
             let segments = state.treemap_path.get();
@@ -241,15 +279,8 @@ fn treemap_body(
             match state.treemap_mode.get() {
                 TreemapViewMode::Map => {
                     let (w, h) = canvas_size.get();
-                    treemap_canvas_view(
-                        state.clone(),
-                        res.clone(),
-                        current,
-                        &top_layer_ids,
-                        w as f32,
-                        h as f32,
-                    )
-                    .into_element()
+                    treemap_canvas_view(state.clone(), res.clone(), current, &top_layer_ids, w, h)
+                        .into_element()
                 }
                 TreemapViewMode::Table => {
                     treemap_table_view(state.clone(), res.clone(), current).into_element()
@@ -313,6 +344,9 @@ fn render_treemap_tile(
     };
     let hover_state = state.clone();
     let click_state = state.clone();
+    let key_state = state.clone();
+    let key_res = res.clone();
+    let key_path = tile.path.clone();
     let tile_path = tile.path.clone();
     let tile_layer = tile.layer;
     let is_dir = tile.is_dir;
@@ -340,6 +374,16 @@ fn render_treemap_tile(
         .hover(|s| s.opacity(0.92))
         .on_mouse_enter(move |_: &MouseEvent| {
             hover_state.treemap_hovered.set(Some(hover_info.clone()));
+        })
+        .on_key_down(move |ev: &KeyEvent| {
+            if matches!(ev.key.as_str(), "Enter" | " ") {
+                if is_dir {
+                    key_state.treemap_path.set(split_segments(&key_path));
+                    key_state.treemap_hovered.set(None);
+                } else {
+                    open_treemap_file(&key_state, &key_res, &key_path, tile_layer);
+                }
+            }
         })
         .on_press(move || {
             if is_dir {
@@ -369,7 +413,7 @@ fn render_treemap_tile(
                                 .font_family(font_mono_family())
                                 .tabular_nums()
                                 .number_of_lines(1)
-                                .text_color(move || treemap_ink(slot == 0).opacity(0.85)),
+                                .text_color(move || treemap_ink(slot == 0).opacity(0.90)),
                         )
                     }),
             )
@@ -388,9 +432,9 @@ fn render_treemap_tile(
                 .h(px(sub_rect.h))
                 .overflow_hidden()
                 .rounded(radius_inset)
-                .bg(move || treemap_slot(sub_slot).opacity(0.84))
+                .bg(move || treemap_slot(sub_slot))
                 .border_1()
-                .border_color(move || theme().background.opacity(0.75))
+                .border_color(move || theme().background)
                 .when(show_sub_label, |sub| {
                     sub.p_1().child(
                         view()
@@ -415,7 +459,7 @@ fn render_treemap_tile(
                                         .tabular_nums()
                                         .number_of_lines(1)
                                         .text_color(move || {
-                                            treemap_ink(sub_slot == 0).opacity(0.85)
+                                            treemap_ink(sub_slot == 0).opacity(0.90)
                                         }),
                                 )
                             }),
@@ -424,21 +468,54 @@ fn render_treemap_tile(
         }))
 }
 
+#[derive(Clone, PartialEq)]
+struct TreemapTableRow {
+    name: String,
+    path: String,
+    size: u64,
+    is_dir: bool,
+    layer: Option<usize>,
+    share: f32,
+}
+
+fn treemap_table_rows(node: &FsNode) -> Arc<Vec<TreemapTableRow>> {
+    let total_size = node.size.max(1);
+    let mut children: Vec<&FsNode> = node.children.values().filter(|c| c.size > 0).collect();
+    children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+    let rows = children
+        .into_iter()
+        .map(|entry| {
+            let dom = dominant_layer(entry);
+            let layer = dom.map(|(l, _)| l).or(entry.layer);
+            let share = (entry.size as f64 / total_size as f64) as f32;
+            TreemapTableRow {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+                size: entry.size,
+                is_dir: entry.is_dir(),
+                layer,
+                share,
+            }
+        })
+        .collect();
+    Arc::new(rows)
+}
+
 fn treemap_table_view(
     state: AppState,
     res: Arc<DockerAnalyzeResult>,
     node: &FsNode,
 ) -> impl IntoElement {
+    let items = treemap_table_rows(node);
+    treemap_table_list(state, res, signal(items))
+}
+
+fn treemap_table_list(
+    state: AppState,
+    res: Arc<DockerAnalyzeResult>,
+    rows: Signal<Arc<Vec<TreemapTableRow>>>,
+) -> impl IntoElement {
     let lang = state.lang;
-    let total_size = node.size.max(1);
-    let mut children: Vec<FsNode> = node
-        .children
-        .values()
-        .filter(|c| c.size > 0)
-        .cloned()
-        .collect();
-    children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
-    let items = Arc::new(children);
 
     view()
         .flex_1()
@@ -491,62 +568,82 @@ fn treemap_table_view(
         )
         .child(
             virtual_list(
-                {
-                    let items = Arc::clone(&items);
-                    move || items.len()
-                },
-                {
-                    let items = Arc::clone(&items);
-                    let state = state.clone();
-                    let res = res.clone();
-                    move |at| {
-                        let entry = items[at.index()].clone();
-                        let click_state = state.clone();
-                        let click_res = res.clone();
-                        let hover_state = state.clone();
-                        let is_dir = entry.is_dir();
-                        let dom = dominant_layer(&entry);
-                        let layer = dom.map(|(l, _)| l).or(entry.layer);
-                        let share = (entry.size as f64 / total_size as f64) as f32;
-                        let pct_label = format!("{:.1}%", share * 100.0);
-                        let path_clone = entry.path.clone();
-                        let hover_info = TreemapHoverInfo {
-                            name: entry.name.clone(),
-                            path: entry.path.clone(),
-                            size: entry.size,
-                            layer,
-                            share,
-                        };
+                move || rows.with(|list| list.len()),
+                move |at| {
+                    let click_state = state.clone();
+                    let click_res = res.clone();
+                    let key_state = state.clone();
+                    let key_res = res.clone();
+                    let hover_state = state.clone();
 
-                        view()
-                            .w_full()
-                            .min_h(px(32.0))
-                            .flex_row()
-                            .items_center()
-                            .gap_3()
-                            .px_4()
-                            .border_b_1()
-                            .border_color(move || theme().border.opacity(0.45))
-                            .hover(|s| s.bg(move || theme().accent))
-                            .on_mouse_enter(move |_: &MouseEvent| {
-                                hover_state.treemap_hovered.set(Some(hover_info.clone()));
-                            })
-                            .on_press(move || {
-                                if is_dir {
-                                    click_state.treemap_path.set(split_segments(&path_clone));
+                    view()
+                        .w_full()
+                        .min_h(px(32.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .border_b_1()
+                        .border_color(move || theme().border.opacity(0.45))
+                        .role(AccessibilityRole::Button)
+                        .focusable(true)
+                        .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
+                        .hover(|s| s.bg(move || theme().accent))
+                        .on_mouse_enter(move |_: &MouseEvent| {
+                            if let Some(entry) = rows.with(|list| list.get(at.index()).cloned()) {
+                                hover_state.treemap_hovered.set(Some(TreemapHoverInfo {
+                                    name: entry.name,
+                                    path: entry.path,
+                                    size: entry.size,
+                                    layer: entry.layer,
+                                    share: entry.share,
+                                }));
+                            }
+                        })
+                        .on_key_down(move |ev: &KeyEvent| {
+                            if matches!(ev.key.as_str(), "Enter" | " ")
+                                && let Some(entry) = rows.with(|list| list.get(at.index()).cloned())
+                            {
+                                if entry.is_dir {
+                                    key_state.treemap_path.set(split_segments(&entry.path));
+                                    key_state.treemap_hovered.set(None);
+                                } else {
+                                    open_treemap_file(
+                                        &key_state,
+                                        &key_res,
+                                        &entry.path,
+                                        entry.layer,
+                                    );
+                                }
+                            }
+                        })
+                        .on_press(move || {
+                            if let Some(entry) = rows.with(|list| list.get(at.index()).cloned()) {
+                                if entry.is_dir {
+                                    click_state.treemap_path.set(split_segments(&entry.path));
                                     click_state.treemap_hovered.set(None);
                                 } else {
-                                    open_treemap_file(&click_state, &click_res, &path_clone, layer);
+                                    open_treemap_file(
+                                        &click_state,
+                                        &click_res,
+                                        &entry.path,
+                                        entry.layer,
+                                    );
                                 }
-                            })
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(ui_icon(
+                            }
+                        })
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(dynamic(move || {
+                                    let is_dir = rows.with(|list| {
+                                        list.get(at.index()).is_some_and(|e| e.is_dir)
+                                    });
+                                    ui_icon(
                                         if is_dir {
                                             IconName::Folder
                                         } else {
@@ -560,59 +657,86 @@ fn treemap_table_view(
                                                 theme().muted_foreground
                                             }
                                         },
-                                    ))
-                                    .child(
-                                        text(entry.name)
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .text_xs()
-                                            .font_family(font_mono_family())
-                                            .number_of_lines(1)
-                                            .text_color(move || theme().foreground),
-                                    ),
-                            )
-                            .child(view().w(px(72.0)).items_start().child(ui_badge(
-                                layer.map_or_else(|| "—".to_owned(), |l| format!("L{}", l + 1)),
-                                BadgeTone::Neutral,
-                            )))
-                            .child(
-                                view()
-                                    .w(px(120.0))
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(ui_size_bar(share, px(54.0)))
-                                    .child(
-                                        text(pct_label)
-                                            .w(px(44.0))
-                                            .text_xs()
-                                            .font_family(font_mono_family())
-                                            .tabular_nums()
-                                            .text_right()
-                                            .text_color(move || theme().muted_foreground),
-                                    ),
-                            )
-                            .child(
-                                text(format_bytes(entry.size))
-                                    .w(px(88.0))
+                                    )
+                                    .into_element()
+                                }))
+                                .child(
+                                    text(move || {
+                                        rows.with(|list| {
+                                            list.get(at.index())
+                                                .map(|e| e.name.clone())
+                                                .unwrap_or_default()
+                                        })
+                                    })
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_xs()
+                                    .font_family(font_mono_family())
+                                    .number_of_lines(1)
+                                    .text_color(move || theme().foreground),
+                                ),
+                        )
+                        .child(view().w(px(72.0)).items_start().child(ui_badge(
+                            move || {
+                                let label = rows.with(|list| {
+                                    list.get(at.index())
+                                        .and_then(|e| e.layer)
+                                        .map_or_else(|| "—".to_owned(), |l| format!("L{}", l + 1))
+                                });
+                                SharedString::from(label)
+                            },
+                            BadgeTone::Neutral,
+                        )))
+                        .child(
+                            view()
+                                .w(px(120.0))
+                                .flex_row()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(dynamic(move || {
+                                    let share = rows
+                                        .with(|list| list.get(at.index()).map_or(0.0, |e| e.share));
+                                    ui_size_bar(share, px(54.0)).into_element()
+                                }))
+                                .child(
+                                    text(move || {
+                                        rows.with(|list| {
+                                            list.get(at.index())
+                                                .map(|e| format!("{:.1}%", e.share * 100.0))
+                                                .unwrap_or_default()
+                                        })
+                                    })
+                                    .w(px(44.0))
                                     .text_xs()
                                     .font_family(font_mono_family())
                                     .tabular_nums()
                                     .text_right()
-                                    .text_color(move || theme().foreground),
-                            )
-                    }
+                                    .text_color(move || theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            text(move || {
+                                rows.with(|list| {
+                                    list.get(at.index())
+                                        .map(|e| format_bytes(e.size))
+                                        .unwrap_or_default()
+                                })
+                            })
+                            .w(px(88.0))
+                            .text_xs()
+                            .font_family(font_mono_family())
+                            .tabular_nums()
+                            .text_right()
+                            .text_color(move || theme().foreground),
+                        )
                 },
             )
             .flex_1()
             .min_h(px(0.0))
             .estimated_item_size(px(32.0))
             .keys(move || {
-                items
-                    .iter()
-                    .map(|c| c.path.clone())
-                    .collect::<Vec<String>>()
+                rows.with(|list| list.iter().map(|c| c.path.clone()).collect::<Vec<String>>())
             }),
         )
 }
@@ -745,4 +869,194 @@ fn find_tree_item<'a>(items: &'a [FileTreeItem], segments: &[String]) -> Option<
         cursor = cursor.children.iter().find(|it| it.name == *seg)?;
     }
     Some(cursor)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::{Analyzer, FileTreeItem, ImageLayer, Op};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::{DivingService, build_final_tree};
+    use crate::ui::app_tokens;
+
+    fn large_treemap_result(count: usize) -> Arc<DockerAnalyzeResult> {
+        let mut files = Vec::with_capacity(count);
+        for i in 0..count {
+            files.push(FileTreeItem {
+                name: format!("item-{i:02}.dat"),
+                size: ((count - i) as u64) * 1024,
+                op: Op::Added,
+                mode: "-rw-r--r--".to_owned(),
+                ..Default::default()
+            });
+        }
+        Arc::new(DockerAnalyzeResult {
+            layers: vec![ImageLayer {
+                digest: "sha256:tm".to_owned(),
+                cmd: "COPY items /".to_owned(),
+                size: 1024,
+                unpack_size: 102400,
+                ..Default::default()
+            }],
+            file_tree_list: vec![files],
+            ..Default::default()
+        })
+    }
+
+    #[component]
+    fn TreemapAsyncAndTableHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = large_treemap_result(90);
+        state.result.set(Some(res.clone()));
+
+        let load_state = state.clone();
+        let load_res = res.clone();
+        let preview_sig = state.preview_target;
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(ui_button(
+                        "Resolve tree",
+                        ButtonVariant::Ghost,
+                        UiSize::Sm,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            let tree = build_final_tree(&load_res.file_tree_list);
+                            load_state.final_tree.set(Some(SharedRef::new(tree)));
+                        },
+                    ))
+                    .child(text(move || {
+                        preview_sig
+                            .get()
+                            .map(|t| format!("Preview: {}", t.path))
+                            .unwrap_or_default()
+                    })),
+            )
+            .child(treemap_tab(state, res))
+    }
+
+    #[test]
+    fn treemap_subscribes_to_final_tree_and_recycles_90_table_rows_without_stale_data() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<TreemapAsyncAndTableHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start treemap harness");
+
+        // Starts in loading state while final_tree is None (never blocks UI thread).
+        app.wait_for_within("Analyzing…", Duration::from_secs(2))
+            .expect("loading indicator rendered while final_tree is None");
+        assert!(!app.shows("Root"));
+
+        // Resolving final_tree reactively displays Root & Map/Table toggle.
+        app.press("Resolve tree").expect("resolve final_tree");
+        app.wait_for_within("Root", Duration::from_secs(2))
+            .expect("Root toolbar rendered after final_tree resolved");
+
+        app.press("Table").expect("switch to Table mode");
+        app.wait_for_within("item-00.dat", Duration::from_secs(2))
+            .expect("top row visible");
+
+        // Scroll virtual_list to the bottom and verify recycled cells show bottom rows accurately.
+        let list_id = app
+            .screen()
+            .layout_nodes()
+            .into_iter()
+            .find(|n| n.scroll.as_ref().is_some_and(|s| !s.horizontal))
+            .expect("virtual_list scroll node")
+            .id;
+        app.scroll(&format!("view:{list_id}"), px(3000.0))
+            .expect("scroll treemap table to bottom");
+        app.wait_for_within("item-89.dat", Duration::from_secs(2))
+            .expect("bottom row item-89.dat rendered after recycling");
+        assert!(
+            !app.shows("item-00.dat"),
+            "top row item-00.dat should be scrolled out, not leaked into recycled cells"
+        );
+        app.press("item-89.dat").expect("click recycled bottom row");
+        app.wait_for_within("Preview: item-89.dat", Duration::from_secs(2))
+            .expect("recycled row on_press must open item-89.dat, not stale item-00.dat");
+    }
+
+    #[component]
+    fn TreemapShrinkHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = large_treemap_result(90);
+        let initial = (0..90)
+            .map(|i| TreemapTableRow {
+                name: format!("item-{i:02}.dat"),
+                path: format!("item-{i:02}.dat"),
+                size: 1024,
+                is_dir: false,
+                layer: Some(0),
+                share: 1.0 / 90.0,
+            })
+            .collect();
+        let rows = signal(Arc::new(initial));
+
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(ui_button(
+                "Shrink list",
+                ButtonVariant::Ghost,
+                UiSize::Sm,
+                None,
+                false,
+                false,
+                move || rows.set(Arc::new(Vec::new())),
+            ))
+            .child(treemap_table_list(state, res, rows))
+    }
+
+    #[test]
+    fn treemap_table_handles_shrinking_rows_while_scrolled_without_panic() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<TreemapShrinkHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start treemap shrink harness");
+        app.wait_for_within("item-00.dat", Duration::from_secs(2))
+            .expect("initial rows mounted");
+        let list_id = app
+            .screen()
+            .layout_nodes()
+            .into_iter()
+            .find(|n| n.scroll.as_ref().is_some_and(|s| !s.horizontal))
+            .expect("virtual_list scroll node")
+            .id;
+        app.scroll(&format!("view:{list_id}"), px(1500.0))
+            .expect("scroll down mid-list");
+        app.press("Shrink list")
+            .expect("shrink list while scrolled must not panic on out-of-bounds index");
+        app.wait_for_gone("item-89.dat", Duration::from_secs(2))
+            .expect("shrunk list rendered safely");
+    }
 }

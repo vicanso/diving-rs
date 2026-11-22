@@ -14,7 +14,7 @@ use nsh_core::prelude::*;
 use crate::domain::{
     AppState, InspectorTab, format_bytes, format_runtime_compat, image_source_kind,
 };
-use crate::i18n::{UiLang, t, tf};
+use crate::i18n::{UiLang, localize_risk_tag, t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, danger, font_mono_family, success,
     text_tertiary, theme, ui_badge, ui_banner, ui_button, ui_empty_state, ui_icon,
@@ -167,27 +167,11 @@ fn metric_ribbon(
     let user = res.user.clone();
     let runtime_compat = res.runtime_compat.clone();
     let runtime_tone = format_runtime_compat(&runtime_compat, UiLang::En).map(|(_, tone)| tone);
-    let tags: Vec<String> = res
-        .tags
-        .iter()
-        .take(3)
-        .map(|tag| tag.trim_matches(|c| c == '[' || c == ']').to_owned())
-        .collect();
+    let raw_tags: Vec<String> = res.tags.iter().take(3).cloned().collect();
     let overflow_tags = res.tags.len().saturating_sub(3);
 
-    view()
-        .w_full()
-        .min_h(px(36.0))
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_3()
-        .px_4()
-        .py_1p5()
-        .bg(move || theme().background)
-        .border_b_1()
-        .border_color(move || theme().border)
-        .child(metric_pair(
+    let mut items: Vec<AnyElement> = vec![
+        metric_pair(
             move || SharedString::from(t(lang.get(), "kpi.efficiency")),
             view()
                 .flex_row()
@@ -202,19 +186,19 @@ fn metric_ribbon(
                         .tabular_nums()
                         .text_color(score_color),
                 ),
-        ))
-        .child(metric_divider())
-        .child(metric_mono_pair(
+        )
+        .into_element(),
+        metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.image_size")),
             format_bytes(res.total_size),
-        ))
-        .child(metric_divider())
-        .child(metric_mono_pair(
+        )
+        .into_element(),
+        metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.compressed")),
             format_bytes(res.size),
-        ))
-        .child(metric_divider())
-        .child(metric_pair(
+        )
+        .into_element(),
+        metric_pair(
             move || SharedString::from(t(lang.get(), "kpi.wasted")),
             text(if has_waste {
                 format!("{} ({wasted_pct})", format_bytes(wasted_size))
@@ -232,27 +216,34 @@ fn metric_ribbon(
                     theme().foreground
                 }
             }),
-        ))
-        .child(metric_divider())
-        .child(metric_mono_pair(
+        )
+        .into_element(),
+        metric_mono_pair(
             move || SharedString::from(t(lang.get(), "kpi.platform")),
             platform,
-        ))
-        .when(!base_os.is_empty(), |row| {
-            row.child(metric_divider()).child(metric_mono_pair(
+        )
+        .into_element(),
+    ];
+
+    if !base_os.is_empty() {
+        items.push(
+            metric_mono_pair(
                 move || SharedString::from(t(lang.get(), "kpi.base_os")),
                 base_os,
-            ))
-        })
-        .when(!user.is_empty(), |row| {
-            row.child(metric_divider()).child(metric_mono_pair(
-                move || SharedString::from(t(lang.get(), "kpi.user")),
-                user,
-            ))
-        })
-        .when_some(runtime_tone, |row, tone| {
-            let rc = runtime_compat.clone();
-            row.child(metric_divider()).child(metric_pair(
+            )
+            .into_element(),
+        );
+    }
+    if !user.is_empty() {
+        items.push(
+            metric_mono_pair(move || SharedString::from(t(lang.get(), "kpi.user")), user)
+                .into_element(),
+        );
+    }
+    if let Some(tone) = runtime_tone {
+        let rc = runtime_compat.clone();
+        items.push(
+            metric_pair(
                 move || SharedString::from(t(lang.get(), "kpi.libc")),
                 ui_badge(
                     move || {
@@ -264,31 +255,76 @@ fn metric_ribbon(
                     },
                     tone,
                 ),
-            ))
-        })
-        .when(!tags.is_empty(), |row| {
-            row.child(metric_divider()).child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .children(
-                        tags.into_iter()
-                            .map(|tag| ui_badge(tag, BadgeTone::Neutral)),
-                    )
-                    .when(overflow_tags > 0, |r| {
-                        r.child(ui_badge(format!("+{overflow_tags}"), BadgeTone::Neutral))
-                    }),
             )
-        })
-}
+            .into_element(),
+        );
+    }
+    if !raw_tags.is_empty() {
+        items.push(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .children(raw_tags.into_iter().map(move |tag| {
+                    ui_badge(
+                        move || SharedString::from(localize_risk_tag(lang.get(), &tag)),
+                        BadgeTone::Neutral,
+                    )
+                }))
+                .when(overflow_tags > 0, |r| {
+                    r.child(ui_badge(format!("+{overflow_tags}"), BadgeTone::Neutral))
+                })
+                .into_element(),
+        );
+    }
 
-fn metric_divider() -> impl IntoElement {
+    let item_ys: Vec<Signal<Option<f32>>> = (0..items.len()).map(|_| signal(None)).collect();
+
     view()
-        .w(px(1.0))
-        .h(px(12.0))
-        .bg(move || theme().border)
-        .accessibility_elements_hidden(true)
+        .w_full()
+        .min_h(px(36.0))
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_x_3()
+        .gap_y_1p5()
+        .px_4()
+        .py_1p5()
+        .bg(move || theme().background)
+        .border_b_1()
+        .border_color(move || theme().border)
+        .children(items.into_iter().enumerate().map(|(idx, item)| {
+            let y_sig = item_ys[idx];
+            let next_y_sig = item_ys.get(idx + 1).copied();
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    let y = bounds.origin.y.0;
+                    if y_sig
+                        .get_untracked()
+                        .is_none_or(|prev| (prev - y).abs() > 0.5)
+                    {
+                        y_sig.set(Some(y));
+                    }
+                })
+                .child(item)
+                .when_some(next_y_sig, |row, next_sig| {
+                    // Only show the vertical divider when the following item sits on the same row.
+                    row.child(
+                        view()
+                            .w(px(1.0))
+                            .h(px(12.0))
+                            .bg(move || match (y_sig.get(), next_sig.get()) {
+                                (Some(y0), Some(y1)) if (y0 - y1).abs() <= 2.0 => theme().border,
+                                _ => AdaptiveColor::from(transparent_black()),
+                            })
+                            .accessibility_elements_hidden(true),
+                    )
+                })
+        }))
 }
 
 fn metric_pair(
@@ -355,15 +391,16 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let tab = state.active_tab;
     let source = state.current_image;
-    let notice = state.status_notice;
 
     view()
-        .h(px(24.0))
+        .min_h(px(24.0))
         .w_full()
         .flex_row()
         .items_center()
         .justify_between()
+        .gap_3()
         .px_3p5()
+        .py_0p5()
         .bg(move || theme().background)
         .border_t_1()
         .border_color(move || theme().border)
@@ -372,28 +409,146 @@ fn bottom_status_bar(state: AppState) -> impl IntoElement {
                 InspectorTab::FileTree => t(lang.get(), "status.hints_files"),
                 _ => t(lang.get(), "status.hints_general"),
             })
-            .text_size(px(11.0))
+            .flex_1()
+            .min_w(px(0.0))
+            .number_of_lines(1)
+            .text_xs()
             .text_color(text_tertiary),
         )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(when(
-                    move || notice.get().is_some(),
-                    move || {
-                        text(move || notice.get().unwrap_or_default())
-                            .text_size(px(11.0))
-                            .text_color(move || theme().foreground)
-                    },
-                ))
-                .child(ui_badge(
-                    move || {
-                        let kind = image_source_kind(&source.get());
-                        SharedString::from(t(lang.get(), kind.i18n_key()))
-                    },
-                    BadgeTone::Neutral,
-                )),
-        )
+        .child(view().flex_shrink_0().child(ui_badge(
+            move || {
+                let kind = image_source_kind(&source.get());
+                SharedString::from(t(lang.get(), kind.i18n_key()))
+            },
+            BadgeTone::Neutral,
+        )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use diving_core::{Analyzer, ImageLayer, RuntimeCompat};
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::{DivingService, SharedRef};
+    use crate::ui::app_tokens;
+
+    #[component]
+    fn InspectorCompactRibbonHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = Arc::new(DockerAnalyzeResult {
+            os: "linux".to_owned(),
+            arch: "amd64".to_owned(),
+            base_os: "debian:12".to_owned(),
+            user: "root".to_owned(),
+            size: 12_000_000,
+            total_size: 24_000_000,
+            tags: vec![
+                "[Potential Secrets]".to_owned(),
+                "[Runs as Root]".to_owned(),
+                "[High Layer Count: 42]".to_owned(),
+            ],
+            runtime_compat: RuntimeCompat {
+                entrypoint: "/app/server".to_owned(),
+                libc: "glibc".to_owned(),
+                required_glibc: "2.38".to_owned(),
+                os_glibc: "2.36".to_owned(),
+                issue: "glibc-too-old".to_owned(),
+                needed_libs: Vec::new(),
+            },
+            layers: vec![ImageLayer {
+                digest: "sha256:one".to_owned(),
+                cmd: "COPY . /app".to_owned(),
+                size: 12_000_000,
+                unpack_size: 24_000_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let summary = SharedRef::new(res.summary());
+        state.result.set(Some(res));
+        state.summary.set(Some(summary));
+        state.current_image.set("demo:v1".to_owned());
+        state.show_status_notice("Global notice only".to_owned());
+
+        let lang_state = state.clone();
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(ui_button(
+                "Switch ZH",
+                ButtonVariant::Ghost,
+                UiSize::Sm,
+                None,
+                false,
+                false,
+                move || lang_state.lang.set(UiLang::Zh),
+            ))
+            .child(inspector_workspace(state))
+    }
+
+    #[test]
+    fn metric_ribbon_localizes_tags_omits_duplicate_notice_and_hides_wrapped_dividers() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<InspectorCompactRibbonHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start inspector ribbon harness");
+        app.wait_for_within("Potential Secrets", Duration::from_secs(2))
+            .expect("risk tags rendered");
+
+        // Status notice must not be duplicated in inspector bottom_status_bar.
+        assert!(!app.shows("Global notice only"));
+
+        // Every visible 1x12 divider must have an item on the same row to its right.
+        let nodes = app.screen().layout_nodes();
+        let dividers: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                (n.bounds.size.width.0 - 1.0).abs() < 0.2
+                    && (n.bounds.size.height.0 - 12.0).abs() < 0.2
+            })
+            .collect();
+        assert!(!dividers.is_empty(), "expected metric dividers");
+        for div in dividers {
+            let visible = app
+                .screen()
+                .view_style(&format!("view:{}", div.id))
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.background_color.is_some_and(|bg| (bg & 0xff) > 0));
+            if visible {
+                let has_right_sibling_same_row = nodes.iter().any(|n| {
+                    n.id != div.id
+                        && n.text.is_some()
+                        && (n.bounds.origin.y.0 - div.bounds.origin.y.0).abs() < 12.0
+                        && n.bounds.origin.x.0 > div.bounds.origin.x.0
+                });
+                assert!(
+                    has_right_sibling_same_row,
+                    "visible divider at ({}, {}) has no text on its right on the same row",
+                    div.bounds.origin.x.0, div.bounds.origin.y.0
+                );
+            }
+        }
+
+        // Risk tags localize reactively in ZH.
+        app.press("Switch ZH").expect("switch to ZH");
+        app.wait_for_within("疑似存在密钥", Duration::from_secs(2))
+            .expect("ZH risk tag localized");
+        assert!(app.shows("以 root 运行"));
+        assert!(app.shows("镜像层数过多：42"));
+    }
 }

@@ -6,6 +6,7 @@ use nsh_core::prelude::*;
 
 use crate::domain::{AppState, FilePreviewContent, format_bytes};
 use crate::i18n::{t, tf};
+use crate::status_notice_banner;
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, theme, ui_badge, ui_banner, ui_button,
     ui_code_viewer, ui_empty_state, ui_hex_viewer, ui_separator, ui_sheet, ui_skeleton,
@@ -31,8 +32,17 @@ pub fn file_preview_sheet(state: AppState) -> impl IntoElement {
 fn sheet_body(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let copied = signal(false);
+    let copy_seq = signal(0_u64);
     let header_state = state.clone();
+    let notice_state = state.clone();
     let content_state = state.clone();
+    let target_reset_state = state.clone();
+
+    effect(move || {
+        let _ = target_reset_state.preview_target.get();
+        copy_seq.set(copy_seq.get_untracked().wrapping_add(1));
+        copied.set(false);
+    });
 
     view()
         .flex_1()
@@ -48,6 +58,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
             let save_state = header_state.clone();
             let layer_num = (target.layer_index + 1).to_string();
             let size_label = format_bytes(target.size);
+            let is_symlink = target.mode.starts_with('l');
             let mode_label = if target.mode.is_empty() {
                 "—".to_owned()
             } else {
@@ -77,6 +88,12 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             },
                             BadgeTone::Neutral,
                         ))
+                        .when(is_symlink, |row| {
+                            row.child(ui_badge(
+                                move || SharedString::from(t(lang.get(), "sheet.symlink")),
+                                BadgeTone::Info,
+                            ))
+                        })
                         .child(ui_badge(size_label, BadgeTone::Neutral))
                         .child(ui_badge(mode_label, BadgeTone::Neutral))
                         .child(ui_badge(uid_label, BadgeTone::Neutral)),
@@ -127,9 +144,13 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                     };
                                     if let Some(body) = payload {
                                         set_clipboard(body);
+                                        let next_seq = copy_seq.get_untracked().wrapping_add(1);
+                                        copy_seq.set(next_seq);
                                         copied.set(true);
                                         set_timeout(Duration::from_millis(1500), move || {
-                                            copied.set(false);
+                                            if copy_seq.try_get() == Some(next_seq) {
+                                                copied.try_set(false);
+                                            }
                                         });
                                     }
                                 },
@@ -148,6 +169,10 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                 .into_element()
         }))
         .child(ui_separator())
+        .child(when(
+            move || notice_state.status_notice.get().is_some(),
+            move || status_notice_banner(state.clone()),
+        ))
         .child(
             view()
                 .flex_1()
@@ -173,6 +198,10 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                         return ui_banner(BannerTone::Danger, SharedString::from(err), None)
                             .into_element();
                     }
+                    let is_symlink = content_state
+                        .preview_target
+                        .get()
+                        .is_some_and(|target| target.mode.starts_with('l'));
                     match content_state.preview_content.get() {
                         Some(FilePreviewContent::Empty) => ui_empty_state(
                             IconName::File,
@@ -181,6 +210,18 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             None,
                         )
                         .into_element(),
+                        Some(FilePreviewContent::Text { text, .. }) if is_symlink => view()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .items_center()
+                            .justify_center()
+                            .child(ui_empty_state(
+                                IconName::Link,
+                                move || SharedString::from(t(lang.get(), "sheet.symlink")),
+                                SharedString::from(text),
+                                None,
+                            ))
+                            .into_element(),
                         Some(FilePreviewContent::Text {
                             text,
                             language,
@@ -248,4 +289,176 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                     }
                 })),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use diving_core::Analyzer;
+    use nsh_core::clipboard::{ClipboardBackend, MemoryClipboard};
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::domain::{DivingService, PreviewTarget};
+    use crate::ui::app_tokens;
+
+    fn test_state() -> AppState {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        state.preview_target.set(Some(PreviewTarget {
+            image_ref: "demo:v1".to_owned(),
+            layer_index: 0,
+            layer_digest: "sha256:abc".to_owned(),
+            media_type: String::new(),
+            path: "etc/app.conf".to_owned(),
+            size: 16,
+            mode: "-rw-r--r--".to_owned(),
+            uid: 0,
+            gid: 0,
+        }));
+        state.preview_content.set(Some(FilePreviewContent::Text {
+            text: "port = 8080\n".to_owned(),
+            language: Some("ini"),
+            shown_bytes: 12,
+            total_size: 12,
+            truncated: false,
+        }));
+        state.preview_sheet_open.set(true);
+        state
+    }
+
+    #[component]
+    fn SheetTimerHarness() -> impl IntoElement {
+        let state = test_state();
+        provide_context(state.clone());
+        view()
+            .flex_1()
+            .bg(move || theme().background)
+            .child(file_preview_sheet(state))
+    }
+
+    #[test]
+    fn copy_timer_does_not_panic_when_sheet_closes_before_1500ms() {
+        let clipboard = Arc::new(MemoryClipboard::new(None));
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            clock: Clock::manual(SystemTime::UNIX_EPOCH),
+            clipboard: Some(clipboard.clone()),
+            ..EngineConfig::new(Root::of::<SheetTimerHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start sheet harness");
+        app.wait_for_within("Copy", Duration::from_secs(2))
+            .expect("Copy button visible");
+        app.press("Copy").expect("click Copy");
+        assert_eq!(clipboard.text().as_deref(), Some("port = 8080\n"));
+        app.wait_for_within("Copied", Duration::from_secs(1))
+            .expect("Copied feedback shown");
+
+        app.press("Close sheet").expect("close sheet before 1.5s");
+        app.wait_for_gone("Copy", Duration::from_secs(2))
+            .expect("sheet closed");
+        app.fast_forward(Duration::from_millis(1600))
+            .expect("1.5s copy reset timer after sheet close must not panic");
+    }
+
+    #[component]
+    fn SheetNoticeBinarySymlinkHarness() -> impl IntoElement {
+        let state = test_state();
+        provide_context(state.clone());
+        state.show_status_notice("Saved to /tmp/app.conf.".to_owned());
+        state.preview_target.set(Some(PreviewTarget {
+            image_ref: "demo:v1".to_owned(),
+            layer_index: 1,
+            layer_digest: "sha256:def".to_owned(),
+            media_type: String::new(),
+            path: "bin/demo.bin".to_owned(),
+            size: 1024,
+            mode: "-rwxr-xr-x".to_owned(),
+            uid: 0,
+            gid: 0,
+        }));
+        state
+            .preview_content
+            .set(Some(FilePreviewContent::BinaryHex {
+                hex_dump: "00000000  7f 45 4c 46  |.ELF|".to_owned(),
+                shown_bytes: 4,
+                total_size: 1024,
+                truncated: true,
+            }));
+
+        let s_sym = state.clone();
+        view()
+            .flex_1()
+            .bg(move || theme().background)
+            .child(
+                ui_button(
+                    "Switch to symlink",
+                    ButtonVariant::Default,
+                    UiSize::Sm,
+                    None,
+                    false,
+                    false,
+                    move || {
+                        s_sym.preview_target.set(Some(PreviewTarget {
+                            image_ref: "demo:v1".to_owned(),
+                            layer_index: 1,
+                            layer_digest: "sha256:def".to_owned(),
+                            media_type: String::new(),
+                            path: "usr/bin/sh".to_owned(),
+                            size: 0,
+                            mode: "lrwxrwxrwx".to_owned(),
+                            uid: 0,
+                            gid: 0,
+                        }));
+                        s_sym.preview_content.set(Some(FilePreviewContent::Text {
+                            text: "Symbolic link → busybox".to_owned(),
+                            language: None,
+                            shown_bytes: 25,
+                            total_size: 25,
+                            truncated: false,
+                        }));
+                        s_sym.preview_sheet_open.set(true);
+                    },
+                )
+                .into_element(),
+            )
+            .child(file_preview_sheet(state))
+    }
+
+    #[test]
+    fn sheet_shows_status_notice_binary_sizes_and_symlink_info() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<SheetNoticeBinarySymlinkHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start sheet features harness");
+        app.wait_for_within("Saved to /tmp/app.conf.", Duration::from_secs(2))
+            .expect("status notice visible inside open sheet");
+        app.wait_for_within(
+            "Binary file — showing first 4 B of 1.0 KiB as hex dump.",
+            Duration::from_secs(2),
+        )
+        .expect("formatted byte placeholders in binary preview banner");
+
+        app.press("Close sheet").expect("close sheet before switch");
+        app.wait_for_gone("00000000  7f 45 4c 46  |.ELF|", Duration::from_secs(2))
+            .expect("sheet closed");
+        app.press("Switch to symlink").expect("switch to symlink");
+        app.wait_for_within("Symbolic link → busybox", Duration::from_secs(2))
+            .expect("symlink target displayed cleanly");
+        assert!(app.shows("Symbolic link"));
+    }
 }
