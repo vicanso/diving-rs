@@ -6,6 +6,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.100.0"
 
 jobs:
   # Formatting, lints and the full test suite (unit + integration; none of
@@ -20,8 +21,9 @@ jobs:
           node-version: 24
           cache: yarn
           cache-dependency-path: web/yarn.lock
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # Verify core library and CLI binary compile without web assets.
@@ -46,10 +48,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_VERSION }}
       - name: release cli
         run: cargo build --release -p diving
       - name: check web

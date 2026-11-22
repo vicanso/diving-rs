@@ -16,6 +16,7 @@ env:
   IMAGE_NAME: vicanso/diving
   NSH_VERSION: v0.6.1
   APP_NAME: Diving
+  RUST_VERSION: "1.100.0"
 
 jobs:
   # Pre-create the draft release for this tag exactly once, so the platform
@@ -53,8 +54,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,7 +80,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: publish-cli-windows
@@ -101,6 +105,10 @@ jobs:
           image: messense/rust-musl-cross:x86_64-musl
           options: -v ${{ github.workspace }}:/home/rust/src
           run: |
+            set -eu
+            rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --no-self-update --target x86_64-unknown-linux-musl
+            rustup default ${{ env.RUST_VERSION }}
+            rustc --version
             cargo build --release -p diving
             mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86_64
       - name: Upload Assets
@@ -118,6 +126,10 @@ jobs:
           image: messense/rust-musl-cross:aarch64-musl
           options: -v ${{ github.workspace }}:/home/rust/src
           run: |
+            set -eu
+            rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --no-self-update --target aarch64-unknown-linux-musl
+            rustup default ${{ env.RUST_VERSION }}
+            rustc --version
             cargo build --release -p diving
             mv target/aarch64-unknown-linux-musl/release/diving ./diving-linux-aarch64
       - name: Upload Assets
@@ -142,8 +154,9 @@ jobs:
           AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
         run: ./.github/workflows/sign_and_package_macos.sh --preflight
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
@@ -242,7 +255,9 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -307,7 +322,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - uses: Swatinem/rust-cache@v2
         with:
