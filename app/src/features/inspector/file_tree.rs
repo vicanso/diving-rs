@@ -54,8 +54,8 @@ pub fn file_tree_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
             debounced_keyword.set(kw);
         } else {
             set_timeout(Duration::from_millis(120), move || {
-                if debounce_seq.get_untracked() == next_seq {
-                    debounced_keyword.set(kw);
+                if debounce_seq.try_get() == Some(next_seq) {
+                    let _ = debounced_keyword.try_set(kw);
                 }
             });
         }
@@ -960,5 +960,31 @@ mod tests {
             .expect("file tree unmounted");
         app.fast_forward(Duration::from_millis(1600))
             .expect("1.5s copy timer after file tree unmount must not panic");
+    }
+
+    #[test]
+    fn filter_debounce_timer_safe_on_tab_switch_within_120ms() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            clock: Clock::manual(SystemTime::UNIX_EPOCH),
+            ..EngineConfig::new(Root::of::<FileTreeHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start file_tree debounce harness");
+        app.wait_for_within("Copy digest", Duration::from_secs(2))
+            .expect("file tree toolbar ready");
+
+        app.type_text("Filter files in layer", "app.conf")
+            .expect("type filter keyword");
+        app.press("Unmount file tree")
+            .expect("unmount file tree within 120ms");
+        app.wait_for_gone("Copy digest", Duration::from_secs(2))
+            .expect("file tree unmounted");
+        app.fast_forward(Duration::from_millis(200))
+            .expect("120ms filter debounce timer after unmount must not panic");
     }
 }

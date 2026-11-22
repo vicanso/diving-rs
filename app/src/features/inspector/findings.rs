@@ -151,7 +151,7 @@ fn recommendations_panel(
                     let category = rec.category.clone();
                     let title = strip_inline_markdown(&rec.title);
                     let detail = strip_inline_markdown(&rec.detail);
-                    let hint = rec.dockerfile_hint.clone();
+                    let hint = strip_inline_markdown(&rec.dockerfile_hint);
                     let paths = rec.paths.clone();
                     let est_saved = rec.est_saved_bytes;
                     let is_heuristic = rec.heuristic;
@@ -694,7 +694,9 @@ mod tests {
                 severity: "high".to_owned(),
                 title: "Container *runs* as root".to_owned(),
                 detail: "Add `USER nonroot` in the *same* step.".to_owned(),
-                dockerfile_hint: "USER nonroot".to_owned(),
+                dockerfile_hint:
+                    "Create in the *same* step; use BuildKit `--mount=type=secret` and `USER nonroot`."
+                        .to_owned(),
                 paths: Vec::new(),
                 est_saved_bytes: 0,
                 heuristic: false,
@@ -744,7 +746,13 @@ mod tests {
         assert!(app.shows("Security"));
         assert!(app.shows("Container runs as root"));
         assert!(app.shows("Add USER nonroot in the same step."));
+        assert!(
+            app.shows(
+                "Create in the same step; use BuildKit --mount=type=secret and USER nonroot."
+            )
+        );
         assert!(!app.shows("`USER nonroot`"));
+        assert!(!app.shows("`--mount=type=secret`"));
         assert!(!app.shows("*same*"));
         assert!(app.shows("1.0 KiB (debug 512 B)"));
 
