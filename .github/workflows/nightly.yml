@@ -149,7 +149,17 @@ jobs:
     needs: [check]
     if: needs.check.outputs.should_build == 'true'
     timeout-minutes: 60
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            runs_on: windows-latest
+            asset_name: diving-windows.exe
+          - arch: aarch64
+            runs_on: windows-11-arm
+            asset_name: diving-windows-aarch64.exe
+    runs-on: ${{ matrix.platform.runs_on }}
     defaults:
       run:
         shell: bash
@@ -164,20 +174,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly-cli-windows
+          shared-key: nightly-cli-windows-${{ matrix.platform.arch }}
           cache-on-failure: true
 
-      - name: Build CLI binary (Windows)
+      - name: Build CLI binary (Windows ${{ matrix.platform.arch }})
+        env:
+          ASSET_NAME: ${{ matrix.platform.asset_name }}
         run: |
           set -euo pipefail
           cargo build --release -p diving
           mkdir -p dist
-          cp target/release/diving.exe dist/diving-windows.exe
+          cp target/release/diving.exe "dist/${ASSET_NAME}"
 
       - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-cli-windows
+          name: nightly-cli-windows-${{ matrix.platform.arch }}
           path: dist/*
           if-no-files-found: error
           retention-days: 1
@@ -448,7 +460,17 @@ jobs:
     needs: [check]
     if: needs.check.outputs.should_build == 'true'
     timeout-minutes: 60
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            nsh_platform: windows-x86_64
+            runs_on: windows-latest
+          - arch: aarch64
+            nsh_platform: windows-arm64
+            runs_on: windows-11-arm
+    runs-on: ${{ matrix.platform.runs_on }}
     defaults:
       run:
         shell: pwsh
@@ -466,14 +488,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "app -> target"
-          shared-key: nightly-app-windows
+          shared-key: nightly-app-windows-${{ matrix.platform.arch }}
           cache-on-failure: true
 
       - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          $asset = 'nsh-windows-x86_64.zip'
+          $asset = "nsh-$($env:NSH_PLATFORM).zip"
           $baseUrl = "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION"
           $dlDir = Join-Path $env:RUNNER_TEMP 'nsh-dl'
           $nshDir = Join-Path $env:RUNNER_TEMP 'nsh'
@@ -504,10 +528,11 @@ jobs:
             throw "nsh.exe --version failed with exit code $LASTEXITCODE"
           }
 
-      - name: Package Diving Desktop (Windows x86_64)
+      - name: Package Diving Desktop (Windows ${{ matrix.platform.arch }})
         working-directory: app
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
+          TARGET_ARCH: ${{ matrix.platform.arch }}
         run: |
           $ErrorActionPreference = 'Stop'
           $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'
@@ -528,17 +553,17 @@ jobs:
             Get-ChildItem -Path $outDir | Format-Table Name, Length
             throw 'Expected a .zip package from nsh package --target windows'
           }
-          Copy-Item $zip.FullName (Join-Path $stageDir 'Diving-nightly-windows-x86_64.zip')
+          Copy-Item $zip.FullName (Join-Path $stageDir "Diving-nightly-windows-$($env:TARGET_ARCH).zip")
 
           $setup = Get-ChildItem -Path $outDir -File -Filter '*-setup.exe' | Select-Object -First 1
           if ($setup) {
-            Copy-Item $setup.FullName (Join-Path $stageDir 'Diving-nightly-windows-x86_64-setup.exe')
+            Copy-Item $setup.FullName (Join-Path $stageDir "Diving-nightly-windows-$($env:TARGET_ARCH)-setup.exe")
           }
 
       - name: Upload Diving Desktop artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-app-windows
+          name: nightly-app-windows-${{ matrix.platform.arch }}
           path: ${{ runner.temp }}/diving-app-stage/*
           if-no-files-found: error
           retention-days: 1

@@ -74,7 +74,17 @@ jobs:
 
   windows:
     needs: [prepare-release]
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            runs_on: windows-latest
+            asset_name: diving-windows.exe
+          - arch: aarch64
+            runs_on: windows-11-arm
+            asset_name: diving-windows-aarch64.exe
+    runs-on: ${{ matrix.platform.runs_on }}
     defaults:
       run:
         shell: bash
@@ -85,14 +95,16 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: publish-cli-windows
+          shared-key: publish-cli-windows-${{ matrix.platform.arch }}
           cache-on-failure: true
       - name: release
         run: cargo build --release -p diving
       - name: Upload Assets
+        env:
+          ASSET_NAME: ${{ matrix.platform.asset_name }}
         run: |
-          mv target/release/diving.exe ./diving-windows.exe
-          ./.github/workflows/upload_asset.sh ./diving-windows.exe "$GITHUB_TOKEN"
+          mv target/release/diving.exe "./${ASSET_NAME}"
+          ./.github/workflows/upload_asset.sh "./${ASSET_NAME}" "$GITHUB_TOKEN"
 
   linux:
     needs: [prepare-release]
@@ -313,7 +325,17 @@ jobs:
   app-windows:
     needs: [prepare-release]
     timeout-minutes: 60
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            nsh_platform: windows-x86_64
+            runs_on: windows-latest
+          - arch: aarch64
+            nsh_platform: windows-arm64
+            runs_on: windows-11-arm
+    runs-on: ${{ matrix.platform.runs_on }}
     defaults:
       run:
         shell: pwsh
@@ -329,14 +351,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "app -> target"
-          shared-key: publish-app-windows
+          shared-key: publish-app-windows-${{ matrix.platform.arch }}
           cache-on-failure: true
 
       - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          $asset = 'nsh-windows-x86_64.zip'
+          $asset = "nsh-$($env:NSH_PLATFORM).zip"
           $baseUrl = "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION"
           $dlDir = Join-Path $env:RUNNER_TEMP 'nsh-dl'
           $nshDir = Join-Path $env:RUNNER_TEMP 'nsh'
@@ -367,8 +391,10 @@ jobs:
             throw "nsh.exe --version failed with exit code $LASTEXITCODE"
           }
 
-      - name: Package Diving Desktop (Windows x86_64)
+      - name: Package Diving Desktop (Windows ${{ matrix.platform.arch }})
         working-directory: app
+        env:
+          TARGET_ARCH: ${{ matrix.platform.arch }}
         run: |
           $ErrorActionPreference = 'Stop'
           $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'
@@ -390,11 +416,11 @@ jobs:
             Get-ChildItem -Path $outDir | Format-Table Name, Length
             throw 'Expected a .zip package from nsh package --target windows'
           }
-          Copy-Item $zip.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-x86_64.zip")
+          Copy-Item $zip.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-$($env:TARGET_ARCH).zip")
 
           $setup = Get-ChildItem -Path $outDir -File -Filter '*-setup.exe' | Select-Object -First 1
           if ($setup) {
-            Copy-Item $setup.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-x86_64-setup.exe")
+            Copy-Item $setup.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-$($env:TARGET_ARCH)-setup.exe")
           }
 
       - name: Upload Diving Desktop artifact

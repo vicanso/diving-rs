@@ -33,3 +33,9 @@ nsh-engine = { version = "0.6.1", default-features = false }
 nsh-testing = { version = "0.6.1", default-features = false }
 tar = "0.4.46"
 tempfile = "3.27.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"

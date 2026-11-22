@@ -1,0 +1,10 @@
+# `nsh package` compiles a generated runner workspace under `app/.nsh/rust/Cargo.toml`
+# that depends on `app/` as a path dependency, so Cargo ignores `[profile.release]`
+# in `app/Cargo.toml` during packaging. Cargo still walks up parent directories for
+# `.cargo/config.toml`, applying these release settings to both `nsh package` and
+# direct `cargo build --release` invocations under `app/`.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"
