@@ -1,12 +1,12 @@
 //! Styled buttons, icon buttons, and external links built over `nsh_base`.
 
-use nsh_base::{ButtonElement, button, link, theme};
+use nsh_base::{ButtonElement, TooltipEvent, button, link, theme};
 use nsh_core::element::StyleRefinement;
 use nsh_core::prelude::*;
 
 use crate::ui::icons::{IconName, ui_icon, ui_spinner};
 use crate::ui::motion::{FAST, PRESS_BTN_SCALE, PRESS_ICON_SCALE, SOFT_SETTLE, dur, press_scale};
-use crate::ui::overlay::{format_shortcut_hint, ui_tooltip};
+use crate::ui::overlay::{format_shortcut_hint, subscribe_any_menu_open, ui_tooltip};
 use crate::ui::theme::{
     border_strong, danger, destructive_active, destructive_foreground, destructive_hover,
     font_mono_family, primary_active, primary_hover, radius_control, radius_inset,
@@ -507,6 +507,43 @@ pub fn ui_icon_button(
         .child(styled)
 }
 
+fn attach_menu_trigger_tooltip(
+    el: View,
+    tooltip_text: Option<impl IntoReactive<SharedString>>,
+) -> View {
+    let Some(hint) = tooltip_text else {
+        return el;
+    };
+    let menu_open = subscribe_any_menu_open();
+    let press_suppressed = signal(false);
+    let tooltip_open = signal(false);
+    let tooltip_suppressed = computed(move || menu_open.get() || press_suppressed.get());
+
+    effect(move || {
+        if tooltip_suppressed.get() {
+            tooltip_open.try_set(false);
+        }
+    });
+
+    el.on_press_down(move || {
+        press_suppressed.set(true);
+        tooltip_open.set(false);
+    })
+    .on_mouse_leave(move |_: &MouseEvent| {
+        press_suppressed.set(false);
+    })
+    .tooltip(
+        ui_tooltip(hint)
+            .disabled(move || tooltip_suppressed.get())
+            .open(move || Some(tooltip_open.get() && !tooltip_suppressed.get()))
+            .on_open_change(move |event: &TooltipEvent| {
+                if let TooltipEvent::OpenChange(next, _) = event {
+                    tooltip_open.set(*next && !tooltip_suppressed.get_untracked());
+                }
+            }),
+    )
+}
+
 /// Renders a square icon-only trigger compatible with `ui_menu` (`nsh_base::menu().trigger(...)`).
 ///
 /// Unlike [`ui_icon_button`], this renders a press-neutral `view()` without an inner `button()`
@@ -536,9 +573,13 @@ pub fn ui_menu_trigger_icon(
         .duration(move || dur(FAST))
         .ease_bezier(SOFT_SETTLE.0, SOFT_SETTLE.1, SOFT_SETTLE.2, SOFT_SETTLE.3)
         .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
-        .disabled_style(|s| s.opacity(0.45))
-        .when_some(tooltip_text, |el, hint| el.tooltip(ui_tooltip(hint)))
-        .child(ui_icon(icon, size.icon_size(), move || button_fg(variant)));
+        .disabled_style(|s| s.opacity(0.45));
+
+    let base = attach_menu_trigger_tooltip(base, tooltip_text).child(ui_icon(
+        icon,
+        size.icon_size(),
+        move || button_fg(variant),
+    ));
 
     apply_variant_styles(base, variant, PRESS_ICON_SCALE)
 }

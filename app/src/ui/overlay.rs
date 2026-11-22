@@ -1,11 +1,12 @@
 //! Unified popup surfaces, menus, context menus, tooltips, dialogs, sheets, and banners.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use nsh_base::{
     CommandEntry, CommandGroup, CommandItem as BaseCommandItem, ContextMenuElement,
-    ContextMenuEvents, MenuElement, SheetEvent, TooltipElement, command, context_menu, dialog,
-    menu, menu_item, menu_separator, popover, sheet, theme, tooltip,
+    ContextMenuEvents, MenuElement, MenuEvent, SheetEvent, TooltipElement, command, context_menu,
+    dialog, menu, menu_item, menu_separator, popover, sheet, theme, tooltip,
 };
 use nsh_core::element::{IntoProp, StyleRefinement};
 use nsh_core::prelude::*;
@@ -34,13 +35,74 @@ pub fn popup_surface(s: StyleRefinement) -> StyleRefinement {
         .duration(move || dur(FAST))
 }
 
+#[derive(Default)]
+struct MenuOverlayTracker {
+    open_menus: usize,
+    next_id: u64,
+    listeners: Vec<(u64, Signal<bool>)>,
+}
+
+thread_local! {
+    static MENU_OVERLAY_TRACKER: RefCell<MenuOverlayTracker> =
+        RefCell::new(MenuOverlayTracker::default());
+}
+
+fn adjust_open_menu_count(delta: isize) {
+    MENU_OVERLAY_TRACKER.with(|cell| {
+        let mut tracker = cell.borrow_mut();
+        tracker.open_menus = tracker.open_menus.saturating_add_signed(delta);
+        let any_open = tracker.open_menus > 0;
+        tracker.listeners.retain(|(_, sig)| sig.try_set(any_open));
+    });
+}
+
+/// Subscribes the current reactive owner to whether any [`ui_menu`] popup is currently open.
+pub(crate) fn subscribe_any_menu_open() -> Signal<bool> {
+    let initial = MENU_OVERLAY_TRACKER.with(|cell| cell.borrow().open_menus > 0);
+    let open = signal(initial);
+    let id = MENU_OVERLAY_TRACKER.with(|cell| {
+        let mut tracker = cell.borrow_mut();
+        let id = tracker.next_id;
+        tracker.next_id = tracker.next_id.wrapping_add(1);
+        tracker.listeners.push((id, open));
+        id
+    });
+    cleanup(move || {
+        MENU_OVERLAY_TRACKER.with(|cell| {
+            cell.borrow_mut()
+                .listeners
+                .retain(|(entry_id, _)| *entry_id != id);
+        });
+    });
+    open
+}
+
 /// Styled anchored menu built over `nsh_base::menu`.
 pub fn ui_menu(trigger: impl IntoElement) -> MenuElement {
+    let is_open = Rc::new(Cell::new(false));
+    let sync_open = Rc::new(move |next: bool| {
+        if is_open.replace(next) != next {
+            adjust_open_menu_count(if next { 1 } else { -1 });
+        }
+    });
+    let cleanup_sync = sync_open.clone();
+    cleanup(move || cleanup_sync(false));
+    let on_change_sync = sync_open.clone();
+    let on_open_sync = sync_open.clone();
+    let on_close_sync = sync_open;
+
     menu()
         .offset(px(4.0))
         .popup_style(popup_surface)
         .popup_starting_style(|s| s.opacity(0.0).scale(0.97).translate_y(px(-4.0)))
         .popup_ending_style(|s| s.opacity(0.0).scale(0.97))
+        .on_open_change(move |event: &MenuEvent| {
+            if let MenuEvent::OpenChange(next, _) = event {
+                on_change_sync(*next);
+            }
+        })
+        .on_open(move || on_open_sync(true))
+        .on_close(move || on_close_sync(false))
         .trigger(trigger)
 }
 
