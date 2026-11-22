@@ -229,6 +229,32 @@ jobs:
         with:
           ref: ${{ needs.check.outputs.head_sha }}
 
+      - name: Detect macOS signing secrets
+        id: signing
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          if [ -n "$MACOS_CERTIFICATE" ] && [ -n "$MACOS_CERTIFICATE_PWD" ] \
+            && [ -n "$AC_USERNAME" ] && [ -n "$AC_PASSWORD" ] && [ -n "$AC_TEAM_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preflight Apple notary credentials
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: ./.github/workflows/sign_and_package_macos.sh --preflight
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -238,6 +264,10 @@ jobs:
           workspaces: "app -> target"
           shared-key: nightly-app-macos
           cache-on-failure: true
+
+      - name: Install create-dmg
+        if: steps.signing.outputs.enabled == 'true'
+        run: brew install create-dmg
 
       - name: Install NSH CLI (${{ env.NSH_VERSION }})
         env:
@@ -261,6 +291,13 @@ jobs:
         working-directory: app
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
+          SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
         run: |
           set -euo pipefail
           out_dir="${RUNNER_TEMP}/diving-app-out"
@@ -271,14 +308,28 @@ jobs:
             --app-version "$APP_VERSION" \
             --build "$GITHUB_RUN_NUMBER" \
             --out "$out_dir"
-          codesign --verify --deep --strict --verbose=2 "${out_dir}/Diving.app"
-          lipo -archs "${out_dir}/Diving.app/Contents/MacOS/Diving"
-          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
-          if [ -n "$archive" ]; then
-            cp "$archive" "${stage_dir}/Diving-nightly-macos-universal.tar.gz"
+          if [ "$SIGNING_ENABLED" = "true" ]; then
+            APP_PATH="${out_dir}/Diving.app" \
+            STAGE_DIR="$stage_dir" \
+            DMG_NAME="Diving-nightly-macos-universal.dmg" \
+            TAR_NAME="Diving-nightly-macos-universal.tar.gz" \
+            VOL_NAME="Diving Installer" \
+              ../.github/workflows/sign_and_package_macos.sh --package
           else
-            COPYFILE_DISABLE=1 tar -czf "${stage_dir}/Diving-nightly-macos-universal.tar.gz" -C "$out_dir" Diving.app
+            echo "::warning::macOS signing/notary secrets are not configured; packaging ad-hoc signed Diving.app without DMG or notarization"
+            codesign --verify --deep --strict --verbose=2 "${out_dir}/Diving.app"
+            lipo -archs "${out_dir}/Diving.app/Contents/MacOS/Diving"
+            archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
+            if [ -n "$archive" ]; then
+              cp "$archive" "${stage_dir}/Diving-nightly-macos-universal.tar.gz"
+            else
+              COPYFILE_DISABLE=1 tar -czf "${stage_dir}/Diving-nightly-macos-universal.tar.gz" -C "$out_dir" Diving.app
+            fi
           fi
+
+      - name: Clean up signing keychain
+        if: always() && steps.signing.outputs.enabled == 'true'
+        run: ./.github/workflows/sign_and_package_macos.sh --cleanup
 
       - name: Upload Diving Desktop artifact
         uses: actions/upload-artifact@v4

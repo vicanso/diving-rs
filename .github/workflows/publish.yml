@@ -14,15 +14,25 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
   IMAGE_NAME: vicanso/diving
+  NSH_VERSION: v0.6.1
+  APP_NAME: Diving
 
 jobs:
-  # Pre-create the draft release for this tag exactly once, so the four
-  # platform jobs below never race to create it (racing creates can leave
-  # duplicate untagged drafts). upload_asset.sh keeps its own create as a
-  # fallback for manual/partial runs.
+  # Pre-create the draft release for this tag exactly once, so the platform
+  # jobs below never race to create it (racing creates can leave duplicate
+  # untagged drafts). upload_asset.sh keeps its own create as a fallback for
+  # manual/partial runs.
   prepare-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo.toml version
+        run: |
+          ver="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          case "$GITHUB_REF_NAME" in
+            "v$ver"*) echo "Tag $GITHUB_REF_NAME matches Cargo.toml version $ver" ;;
+            *) echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $ver" >&2; exit 1 ;;
+          esac
       - name: Ensure release exists for tag
         run: |
           tag="${GITHUB_REF_NAME}"
@@ -42,24 +52,23 @@ jobs:
     needs: [prepare-release]
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-      - name: Install target
-        run: |
-          rustup update
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish-cli-macos
+          cache-on-failure: true
       - name: release
         run: |
           cargo build --release -p diving --target=aarch64-apple-darwin
           mv target/aarch64-apple-darwin/release/diving ./diving-darwin-aarch64
-          ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-darwin-aarch64 "$GITHUB_TOKEN"
 
           cargo build --release -p diving --target=x86_64-apple-darwin
           mv target/x86_64-apple-darwin/release/diving ./diving-darwin-x86_64
-          ./.github/workflows/upload_asset.sh ./diving-darwin-x86_64 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-darwin-x86_64 "$GITHUB_TOKEN"
 
   windows:
     needs: [prepare-release]
@@ -68,22 +77,24 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          toolchain: stable
+          shared-key: publish-cli-windows
+          cache-on-failure: true
       - name: release
         run: cargo build --release -p diving
       - name: Upload Assets
         run: |
           mv target/release/diving.exe ./diving-windows.exe
-          ./.github/workflows/upload_asset.sh ./diving-windows.exe $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-windows.exe "$GITHUB_TOKEN"
 
   linux:
     needs: [prepare-release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: release
         uses: addnab/docker-run-action@v3
         with:
@@ -94,13 +105,13 @@ jobs:
             mv target/x86_64-unknown-linux-musl/release/diving ./diving-linux-x86_64
       - name: Upload Assets
         run: |
-          ./.github/workflows/upload_asset.sh ./diving-linux-x86_64 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-linux-x86_64 "$GITHUB_TOKEN"
 
   linux-aarch64:
     needs: [prepare-release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: release
         uses: addnab/docker-run-action@v3
         with:
@@ -111,7 +122,291 @@ jobs:
             mv target/aarch64-unknown-linux-musl/release/diving ./diving-linux-aarch64
       - name: Upload Assets
         run: |
-          ./.github/workflows/upload_asset.sh ./diving-linux-aarch64 $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh ./diving-linux-aarch64 "$GITHUB_TOKEN"
+
+  app-macos:
+    needs: [prepare-release]
+    timeout-minutes: 60
+    runs-on: macos-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight Apple notary credentials
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: ./.github/workflows/sign_and_package_macos.sh --preflight
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: publish-app-macos
+          cache-on-failure: true
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: macos-arm64
+        run: |
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && shasum -a 256 -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
+
+      - name: Package, sign, and notarize Diving Desktop (macOS universal)
+        working-directory: app
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/diving-app-out"
+          stage_dir="${RUNNER_TEMP}/diving-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+          nsh package --target macos --arch universal \
+            --app-version "${GITHUB_REF_NAME#v}" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+          APP_PATH="${out_dir}/${APP_NAME}.app" \
+          STAGE_DIR="$stage_dir" \
+          DMG_NAME="${APP_NAME}-macos-universal.dmg" \
+          TAR_NAME="${APP_NAME}-macos-universal.tar.gz" \
+          VOL_NAME="${APP_NAME} Installer" \
+            ../.github/workflows/sign_and_package_macos.sh --package
+
+      - name: Upload Diving Desktop assets
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" "${RUNNER_TEMP}/diving-app-stage"/* -R "$GITHUB_REPOSITORY" --clobber
+
+      - name: Clean up signing keychain
+        if: always()
+        run: ./.github/workflows/sign_and_package_macos.sh --cleanup
+
+  app-linux:
+    needs: [prepare-release]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            nsh_platform: linux-x86_64
+            runs_on: ubuntu-24.04
+          - arch: aarch64
+            nsh_platform: linux-arm64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runs_on }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK 4 and GStreamer dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: publish-app-linux-${{ matrix.platform.arch }}
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
+        run: |
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && sha256sum -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
+
+      - name: Package Diving Desktop (Linux ${{ matrix.platform.arch }})
+        working-directory: app
+        env:
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/diving-app-out"
+          stage_dir="${RUNNER_TEMP}/diving-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+          nsh package --target linux \
+            --app-version "${GITHUB_REF_NAME#v}" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
+          if [ -z "$archive" ]; then
+            echo "::error::Expected a .tar.gz package from nsh package --target linux"
+            ls -la "$out_dir"
+            exit 1
+          fi
+          cp "$archive" "${stage_dir}/${APP_NAME}-linux-${TARGET_ARCH}.tar.gz"
+
+      - name: Upload Diving Desktop asset
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" "${RUNNER_TEMP}/diving-app-stage"/* -R "$GITHUB_REPOSITORY" --clobber
+
+  app-windows:
+    needs: [prepare-release]
+    timeout-minutes: 60
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: publish-app-windows
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'nsh-windows-x86_64.zip'
+          $baseUrl = "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION"
+          $dlDir = Join-Path $env:RUNNER_TEMP 'nsh-dl'
+          $nshDir = Join-Path $env:RUNNER_TEMP 'nsh'
+          Remove-Item -Recurse -Force $dlDir, $nshDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $dlDir | Out-Null
+
+          $zip = Join-Path $dlDir $asset
+          $shaFile = "$zip.sha256"
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset" -OutFile $zip
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset.sha256" -OutFile $shaFile
+
+          $expected = ((Get-Content $shaFile -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch for ${asset}: expected $expected, got $actual"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          Remove-Item -Recurse -Force $dlDir
+          $binDir = Join-Path $nshDir 'bin'
+          $nshExe = Join-Path $binDir 'nsh.exe'
+          if (-not (Test-Path $nshExe)) {
+            throw "Missing $nshExe after extracting $asset"
+          }
+          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nshExe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh.exe --version failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package Diving Desktop (Windows x86_64)
+        working-directory: app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'
+          $stageDir = Join-Path $env:RUNNER_TEMP 'diving-app-stage'
+          Remove-Item -Recurse -Force $outDir, $stageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $outDir, $stageDir | Out-Null
+
+          $appVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          & nsh.exe package --target windows `
+            --app-version $appVersion `
+            --build $env:GITHUB_RUN_NUMBER `
+            --out $outDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh package --target windows failed with exit code $LASTEXITCODE"
+          }
+
+          $zip = Get-ChildItem -Path $outDir -File -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) {
+            Get-ChildItem -Path $outDir | Format-Table Name, Length
+            throw 'Expected a .zip package from nsh package --target windows'
+          }
+          Copy-Item $zip.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-x86_64.zip")
+
+          $setup = Get-ChildItem -Path $outDir -File -Filter '*-setup.exe' | Select-Object -First 1
+          if ($setup) {
+            Copy-Item $setup.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-x86_64-setup.exe")
+          }
+
+      - name: Upload Diving Desktop artifact
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stageDir = Join-Path $env:RUNNER_TEMP 'diving-app-stage'
+          $files = Get-ChildItem -Path $stageDir -File | ForEach-Object { $_.FullName }
+          & gh release upload $env:GITHUB_REF_NAME @files -R $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release upload failed with exit code $LASTEXITCODE"
+          }
+
+  checksums:
+    needs: [macos, windows, linux, linux-aarch64, app-macos, app-linux, app-windows]
+    runs-on: ubuntu-24.04
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Generate and upload SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          rm -rf downloaded
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --dir downloaded
+          rm -f downloaded/SHA256SUMS.txt
+          (cd downloaded && sha256sum -- * | sort -k2 > ../SHA256SUMS.txt)
+          echo "--- SHA256SUMS.txt ---"
+          cat SHA256SUMS.txt
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt -R "$GITHUB_REPOSITORY" --clobber
+
   # Build each architecture on its native runner and push only the per-arch
   # digest. The `docker-merge` job below assembles the final multi-arch
   # manifest at `IMAGE_NAME:<version>`. Splitting like this avoids QEMU
@@ -133,14 +428,15 @@ jobs:
             du -sh /usr/local/lib/android
             sudo rm -rf /usr/local/lib/android
           fi
-          export SWAP_FILE=$(swapon --show=NAME | tail -n 1)
-          sudo swapoff $SWAP_FILE
-          sudo rm $SWAP_FILE
-          export SWAP_FILE=/swapfile
-          sudo fallocate -l 16G $SWAP_FILE
-          sudo chmod 600 $SWAP_FILE
-          sudo mkswap $SWAP_FILE
-          sudo swapon $SWAP_FILE
+          existing_swap="$(swapon --show=NAME --noheadings | tail -n 1 || true)"
+          if [ -n "$existing_swap" ]; then
+            sudo swapoff "$existing_swap"
+            sudo rm -f "$existing_swap"
+          fi
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
       - name: Swap space report after modification
         shell: bash
         run: |
@@ -205,17 +501,28 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
       - name: Extract version from Git tag
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Create and push multi-arch manifest
+        shell: bash
         working-directory: ${{ runner.temp }}/digests
         # Tag the same manifest with both the version (e.g. `0.8.5`) and
         # `latest`. `imagetools create` accepts multiple `-t` and only
         # writes manifest references — no blobs are re-uploaded.
         run: |
+          set -euo pipefail
+          sources=()
+          for f in *; do
+            [ -f "$f" ] || continue
+            sources+=("${IMAGE_NAME}@sha256:${f}")
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "::error::No image digests found to merge"
+            exit 1
+          fi
           docker buildx imagetools create \
-            -t ${{ env.IMAGE_NAME }}:${{ env.VERSION }} \
-            -t ${{ env.IMAGE_NAME }}:latest \
-            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            -t "${IMAGE_NAME}:${VERSION}" \
+            -t "${IMAGE_NAME}:latest" \
+            "${sources[@]}"
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ env.VERSION }}

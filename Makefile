@@ -41,6 +41,9 @@ build-app:
 package-macos:
 	cd app && nsh package --target macos
 
+package-macos-universal:
+	cd app && nsh package --target macos --arch universal
+
 dev:
 	cargo run -p diving -- redis:alpine?arch=amd64
 
@@ -90,15 +93,19 @@ define bump_version
 		txt = txt[:m.start()] + f"version = \"{ver}\"" + txt[m.end():]; \
 		txt = re.sub(r"^(diving-(?:core|app)\s*=\s*\{\s*version\s*=\s*\")(\d+\.\d+\.\d+)(\")", rf"\g<1>{ver}\g<3>", txt, flags=re.M); \
 		open("Cargo.toml", "w").write(txt); \
+		nsh_path = "app/nsh.json"; \
+		nsh_txt = open(nsh_path).read(); \
+		nsh_txt = re.sub(r"^(\s*\"version\"\s*:\s*\")([^\"]+)(\")", rf"\g<1>{ver}\g<3>", nsh_txt, count=1, flags=re.M); \
+		open(nsh_path, "w").write(nsh_txt); \
 		print(ver)') \
 	&& cargo update -p diving-core -p diving-app -p diving -p diving-web --offline >/dev/null \
-	&& git add Cargo.toml Cargo.lock \
+	&& git add Cargo.toml Cargo.lock app/nsh.json \
 	&& git commit -m "chore: version $$NEXT" \
 	&& git tag "v$$NEXT" \
 	&& echo "Bumped to $$NEXT (tag v$$NEXT). Run 'git push && git push --tags' to publish."
 endef
 
-.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish hooks dev-app test-app build-app package-macos
+.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish hooks dev-app test-app build-app package-macos package-macos-universal
 
 version-patch:
 	$(call bump_version,patch)
