@@ -18,7 +18,7 @@ use tower_http::compression::CompressionLayer;
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
 use crate::http_util::{digests_equal, token_fingerprint};
-use crate::state::{McpStatus, WebState};
+use crate::state::{parse_diff_options, McpStatus, WebState};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 type JSONResult<T> = HTTPResult<Json<T>>;
@@ -105,6 +105,12 @@ struct DiffParams {
     base: String,
     /// The image checked.
     target: String,
+    /// Base layer mode: `auto` (default), `force` / `forceAuto`, `off`, or `skip:<n>`.
+    base_layer_mode: Option<String>,
+    /// Explicit number of leading file-carrying layers to skip on both sides.
+    skip_base_layers: Option<usize>,
+    /// Verify same-size regular file contents via blake3 when blobs exist (default true).
+    verify_content: Option<bool>,
     /// `markdown` for the Markdown diff instead of JSON.
     format: Option<String>,
     lang: Option<String>,
@@ -167,9 +173,14 @@ async fn diff(
         .verify_dup(true)
         .fallback_to_last_known(true)
         .credentials(resolve_explicit_credentials(None, None, false));
+    let diff_opts = parse_diff_options(
+        params.base_layer_mode.as_deref(),
+        params.skip_base_layers,
+        params.verify_content,
+    );
     let diff = state
         .analyzer
-        .diff(&params.base, &params.target, opts)
+        .diff_with_options(&params.base, &params.target, opts, diff_opts)
         .await?;
     state.add_latest_image(&params.base);
     state.add_latest_image(&params.target);

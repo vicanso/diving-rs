@@ -56,6 +56,12 @@ pub struct DockerAnalyzeResult {
     pub has_healthcheck: bool,
     #[serde(default)]
     pub exposed_ports: Vec<String>,
+    #[serde(default)]
+    pub entrypoint: Vec<String>,
+    #[serde(default)]
+    pub cmd: Vec<String>,
+    #[serde(default)]
+    pub working_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_as_of: Option<String>,
 }
@@ -142,6 +148,9 @@ impl DockerAnalyzeResult {
             unstripped_binaries: self.unstripped_binaries.clone(),
             has_healthcheck: self.has_healthcheck,
             exposed_ports: self.exposed_ports.clone(),
+            entrypoint: self.entrypoint.clone(),
+            cmd: self.cmd.clone(),
+            working_dir: self.working_dir.clone(),
             stale_as_of: self.stale_as_of.clone(),
         }
     }

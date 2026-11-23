@@ -147,11 +147,16 @@ pub fn evaluate_diff_gate(
     diff: &ImageDiff,
     highest_size_increase: Option<u64>,
 ) -> Vec<GateFailure> {
+    let (delta, key) = if diff.base_layers_ignored {
+        (diff.upper_size_delta, "cli.check.upper_growth")
+    } else {
+        (diff.size_delta, "cli.check.growth")
+    };
     match highest_size_increase {
-        Some(limit) if diff.size_delta > limit as i64 => vec![GateFailure {
-            key: "cli.check.growth",
+        Some(limit) if delta > limit as i64 => vec![GateFailure {
+            key,
             args: vec![
-                ByteSize(diff.size_delta.unsigned_abs()).to_string(),
+                ByteSize(delta.unsigned_abs()).to_string(),
                 ByteSize(limit).to_string(),
             ],
         }],
@@ -273,5 +278,24 @@ mod tests {
              - FAIL: recommendation severity check, 2 at high or above"
         );
         assert!(gate_verdict_md(&failures, Lang::Zh).starts_with("**CI 卡口：未通过**"));
+    }
+
+    #[test]
+    fn diff_gate_uses_upper_size_delta_when_base_layers_ignored() {
+        let diff = ImageDiff {
+            size_delta: 40 * 1024 * 1024,
+            upper_size_delta: 5 * 1024 * 1024,
+            base_layers_ignored: true,
+            ..Default::default()
+        };
+        assert!(evaluate_diff_gate(&diff, Some(10 * 1024 * 1024)).is_empty());
+
+        let breached = ImageDiff {
+            upper_size_delta: 15 * 1024 * 1024,
+            ..diff
+        };
+        let failures = evaluate_diff_gate(&breached, Some(10 * 1024 * 1024));
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].key, "cli.check.upper_growth");
     }
 }

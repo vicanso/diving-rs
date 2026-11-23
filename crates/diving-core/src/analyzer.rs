@@ -1,12 +1,13 @@
-use crate::diff::{diff_images, ImageDiff};
+use crate::diff::{diff_images_with_opener, DiffOptions, ImageDiff};
 use crate::error::{Error, IoSnafu, Result};
 use crate::i18n::Lang;
 use crate::image::{
     analyze_once, analyze_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
-    is_local_registry, is_private_or_loopback_host, load_docker_config, parse_image_info,
-    preview_image, registry_host, stream_file_from_layer, DockerAnalyzeResult, DockerConfig,
-    ImageInfo, ImagePreview, PipelineContext, PipelineOptions, RegistryCaches, RegistryCredentials,
-    TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    hash_files_from_layer, is_local_registry, is_private_or_loopback_host, load_docker_config,
+    parse_image_info, preview_image, registry_host, stream_file_from_layer, DockerAnalyzeResult,
+    DockerConfig, ImageInfo, ImagePreview, PipelineContext, PipelineOptions, RegistryCaches,
+    RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
 use crate::recommend::build_recommendations;
@@ -570,22 +571,100 @@ impl Analyzer {
 
     /// Compare two images concurrently (singleflight still deduplicates any
     /// shared layers) and compute their [`ImageDiff`].
+    /// Compare two images (fetching/analyzing them in parallel) with default [`DiffOptions`].
     pub async fn diff(&self, base: &str, target: &str, opts: AnalyzeOptions) -> Result<ImageDiff> {
+        self.diff_with_options(base, target, opts, DiffOptions::default())
+            .await
+    }
+
+    /// Compare two images (fetching/analyzing them in parallel) with explicit [`DiffOptions`].
+    pub async fn diff_with_options(
+        &self,
+        base: &str,
+        target: &str,
+        analyze_opts: AnalyzeOptions,
+        diff_opts: DiffOptions,
+    ) -> Result<ImageDiff> {
         let base_info = parse_image_info(base);
         let target_info = parse_image_info(target);
         self.check_allowed(&base_info)?;
         self.check_allowed(&target_info)?;
 
         let (base_res, target_res) = try_join(
-            self.analyze_info(base_info, opts.clone()),
-            self.analyze_info(target_info, opts),
+            self.analyze_info(base_info, analyze_opts.clone()),
+            self.analyze_info(target_info, analyze_opts),
         )
         .await?;
-        tokio::task::spawn_blocking(move || diff_images(&base_res, &target_res))
+        self.compute_diff(base, target, base_res, target_res, diff_opts)
             .await
-            .map_err(|e| Error::Other {
-                message: format!("diff task failed: {e}"),
-            })
+    }
+
+    /// Recompute [`ImageDiff`] from already-analyzed results while verifying
+    /// same-size regular file contents against locally available layer blobs or
+    /// `file://` archives.
+    pub async fn compute_diff(
+        &self,
+        base_ref: &str,
+        target_ref: &str,
+        base_res: Arc<DockerAnalyzeResult>,
+        target_res: Arc<DockerAnalyzeResult>,
+        diff_opts: DiffOptions,
+    ) -> Result<ImageDiff> {
+        let base_info = parse_image_info(base_ref);
+        let target_info = parse_image_info(target_ref);
+        let base_tar = (base_info.registry == REGISTRY_LOCAL_FILE
+            && self.check_allowed(&base_info).is_ok())
+        .then_some(base_info.name);
+        let target_tar = (target_info.registry == REGISTRY_LOCAL_FILE
+            && self.check_allowed(&target_info).is_ok())
+        .then_some(target_info.name);
+        let store = self.inner.store.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut base_index: Option<Option<TarIndex>> = None;
+            let mut target_index: Option<Option<TarIndex>> = None;
+            diff_images_with_opener(
+                &base_res,
+                &target_res,
+                &diff_opts,
+                true,
+                |is_target, layer, paths| {
+                    let (tar_path, index_cache) = if is_target {
+                        (&target_tar, &mut target_index)
+                    } else {
+                        (&base_tar, &mut base_index)
+                    };
+                    if let Some(archive_path) = tar_path {
+                        let index = index_cache
+                            .get_or_insert_with(|| TarIndex::build(archive_path).ok())
+                            .as_ref()?;
+                        let (reader, _) = index.open_reader(&layer.digest).ok()?;
+                        return hash_files_from_layer(
+                            BufReader::new(reader),
+                            &layer.media_type,
+                            paths,
+                        )
+                        .ok();
+                    }
+                    if is_safe_blob_id(&layer.digest) {
+                        let blob = store.blob_path(&layer.digest);
+                        if let Ok(file) = File::open(&blob) {
+                            return hash_files_from_layer(
+                                BufReader::new(file),
+                                &layer.media_type,
+                                paths,
+                            )
+                            .ok();
+                        }
+                    }
+                    None
+                },
+            )
+        })
+        .await
+        .map_err(|e| Error::Other {
+            message: format!("diff task failed: {e}"),
+        })
     }
 
     /// Read a file's full bytes (up to `max_bytes`) from a cached layer blob.

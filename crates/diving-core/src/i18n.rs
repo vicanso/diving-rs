@@ -284,6 +284,10 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
             "{0}: image growth check, {1} larger uncompressed, highest: {2}"
         }
         (Lang::Zh, "cli.check.growth") => "{0}：镜像增长上限检查，解压后增大 {1}，上限：{2}",
+        (Lang::En, "cli.check.upper_growth") => {
+            "{0}: upper-layer image growth check, {1} larger uncompressed, highest: {2}"
+        }
+        (Lang::Zh, "cli.check.upper_growth") => "{0}：上层镜像增长上限检查，上层解压后增大 {1}，上限：{2}",
         (Lang::En, "cli.diff.size") => "  image size: {0} -> {1} ({2})",
         (Lang::Zh, "cli.diff.size") => "  镜像大小：{0} -> {1}（{2}）",
         (Lang::En, "prog.cache.stale") => {
@@ -398,6 +402,66 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "diff.recs.resolved") => "已解决的建议（{0} 条）",
         (Lang::En, "diff.more") => "{0} more not shown",
         (Lang::Zh, "diff.more") => "另有 {0} 项未列出",
+        (Lang::En, "diff.upper_size") => "Upper layers size",
+        (Lang::Zh, "diff.upper_size") => "上层大小",
+        (Lang::En, "diff.skipped") => {
+            "**Base layers:** skipped leading {0} / {1} layers ({2} / {3} ignored; {4})."
+        }
+        (Lang::Zh, "diff.skipped") => {
+            "**基础层：** 已跳过基准前 {0} 层（{2}）/ 目标前 {1} 层（{3}）（{4}）。"
+        }
+        (Lang::En, "diff.skip.created_gap") => "auto-detected via >1h layer build gap",
+        (Lang::Zh, "diff.skip.created_gap") => "基于 >1 小时层构建时间间隔自动识别",
+        (Lang::En, "diff.skip.first_layer") => "cross-arch 1st rootfs layer",
+        (Lang::Zh, "diff.skip.first_layer") => "跨架构默认跳过首层 rootfs",
+        (Lang::En, "diff.skip.forced_gap") => "forced auto-skip via >1h layer build gap",
+        (Lang::Zh, "diff.skip.forced_gap") => "强制自动跳过（>1 小时层间隔）",
+        (Lang::En, "diff.skip.forced_first") => "forced auto-skip 1st rootfs layer",
+        (Lang::Zh, "diff.skip.forced_first") => "强制跳过首层 rootfs",
+        (Lang::En, "diff.skip.manual") => "manual layer skip count",
+        (Lang::Zh, "diff.skip.manual") => "手动指定跳过层数",
+        (Lang::En, "diff.parity.consistent") => {
+            "**Parity:** Consistent — configuration, runtime, and compared files match."
+        }
+        (Lang::Zh, "diff.parity.consistent") => {
+            "**一致性结论：** 一致 —— 配置、运行时及比对文件均一致。"
+        }
+        (Lang::En, "diff.parity.binary_only") => {
+            "**Parity:** Binary diffs only — config & runtime match; {0} binary file(s) changed size across builds."
+        }
+        (Lang::Zh, "diff.parity.binary_only") => {
+            "**一致性结论：** 仅二进制差异 —— 配置与运行时一致；共 {0} 个编译二进制文件体积变化。"
+        }
+        (Lang::En, "diff.parity.drift") => {
+            "**Parity:** Config or file drift — {0} unexpected file diff(s), {1} config diff(s), {2} runtime diff(s) ({3} expected binary diff(s))."
+        }
+        (Lang::Zh, "diff.parity.drift") => {
+            "**一致性结论：** 存在配置或文件差异 —— {0} 项非预期文件差异、{1} 项配置差异、{2} 项运行时差异（另有 {3} 个预期二进制变化）。"
+        }
+        (Lang::En, "diff.content.verified") => {
+            "Content hash check: verified {0} same-size file(s) (≤ 1 MiB, {1} skipped)."
+        }
+        (Lang::Zh, "diff.content.verified") => {
+            "同大小内容校验：已校对 {0} 个文件（≤ 1 MiB，跳过 {1} 个）。"
+        }
+        (Lang::En, "diff.content.unverified") => {
+            "Content hash check: skipped / blobs unavailable ({0} candidate file(s) not hashed)."
+        }
+        (Lang::Zh, "diff.content.unverified") => {
+            "同大小内容校验：未执行或缺少层数据（{0} 个同大小文件未哈希）。"
+        }
+        (Lang::En, "diff.config_runtime") => "Config & runtime differences",
+        (Lang::Zh, "diff.config_runtime") => "配置与运行时差异",
+        (Lang::En, "diff.col.item") => "Item",
+        (Lang::Zh, "diff.col.item") => "检查项",
+        (Lang::En, "diff.tag.binary") => "binary",
+        (Lang::Zh, "diff.tag.binary") => "二进制",
+        (Lang::En, "diff.tag.content") => "content",
+        (Lang::Zh, "diff.tag.content") => "内容",
+        (Lang::En, "diff.tag.mode") => "mode",
+        (Lang::Zh, "diff.tag.mode") => "权限",
+        (Lang::En, "diff.tag.link") => "symlink",
+        (Lang::Zh, "diff.tag.link") => "软链",
         (Lang::En, "md.title") => "Image Analysis",
         (Lang::Zh, "md.title") => "镜像分析",
         (Lang::En, "md.risktags") => "Risk Tags",

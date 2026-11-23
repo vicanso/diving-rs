@@ -17,9 +17,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use bytesize::ByteSize;
 use diving_core::{
-    diff_images as compute_diff_images, is_local_registry, is_safe_blob_id, parse_image_info,
-    resolve_explicit_credentials, to_diff_markdown, to_markdown, AnalyzeOptions,
-    DockerAnalyzeResult, FileTreeItem, Lang, Op,
+    is_local_registry, is_safe_blob_id, parse_image_info, resolve_explicit_credentials,
+    to_diff_markdown, to_markdown, AnalyzeOptions, DockerAnalyzeResult, FileTreeItem, Lang, Op,
 };
 use http::{header, StatusCode};
 use rmcp::handler::server::wrapper::Parameters;
@@ -35,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::http_util::{digests_equal, token_fingerprint};
-use crate::state::{with_arch, WebState};
+use crate::state::{parse_diff_options, with_arch, WebState};
 
 /// How often a long-running analysis emits a progress notification (only
 /// when the client sent a `progressToken`). Keeps clients that reset their
@@ -113,13 +112,18 @@ pub struct ReadFileParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiffImagesParams {
-    /// The image to compare against, e.g. `app:1.0` or `app:main`.
+    /// The image to compare against, e.g. `app:1.0`, `app:main`, or `redis:alpine?arch=amd64`.
     pub base: String,
-    /// The image to check, e.g. `app:1.1` or `app:pr-42`.
+    /// The image to check, e.g. `app:1.1`, `app:pr-42`, or `redis:alpine?arch=arm64`.
     pub target: String,
-    /// Platform architecture for both images: `amd64`, `arm64`, …
-    /// Defaults to the server's architecture.
+    /// Platform architecture for both images (`amd64`, `arm64`, …). Leave unset when comparing
+    /// two architectures via `?arch=` on `base` and `target`.
     pub arch: Option<String>,
+    /// Base layer mode: `auto` (default: skips base layers automatically on cross-arch diffs),
+    /// `force` (always skip detected base layers), `off` (compare full filesystems), or `skip:<n>`.
+    pub base_layer_mode: Option<String>,
+    /// Explicitly skip the first N file-carrying layers on each side.
+    pub skip_base_layers: Option<usize>,
     /// Language of the recommendations text: `en` or `zh`. Defaults to the
     /// server's locale.
     pub lang: Option<String>,
@@ -307,10 +311,20 @@ that appeared or were resolved.",
             arch: params.arch.clone(),
             lang: params.lang.clone(),
         };
+        let base_ref = with_arch(&params.base, params.arch.as_deref());
+        let target_ref = with_arch(&params.target, params.arch.as_deref());
+        let diff_opts = parse_diff_options(
+            params.base_layer_mode.as_deref(),
+            params.skip_base_layers,
+            None,
+        );
         // One after the other, so the layers they share download once.
         let base = run_analysis(&self.state, &side(params.base.clone()), lang, &ctx).await?;
         let target = run_analysis(&self.state, &side(params.target.clone()), lang, &ctx).await?;
-        let diff = tokio::task::spawn_blocking(move || compute_diff_images(&base, &target))
+        let diff = self
+            .state
+            .analyzer
+            .compute_diff(&base_ref, &target_ref, base, target, diff_opts)
             .await
             .map_err(|e| e.to_string())?;
         Ok(to_diff_markdown(&diff, lang, None))

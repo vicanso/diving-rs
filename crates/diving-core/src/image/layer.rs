@@ -495,7 +495,7 @@ pub fn hash_files_from_layer<R: Read>(
                     .context(TarSnafu {})?
                     .to_string_lossy()
                     .into_owned();
-                let normalized = raw.trim_start_matches("./");
+                let normalized = raw.trim_start_matches("./").trim_start_matches('/');
                 let key = if targets.contains(&raw) {
                     Some(raw.clone())
                 } else if targets.contains(normalized) {

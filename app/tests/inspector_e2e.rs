@@ -315,7 +315,7 @@ fn diff_compares_two_local_tars_and_swaps() {
         .expect("render Diff workspace");
     assert!(app.shows("Added (1)"), "expected Added (1) bucket");
     assert!(app.shows("Removed (1)"), "expected Removed (1) bucket");
-    assert!(app.shows("Resized (1)"), "expected Resized (1) bucket");
+    assert!(app.shows("Modified (1)"), "expected Modified (1) bucket");
 
     app.press("Swap").expect("swap Base and Target images");
     app.wait_for_within("Added (1)", Duration::from_secs(3))

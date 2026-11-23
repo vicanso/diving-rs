@@ -146,12 +146,13 @@ const readQuery = () => {
   const image = urlInfo.searchParams.get("image") || "";
   const base = urlInfo.searchParams.get("base") || "";
   const target = urlInfo.searchParams.get("target") || "";
+  const baseMode = urlInfo.searchParams.get("baseMode") || "auto";
   // Any platform `?arch=` takes: `arm64`, `arm/v7`, `s390x`, …
   const requested = (urlInfo.searchParams.get("arch") || "").toLowerCase();
   const arch = /^[a-z0-9_]+(\/[a-z0-9]+)?$/.test(requested)
     ? requested
     : amd64Arch;
-  return { image, arch, base, target };
+  return { image, arch, base, target, baseMode };
 };
 
 /** How a navigation touches the browser history: a user action adds an
@@ -219,6 +220,7 @@ const App = () => {
   const [latestImages, setLatestImages] = useState<string[]>([]);
   const [version, setVersion] = useState("");
   const [mcp, setMcp] = useState<McpStatus | null>(null);
+  const [diffBaseMode, setDiffBaseMode] = useState(initial.baseMode);
   const [diff, setDiff] = useState<{ refs: DiffRefs; data: ImageDiff } | null>(
     null,
   );
@@ -317,16 +319,26 @@ const App = () => {
     target: string,
     history: HistoryMode = "push",
     archValue = arch,
+    baseMode = diffBaseMode,
   ) => {
+    setDiffBaseMode(baseMode);
+    const modeQuery =
+      baseMode && baseMode !== "auto"
+        ? `&baseMode=${encodeURIComponent(baseMode)}`
+        : "";
     setLocation(
-      `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${archValue}`,
+      `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${archValue}${modeQuery}`,
       history,
     );
     setLoading(true);
     const current = ++ticket.current;
     try {
+      const apiModeQuery =
+        baseMode && baseMode !== "auto"
+          ? `&baseLayerMode=${encodeURIComponent(baseMode)}`
+          : "";
       const { data } = await request.get<ImageDiff>(
-        `/diff?base=${encodeURIComponent(withArch(base, archValue))}&target=${encodeURIComponent(withArch(target, archValue))}`,
+        `/diff?base=${encodeURIComponent(withArch(base, archValue))}&target=${encodeURIComponent(withArch(target, archValue))}${apiModeQuery}`,
         { timeout: 20 * 60 * 1000 },
       );
       if (current !== ticket.current) {
@@ -349,8 +361,9 @@ const App = () => {
   const openQuery = (history: HistoryMode) => {
     const query = readQuery();
     setArch(query.arch);
+    setDiffBaseMode(query.baseMode);
     if (query.base && query.target) {
-      onCompare(query.base, query.target, history, query.arch);
+      onCompare(query.base, query.target, history, query.arch, query.baseMode);
     } else if (query.image) {
       onSearch(query.image, history, query.arch);
     } else {
@@ -842,7 +855,19 @@ const App = () => {
               <DiffView
                 diff={diff.data}
                 refs={diff.refs}
-                onSwap={() => onCompare(diff.refs.target, diff.refs.base)}
+                baseMode={diffBaseMode}
+                onChangeBaseMode={(mode) =>
+                  onCompare(diff.refs.base, diff.refs.target, "replace", arch, mode)
+                }
+                onSwap={() =>
+                  onCompare(
+                    diff.refs.target,
+                    diff.refs.base,
+                    "push",
+                    arch,
+                    diffBaseMode,
+                  )
+                }
                 onOpen={(image) => onSearch(image)}
               />
             </div>

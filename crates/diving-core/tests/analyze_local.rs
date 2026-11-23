@@ -6,12 +6,15 @@ mod common;
 use common::{build_fixture_tar, build_fixture_v2_tar, tar_bytes};
 use diving_core::{
     diff_images, final_filesystem, sha256_hex, to_diff_markdown, to_markdown, AnalyzeOptions,
-    Analyzer, ChangeSet, DockerAnalyzeResult, FileTreeItem, Lang, Op,
+    Analyzer, BaseLayerMode, BaseLayerSkipReason, ChangeSet, DiffOptions, DockerAnalyzeResult,
+    FileTreeItem, Lang, Op, ParityStatus,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::{json, Value};
+use std::fs::write as write_bytes;
 use std::io::Write;
+use tar::{Builder as TarBuilder, Header as TarHeader};
 use tempfile::Builder;
 
 fn local_analyzer() -> Analyzer {
@@ -343,4 +346,184 @@ async fn diff_two_local_releases() {
 
     let md = to_diff_markdown(&diff, Lang::En, None);
     assert!(md.contains("`data/extra.bin`"), "{md}");
+}
+
+fn multi_arch_fixture_tar(
+    arch: &str,
+    base_bytes: &[u8],
+    app_bin: &[u8],
+    config_json: &[u8],
+    user: &str,
+) -> Vec<u8> {
+    let mut layer1_builder = TarBuilder::new(Vec::new());
+    let mut h1 = TarHeader::new_gnu();
+    h1.set_path("lib/libc.so.6").unwrap();
+    h1.set_size(base_bytes.len() as u64);
+    h1.set_mode(0o644);
+    h1.set_uid(0);
+    h1.set_gid(0);
+    h1.set_cksum();
+    layer1_builder.append(&h1, base_bytes).unwrap();
+    let layer1 = layer1_builder.into_inner().unwrap();
+
+    let mut layer2_builder = TarBuilder::new(Vec::new());
+    for (path, data, mode) in [
+        ("usr/bin/server", app_bin, 0o755),
+        ("app/settings.json", config_json, 0o644),
+    ] {
+        let mut h = TarHeader::new_gnu();
+        h.set_path(path).unwrap();
+        h.set_size(data.len() as u64);
+        h.set_mode(mode);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_cksum();
+        layer2_builder.append(&h, data).unwrap();
+    }
+    let layer2 = layer2_builder.into_inner().unwrap();
+
+    let config = format!(
+        r#"{{
+        "architecture": "{arch}",
+        "created": "2024-06-01T00:00:00Z",
+        "history": [
+            {{"created": "2024-01-01T00:00:00Z", "created_by": "/bin/sh -c apt-get install -y libc6"}},
+            {{"created": "2024-06-01T00:00:00Z", "created_by": "/bin/sh -c COPY server settings.json /"}}
+        ],
+        "os": "linux",
+        "rootfs": {{"type": "layers", "diff_ids": ["sha256:base-{arch}", "sha256:app-{arch}"]}},
+        "config": {{
+            "User": "{user}",
+            "Env": ["APP_ENV=prod"],
+            "Entrypoint": ["/usr/bin/server"],
+            "WorkingDir": "/app"
+        }}
+    }}"#
+    );
+    let manifest = br#"[{
+        "Config": "config.json",
+        "RepoTags": ["svc:latest"],
+        "Layers": ["layer1/layer.tar", "layer2/layer.tar"]
+    }]"#;
+    tar_bytes(&[
+        ("manifest.json", manifest),
+        ("config.json", config.as_bytes()),
+        ("layer1/layer.tar", &layer1),
+        ("layer2/layer.tar", &layer2),
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_arch_diff_skips_base_layers_and_hashes_equal_size_files() {
+    let analyzer = local_analyzer();
+    let amd_tar = Builder::new().suffix(".tar").tempfile().unwrap();
+    let arm_tar = Builder::new().suffix(".tar").tempfile().unwrap();
+
+    write_bytes(
+        amd_tar.path(),
+        multi_arch_fixture_tar(
+            "amd64",
+            &[1u8; 4096],
+            &[0x7f; 1200],
+            br#"{"mode":"prod","id":"A"}"#,
+            "app",
+        ),
+    )
+    .unwrap();
+    // Same-size binary-only parity test first: arm64 base layer differs dramatically,
+    // binary grows cleanly, settings.json has identical bytes.
+    write_bytes(
+        arm_tar.path(),
+        multi_arch_fixture_tar(
+            "arm64",
+            &[2u8; 8192],
+            &[0x7f; 2000],
+            br#"{"mode":"prod","id":"A"}"#,
+            "app",
+        ),
+    )
+    .unwrap();
+
+    let amd_ref = format!("file://{}", amd_tar.path().display());
+    let arm_ref = format!("file://{}", arm_tar.path().display());
+    let diff = analyzer
+        .diff_with_options(
+            &amd_ref,
+            &arm_ref,
+            AnalyzeOptions::default().verify_dup(false),
+            DiffOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(diff.base_layers_ignored);
+    assert_eq!(
+        diff.base_skip_reason,
+        BaseLayerSkipReason::CrossArchCreatedGap
+    );
+    assert_eq!(
+        (diff.base_skipped_layers, diff.target_skipped_layers),
+        (1, 1)
+    );
+    // Base libc.so.6 (4096 -> 8192) was ignored; only usr/bin/server changed
+    // (+800 raw bytes, crossing 1 extra 512-byte tar block in layer unpack size).
+    assert_eq!(diff.upper_size_delta, 512);
+    assert_eq!(diff.changed.count, 1);
+    assert_eq!(diff.changed.files[0].path, "usr/bin/server");
+    assert!(diff.changed.files[0].is_expected_binary_only());
+    assert!(diff.content_verified);
+    assert_eq!(diff.parity.status, ParityStatus::BinaryDiffsOnly);
+    assert_eq!(diff.parity.expected_binary_changes, 1);
+    assert_eq!(diff.parity.unexpected_file_changes, 0);
+
+    // Same-size config content change (`"A"` -> `"B"`) + User config drift on arm64
+    let arm_drift_tar = Builder::new().suffix(".tar").tempfile().unwrap();
+    write_bytes(
+        arm_drift_tar.path(),
+        multi_arch_fixture_tar(
+            "arm64",
+            &[2u8; 8192],
+            &[0x7f; 2000],
+            br#"{"mode":"prod","id":"B"}"#,
+            "root",
+        ),
+    )
+    .unwrap();
+    let drift_ref = format!("file://{}", arm_drift_tar.path().display());
+    let drift = analyzer
+        .diff_with_options(
+            &amd_ref,
+            &drift_ref,
+            AnalyzeOptions::default().verify_dup(false),
+            DiffOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(drift.content_verified);
+    assert_eq!(drift.parity.status, ParityStatus::ConfigOrFileDrift);
+    assert_eq!(drift.parity.same_size_content_changes, 1);
+    assert_eq!(drift.parity.config_changes, 1);
+    assert!(drift
+        .changed
+        .files
+        .iter()
+        .any(|c| c.path == "app/settings.json" && c.content_changed));
+    assert_eq!(drift.config_diff.user.as_ref().unwrap().target, "root");
+
+    // Instant off-mode toggle without re-analyzing
+    let base_res = analyze_tar(&analyzer, std::fs::read(amd_tar.path()).unwrap()).await;
+    let target_res = analyze_tar(&analyzer, std::fs::read(arm_tar.path()).unwrap()).await;
+    let full = analyzer
+        .compute_diff(
+            &amd_ref,
+            &arm_ref,
+            base_res,
+            target_res,
+            DiffOptions::default().base_layer_mode(BaseLayerMode::Off),
+        )
+        .await
+        .unwrap();
+    assert!(!full.base_layers_ignored);
+    assert!(full.changed.files.iter().any(|c| c.path == "lib/libc.so.6"));
 }

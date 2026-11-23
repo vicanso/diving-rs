@@ -12,8 +12,8 @@ use super::registry::{
 use super::registry_auth::{DockerConfig, RegistryCredentials};
 use super::scan::{
     build_risk_tags, detect_os_from_history, display_name, extract_base_os_from_layers,
-    extract_health_and_ports, extract_image_meta, preview_layers, probe_base_os,
-    reconstruct_dockerfile, scan_layers, LayerScan,
+    extract_health_and_ports, extract_image_exec_meta, extract_image_meta, preview_layers,
+    probe_base_os, reconstruct_dockerfile, scan_layers, LayerScan,
 };
 use crate::error::{Error, IoSnafu, Result};
 use crate::i18n::Lang;
@@ -145,6 +145,7 @@ async fn analyze_client(
     let image_os = config.os.clone();
     let dockerfile = reconstruct_dockerfile(&config.history);
     let (run_user, envs, labels) = extract_image_meta(&config);
+    let (entrypoint, cmd, working_dir) = extract_image_exec_meta(&config);
     let (has_healthcheck, exposed_ports) = extract_health_and_ports(&config);
 
     let is_local = client.is_local();
@@ -287,6 +288,9 @@ async fn analyze_client(
         unstripped_binaries,
         has_healthcheck,
         exposed_ports,
+        entrypoint,
+        cmd,
+        working_dir,
         stale_as_of: None,
     };
     result.recommendations = build_recommendations(&result, lang);

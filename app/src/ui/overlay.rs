@@ -16,7 +16,8 @@ use crate::ui::icons::{IconName, ui_icon};
 use crate::ui::motion::{FAST, INSTANT, dialog_enter_spec, dur};
 use crate::ui::theme::{
     ambient_lang_signal, backdrop_scrim, danger, danger_soft, font_mono_family, info, info_soft,
-    localized_ui_label, radius_control, radius_inset, radius_lg, warning, warning_soft,
+    localized_ui_label, radius_control, radius_inset, radius_lg, success, success_soft, warning,
+    warning_soft,
 };
 
 /// Re-exported command entry builder for `ui_command_palette`.
@@ -392,6 +393,7 @@ pub fn ui_sheet(
 /// Inline status banner tones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BannerTone {
+    Success,
     Warning,
     Danger,
     Info,
@@ -399,6 +401,7 @@ pub enum BannerTone {
 
 fn banner_icon(tone: BannerTone) -> IconName {
     match tone {
+        BannerTone::Success => IconName::Check,
         BannerTone::Warning | BannerTone::Danger => IconName::Alert,
         BannerTone::Info => IconName::Info,
     }
@@ -406,6 +409,7 @@ fn banner_icon(tone: BannerTone) -> IconName {
 
 fn banner_fg(tone: BannerTone) -> AdaptiveColor {
     match tone {
+        BannerTone::Success => success(),
         BannerTone::Warning => warning(),
         BannerTone::Danger => danger(),
         BannerTone::Info => info(),
@@ -414,6 +418,7 @@ fn banner_fg(tone: BannerTone) -> AdaptiveColor {
 
 fn banner_bg(tone: BannerTone) -> AdaptiveColor {
     match tone {
+        BannerTone::Success => success_soft(),
         BannerTone::Warning => warning_soft(),
         BannerTone::Danger => danger_soft(),
         BannerTone::Info => info_soft(),

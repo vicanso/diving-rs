@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use diving_app::config::{build_desktop_analyzer, build_http_client, load_config};
 use diving_core::{
-    AnalyzeOptions, Analyzer, CleanupStats, DockerAnalyzeResult, Error as CoreError, ImageDiff,
-    ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions, ProgressEvent,
-    REGISTRY_LOCAL_FILE, diff_images, list_local_images, parse_image_info, to_diff_markdown,
-    to_markdown,
+    AnalyzeOptions, Analyzer, CleanupStats, DiffOptions, DockerAnalyzeResult, Error as CoreError,
+    ImageDiff, ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions,
+    ProgressEvent, REGISTRY_LOCAL_FILE, diff_images_with_options, list_local_images,
+    parse_image_info, to_diff_markdown, to_markdown,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
@@ -246,12 +246,15 @@ impl DivingService {
     }
 
     /// Analyzes base and target images concurrently, streaming progress and returning `ImageDiff`.
+    /// Analyzes `base` and `target` concurrently and builds an `ImageDiff`.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_diff(
         &self,
         base_image: String,
         base_arch: Option<String>,
         target_image: String,
         target_arch: Option<String>,
+        diff_opts: DiffOptions,
         lang: Lang,
         skip_memory_cache: bool,
     ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<DiffMessage>) {
@@ -288,8 +291,21 @@ impl DivingService {
             let ui_lang = ui_lang_from_core(lang);
             let outcome = match (base_res, target_res) {
                 (Ok(base), Ok(target)) => {
-                    let diff = Arc::new(diff_images(&base, &target));
-                    DiffRunResult::Ready { diff, base, target }
+                    let diff = analyzer
+                        .compute_diff(
+                            &base_ref,
+                            &target_ref,
+                            Arc::clone(&base),
+                            Arc::clone(&target),
+                            diff_opts,
+                        )
+                        .await
+                        .unwrap_or_else(|_| diff_images_with_options(&base, &target, &diff_opts));
+                    DiffRunResult::Ready {
+                        diff: Arc::new(diff),
+                        base,
+                        target,
+                    }
                 }
                 (Err(b_err), Ok(_)) => {
                     DiffRunResult::BaseFailed(format_user_error(ui_lang, &b_err.to_string()))
@@ -303,6 +319,53 @@ impl DivingService {
                 },
             };
             let _ = tx.send(DiffMessage::Finished(outcome));
+        });
+
+        (
+            AnalyzeTaskHandle {
+                tasks: vec![handle.abort_handle()],
+            },
+            rx,
+        )
+    }
+
+    /// Recomputes `ImageDiff` from cached analyses when toggling base-layer mode or swapping sides.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recompute_diff(
+        &self,
+        base_image: String,
+        base_arch: Option<String>,
+        target_image: String,
+        target_arch: Option<String>,
+        base: Arc<DockerAnalyzeResult>,
+        target: Arc<DockerAnalyzeResult>,
+        diff_opts: DiffOptions,
+    ) -> (
+        AnalyzeTaskHandle,
+        oneshot::Receiver<Result<Arc<ImageDiff>, String>>,
+    ) {
+        let base_ref = format_image_target(&base_image, base_arch.as_deref());
+        let target_ref = format_image_target(&target_image, target_arch.as_deref());
+        let (tx, rx) = oneshot::channel();
+        let analyzer = self.inner.analyzer.clone();
+
+        let handle = self.inner.rt.spawn(async move {
+            let outcome = analyzer
+                .compute_diff(
+                    &base_ref,
+                    &target_ref,
+                    Arc::clone(&base),
+                    Arc::clone(&target),
+                    diff_opts,
+                )
+                .await
+                .map(Arc::new)
+                .or_else(|_| {
+                    Ok(Arc::new(diff_images_with_options(
+                        &base, &target, &diff_opts,
+                    )))
+                });
+            let _ = tx.send(outcome);
         });
 
         (

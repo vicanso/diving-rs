@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use chrono::Local;
 use diving_core::{
-    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImagePreview,
-    LocalContainerImage, LocalRuntime, ProgressEvent, build_recommendations, diff_images,
+    BaseLayerMode, DiffOptions, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff,
+    ImagePreview, LocalContainerImage, LocalRuntime, ProgressEvent, build_recommendations,
 };
 use nsh_core::element::Owner;
 use nsh_core::file_dialog::{OpenDialog, SaveDialog};
@@ -137,6 +137,9 @@ pub struct AppState {
     pub diff_target_ref: Signal<String>,
     pub diff_base_result: Signal<Option<Arc<DockerAnalyzeResult>>>,
     pub diff_target_result: Signal<Option<Arc<DockerAnalyzeResult>>>,
+    pub diff_base_layer_mode: Signal<BaseLayerMode>,
+    pub diff_recomputing: Signal<bool>,
+    pub diff_unexpected_only: Signal<bool>,
     pub diff_file_tab: Signal<DiffFileTab>,
     pub diff_request_id: Signal<u64>,
     pub local_picker_open: Signal<bool>,
@@ -263,6 +266,9 @@ impl AppState {
             diff_target_ref: signal(String::new()),
             diff_base_result: signal(None),
             diff_target_result: signal(None),
+            diff_base_layer_mode: signal(BaseLayerMode::Auto),
+            diff_recomputing: signal(false),
+            diff_unexpected_only: signal(false),
             diff_file_tab: signal(DiffFileTab::Added),
             diff_request_id: signal(0),
             local_picker_open: signal(false),
@@ -810,6 +816,7 @@ impl AppState {
         self.diff_request_id
             .set(self.diff_request_id.get_untracked().wrapping_add(1));
         self.diff_loading.set(false);
+        self.diff_recomputing.set(false);
         self.diff_base_progress.set(None);
         self.diff_target_progress.set(None);
     }
@@ -1295,6 +1302,8 @@ impl AppState {
         self.diff_error.set(None);
         self.diff_base_progress.set(None);
         self.diff_target_progress.set(None);
+        self.diff_recomputing.set(false);
+        self.diff_unexpected_only.set(false);
         self.diff_loading.set(true);
         self.diff_file_tab.set(DiffFileTab::Added);
         self.compare_dialog_open.set(false);
@@ -1302,11 +1311,14 @@ impl AppState {
         self.route.set(AppRoute::Diff);
 
         let lang = self.lang.get_untracked().to_core_lang();
+        let diff_opts =
+            DiffOptions::default().base_layer_mode(self.diff_base_layer_mode.get_untracked());
         let (handle, mut rx) = self.service.start_diff(
             base,
             base_arch,
             target,
             target_arch,
+            diff_opts,
             lang,
             skip_memory_cache,
         );
@@ -1368,6 +1380,67 @@ impl AppState {
         });
     }
 
+    pub fn set_diff_base_layer_mode(&self, next: BaseLayerMode) {
+        if self.diff_base_layer_mode.get_untracked() == next {
+            return;
+        }
+        self.diff_base_layer_mode.set(next);
+        self.diff_unexpected_only.set(false);
+        self.recompute_active_diff();
+    }
+
+    fn recompute_active_diff(&self) {
+        let Some(base_res) = self.diff_base_result.get_untracked() else {
+            return;
+        };
+        let Some(target_res) = self.diff_target_result.get_untracked() else {
+            return;
+        };
+        if let Some(handle) = self.active_diff_task.borrow_mut().take() {
+            handle.abort();
+        }
+        let req_id = self.diff_request_id.get_untracked().wrapping_add(1);
+        self.diff_request_id.set(req_id);
+        self.diff_recomputing.set(true);
+
+        let base_ref = self.diff_base_ref.get_untracked();
+        let target_ref = self.diff_target_ref.get_untracked();
+        let base_arch = self
+            .compare_base_arch
+            .get_untracked()
+            .map(|s| s.as_str().to_owned());
+        let target_arch = self
+            .compare_target_arch
+            .get_untracked()
+            .map(|s| s.as_str().to_owned());
+        let diff_opts =
+            DiffOptions::default().base_layer_mode(self.diff_base_layer_mode.get_untracked());
+
+        let (handle, rx) = self.service.recompute_diff(
+            base_ref,
+            base_arch,
+            target_ref,
+            target_arch,
+            base_res,
+            target_res,
+            diff_opts,
+        );
+        *self.active_diff_task.borrow_mut() = Some(handle);
+
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let outcome = rx.await;
+            if state.diff_request_id.get_untracked() != req_id {
+                return;
+            }
+            state.diff_recomputing.set(false);
+            if let Ok(Ok(diff)) = outcome {
+                state.diff_result.set(Some(SharedRef(diff)));
+                state.diff_error.set(None);
+            }
+        });
+    }
+
     pub fn swap_diff(&self) {
         let base_ref = self.diff_base_ref.get_untracked();
         let target_ref = self.diff_target_ref.get_untracked();
@@ -1383,11 +1456,10 @@ impl AppState {
         let base_res = self.diff_base_result.get_untracked();
         let target_res = self.diff_target_result.get_untracked();
         if let (Some(prev_base), Some(prev_target)) = (base_res, target_res) {
-            let swapped = Arc::new(diff_images(&prev_target, &prev_base));
             self.diff_base_result.set(Some(prev_target));
             self.diff_target_result.set(Some(prev_base));
-            self.diff_result.set(Some(SharedRef(swapped)));
             self.diff_error.set(None);
+            self.recompute_active_diff();
         } else if !base_ref.is_empty() && !target_ref.is_empty() {
             self.submit_compare_dialog();
         }

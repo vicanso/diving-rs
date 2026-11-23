@@ -198,11 +198,31 @@ export interface DiffLayer {
   unpackSize: number;
 }
 
+export type BaseLayerSkipReason =
+  | "none"
+  | "sharedPrefix"
+  | "crossArchCreatedGap"
+  | "crossArchFirstLayer"
+  | "forcedCreatedGap"
+  | "forcedFirstLayer"
+  | "manualCount";
+
+export type ParityStatus =
+  | "consistent"
+  | "binaryDiffsOnly"
+  | "configOrFileDrift";
+
 export interface FileChange {
   path: string;
   baseSize: number;
   targetSize: number;
   layer: number;
+  baseMode?: string;
+  targetMode?: string;
+  baseLink?: string;
+  targetLink?: string;
+  isBinary?: boolean;
+  contentChanged?: boolean;
 }
 
 export interface ChangeSet {
@@ -217,10 +237,68 @@ export interface DirChange {
   targetSize: number;
 }
 
+export interface KeyValueDiff {
+  key: string;
+  base?: string;
+  target?: string;
+}
+
+export interface ScalarChange<T> {
+  base: T;
+  target: T;
+}
+
+export interface ConfigDiff {
+  same: boolean;
+  baseOs?: ScalarChange<string>;
+  user?: ScalarChange<string>;
+  workingDir?: ScalarChange<string>;
+  entrypoint?: ScalarChange<string[]>;
+  cmd?: ScalarChange<string[]>;
+  hasHealthcheck?: ScalarChange<boolean>;
+  addedPorts?: string[];
+  removedPorts?: string[];
+  envChanges?: KeyValueDiff[];
+  labelChanges?: KeyValueDiff[];
+}
+
+export interface RuntimeDiff {
+  same: boolean;
+  entrypoint?: ScalarChange<string>;
+  libc?: ScalarChange<string>;
+  requiredGlibc?: ScalarChange<string>;
+  osGlibc?: ScalarChange<string>;
+  issue?: ScalarChange<string>;
+  baseUnstrippedCount: number;
+  targetUnstrippedCount: number;
+  addedUnstripped?: string[];
+  removedUnstripped?: string[];
+}
+
+export interface ParitySummary {
+  status: ParityStatus;
+  expectedBinaryChanges: number;
+  unexpectedFileChanges: number;
+  oneSidedFiles: number;
+  nonBinarySizeChanges: number;
+  modeChanges: number;
+  linkChanges: number;
+  sameSizeContentChanges: number;
+  configChanges: number;
+  runtimeChanges: number;
+}
+
 export interface ImageDiff {
   base: DiffSide;
   target: DiffSide;
   sizeDelta: number;
+  upperSizeDelta: number;
+  baseLayersIgnored: boolean;
+  baseSkipReason: BaseLayerSkipReason;
+  baseSkippedLayers: number;
+  targetSkippedLayers: number;
+  baseSkippedSize: number;
+  targetSkippedSize: number;
   sharedLayers: number;
   sharedSize: number;
   baseLayers: DiffLayer[];
@@ -229,6 +307,12 @@ export interface ImageDiff {
   removed: ChangeSet;
   changed: ChangeSet;
   dirs: DirChange[];
+  configDiff: ConfigDiff;
+  runtimeDiff: RuntimeDiff;
+  parity: ParitySummary;
+  contentVerified: boolean;
+  contentVerifiedFiles: number;
+  contentSkippedFiles: number;
   newRecommendations: Recommendation[];
   resolvedRecommendations: Recommendation[];
 }

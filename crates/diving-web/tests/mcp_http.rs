@@ -14,6 +14,7 @@ use diving_web::mcp::new_router;
 use diving_web::state::McpStatus;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{json, Value};
+use tar::{Builder as TarBuilder, Header as TarHeader};
 use tempfile::NamedTempFile;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -365,4 +366,133 @@ async fn manifest_preview_is_registry_only() {
         .as_str()
         .unwrap()
         .contains("only available for registry images"));
+}
+
+fn multi_arch_test_tar(arch: &str, base_bytes: &[u8], bin_bytes: &[u8], user: &str) -> Vec<u8> {
+    let mut l1 = TarBuilder::new(Vec::new());
+    let mut h1 = TarHeader::new_gnu();
+    h1.set_path("lib/libc.so.6").unwrap();
+    h1.set_size(base_bytes.len() as u64);
+    h1.set_mode(0o644);
+    h1.set_uid(0);
+    h1.set_gid(0);
+    h1.set_cksum();
+    l1.append(&h1, base_bytes).unwrap();
+    let layer1 = l1.into_inner().unwrap();
+
+    let mut l2 = TarBuilder::new(Vec::new());
+    for (p, data, mode) in [
+        ("usr/bin/app", bin_bytes, 0o755),
+        ("etc/cfg.json", br#"{"ok":1}"#.as_slice(), 0o644),
+    ] {
+        let mut h = TarHeader::new_gnu();
+        h.set_path(p).unwrap();
+        h.set_size(data.len() as u64);
+        h.set_mode(mode);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_cksum();
+        l2.append(&h, data).unwrap();
+    }
+    let layer2 = l2.into_inner().unwrap();
+
+    let cfg = format!(
+        r#"{{
+        "architecture": "{arch}",
+        "created": "2024-06-01T00:00:00Z",
+        "history": [
+            {{"created": "2024-01-01T00:00:00Z", "created_by": "RUN apt-get install"}},
+            {{"created": "2024-06-01T00:00:00Z", "created_by": "COPY app cfg.json /"}}
+        ],
+        "os": "linux",
+        "rootfs": {{"type": "layers", "diff_ids": ["sha256:os-{arch}", "sha256:app-{arch}"]}},
+        "config": {{"User": "{user}", "Entrypoint": ["/usr/bin/app"]}}
+    }}"#
+    );
+    let manifest =
+        br#"[{"Config":"config.json","RepoTags":["svc:latest"],"Layers":["l1.tar","l2.tar"]}]"#;
+    let mut outer = TarBuilder::new(Vec::new());
+    for (name, bytes) in [
+        ("manifest.json", manifest.as_slice()),
+        ("config.json", cfg.as_bytes()),
+        ("l1.tar", &layer1),
+        ("l2.tar", &layer2),
+    ] {
+        let mut h = TarHeader::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_cksum();
+        outer.append(&h, bytes).unwrap();
+    }
+    outer.into_inner().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_arch_diff_supports_mode_override_over_http_and_mcp() {
+    let (_amd, base) = tar_image(multi_arch_test_tar(
+        "amd64",
+        &[1u8; 4096],
+        &[0x7f; 1000],
+        "app",
+    ));
+    let (_arm, target) = tar_image(multi_arch_test_tar(
+        "arm64",
+        &[2u8; 8192],
+        &[0x7f; 1600],
+        "app",
+    ));
+    let client = client();
+
+    let url = spawn(None).await;
+    let md = call_tool(
+        &client,
+        &url,
+        10,
+        "diff_images",
+        json!({"base": base, "target": target, "lang": "en"}),
+    )
+    .await;
+    assert_ne!(md["isError"], true, "{md}");
+    assert!(tool_text(&md).contains("Binary diffs only"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            controller::new_router(test_web_state(McpStatus::default())),
+        )
+        .await
+        .unwrap();
+    });
+
+    let auto_diff: Value = client
+        .get(format!(
+            "http://{addr}/api/diff?base={base}&target={target}"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(auto_diff["baseLayersIgnored"], true);
+    assert_eq!(auto_diff["parity"]["status"], "binaryDiffsOnly");
+    assert_eq!(auto_diff["contentVerified"], true);
+
+    let full_diff: Value = client
+        .get(format!(
+            "http://{addr}/api/diff?base={base}&target={target}&baseLayerMode=off"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(full_diff["baseLayersIgnored"], false);
+    assert_eq!(full_diff["changed"]["count"], 2);
 }

@@ -417,6 +417,19 @@ pub(crate) fn extract_image_meta(config: &ImageConfig) -> (String, Vec<String>, 
     (run_user, envs, labels)
 }
 
+/// Extract container execution defaults (`ENTRYPOINT`, `CMD`, `WORKDIR`) from
+/// the image config so cross-image diffs can detect configuration drift.
+pub(crate) fn extract_image_exec_meta(config: &ImageConfig) -> (Vec<String>, Vec<String>, String) {
+    let Some(ref extra_info) = config.config else {
+        return (Vec::new(), Vec::new(), String::new());
+    };
+    (
+        extra_info.entrypoint.clone().unwrap_or_default(),
+        extra_info.cmd.clone().unwrap_or_default(),
+        extra_info.working_dir.clone().unwrap_or_default(),
+    )
+}
+
 pub(crate) fn build_risk_tags(scan: &LayerScan, run_user: &str) -> Vec<String> {
     let mut tags: Vec<String> = vec![];
     if scan.has_pkg_cache {

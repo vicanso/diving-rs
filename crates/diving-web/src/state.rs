@@ -1,6 +1,7 @@
 use crate::http_util::token_fingerprint;
 use diving_core::{
-    parse_image_info, Analyzer, GateConfig, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_PODMAN,
+    parse_image_info, Analyzer, BaseLayerMode, DiffOptions, GateConfig, REGISTRY_LOCAL_DOCKER,
+    REGISTRY_LOCAL_PODMAN,
 };
 use lru::LruCache;
 use reqwest::Client;
@@ -89,4 +90,31 @@ pub(crate) fn with_arch(image: &str, arch: Option<&str>) -> String {
         return image.to_string();
     }
     format!("{image}?arch={arch}")
+}
+
+/// Parse web / MCP base-layer and content-verification query options into [`DiffOptions`].
+pub(crate) fn parse_diff_options(
+    mode: Option<&str>,
+    skip: Option<usize>,
+    verify_content: Option<bool>,
+) -> DiffOptions {
+    let base_layer_mode = if let Some(n) = skip {
+        BaseLayerMode::Skip(n)
+    } else {
+        match mode.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("off") | Some("false") | Some("0") => BaseLayerMode::Off,
+            Some("force") | Some("forceauto") | Some("force-auto") | Some("true") | Some("1") => {
+                BaseLayerMode::ForceAuto
+            }
+            Some(s) => s
+                .strip_prefix("skip:")
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .map_or(BaseLayerMode::Auto, BaseLayerMode::Skip),
+            None => BaseLayerMode::Auto,
+        }
+    };
+    DiffOptions {
+        base_layer_mode,
+        verify_content: verify_content.unwrap_or(true),
+    }
 }

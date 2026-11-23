@@ -12,10 +12,10 @@ use diving_app::notify::{build_report_url, send_all, NotifyConfig, NotifyContext
 use diving_app::summary::wecom_summary;
 use diving_core::trace::{generate_trace_id, TRACE_ID};
 use diving_core::{
-    diff_images, evaluate_diff_gate, evaluate_gate, fill, gate_verdict_md,
-    resolve_explicit_credentials, to_diff_markdown, to_markdown, to_summary_markdown, tr,
-    AnalyzeOptions as CoreAnalyzeOptions, Analyzer, DockerAnalyzeResult, GateFailure, Lang,
-    ProgressCallback, ProgressEvent, RegistryCredentials,
+    evaluate_diff_gate, evaluate_gate, fill, gate_verdict_md, resolve_explicit_credentials,
+    to_diff_markdown, to_markdown, to_summary_markdown, tr, AnalyzeOptions as CoreAnalyzeOptions,
+    Analyzer, BaseLayerMode, DiffOptions, DockerAnalyzeResult, GateFailure, Lang, ProgressCallback,
+    ProgressEvent, RegistryCredentials,
 };
 use tracing::error;
 
@@ -110,14 +110,27 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Compare two images: size change, shared and new layers, added /
-    /// removed / resized files and recommendation changes. Prints Markdown;
-    /// `-o` writes JSON (or Markdown for `.md`). Under CI=true it fails when
-    /// the target grew more than `highest_size_increase` in config.yml
+    /// removed / resized files, config/runtime parity, and recommendation changes.
+    /// Prints Markdown; `-o` writes JSON (or Markdown for `.md`). Under CI=true
+    /// it fails when the target (or upper layers when base layers are ignored)
+    /// grew more than `highest_size_increase` in config.yml
     Diff {
         /// The image to compare against, e.g. `app:1.0` or `app:main`
         base: String,
-        /// The image to check, e.g. `app:1.1` or `app:pr-42`
-        target: String,
+        /// The image to check, e.g. `app:1.1` or `app:pr-42` (omit when using `--archs`)
+        target: Option<String>,
+        /// Compare two architectures of the same image, e.g. `--archs amd64,arm64`
+        #[arg(long, conflicts_with = "target", required_unless_present = "target")]
+        archs: Option<String>,
+        /// Force skipping detected base layers even for same-arch images
+        #[arg(long, conflicts_with_all = ["no_ignore_base_layers", "skip_base_layers"])]
+        ignore_base_layers: bool,
+        /// Disable automatic base-layer skipping on cross-arch diffs
+        #[arg(long, conflicts_with_all = ["ignore_base_layers", "skip_base_layers"])]
+        no_ignore_base_layers: bool,
+        /// Skip the first N file-carrying layers on each side
+        #[arg(long, conflicts_with_all = ["ignore_base_layers", "no_ignore_base_layers"])]
+        skip_base_layers: Option<usize>,
     },
 }
 
@@ -220,11 +233,66 @@ struct AnalyzeRunOptions {
 struct DiffRunOptions {
     base: String,
     target: String,
+    diff_opts: DiffOptions,
     output_file: String,
     summary_file: Option<String>,
     verify_dup: bool,
     lang: Lang,
     credentials: Option<RegistryCredentials>,
+}
+
+fn resolve_base_layer_mode(ignore: bool, no_ignore: bool, skip: Option<usize>) -> BaseLayerMode {
+    if let Some(count) = skip {
+        BaseLayerMode::Skip(count)
+    } else if ignore {
+        BaseLayerMode::ForceAuto
+    } else if no_ignore {
+        BaseLayerMode::Off
+    } else {
+        BaseLayerMode::Auto
+    }
+}
+
+fn with_arch_query(image: &str, arch: &str) -> String {
+    if let Some((head, query)) = image.split_once('?') {
+        let mut params: Vec<String> = query
+            .split('&')
+            .filter(|kv| !kv.is_empty() && !kv.starts_with("arch="))
+            .map(ToString::to_string)
+            .collect();
+        params.push(format!("arch={arch}"));
+        format!("{head}?{}", params.join("&"))
+    } else {
+        format!("{image}?arch={arch}")
+    }
+}
+
+fn resolve_diff_targets(
+    base: String,
+    target: Option<String>,
+    archs: Option<String>,
+) -> Result<(String, String), String> {
+    match (target, archs) {
+        (Some(t), None) => Ok((base, t)),
+        (None, Some(spec)) => {
+            let parts: Vec<&str> = spec
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.len() != 2 {
+                return Err(
+                    "--archs expects two comma-separated architectures, e.g. --archs amd64,arm64"
+                        .to_string(),
+                );
+            }
+            Ok((
+                with_arch_query(&base, parts[0]),
+                with_arch_query(&base, parts[1]),
+            ))
+        }
+        _ => Err("provide either <TARGET> or --archs <ARCH_A,ARCH_B>".to_string()),
+    }
 }
 
 fn unwrap_result(arc: Arc<DockerAnalyzeResult>) -> DockerAnalyzeResult {
@@ -433,6 +501,7 @@ async fn diff(
     let DiffRunOptions {
         base,
         target,
+        diff_opts,
         output_file,
         summary_file,
         verify_dup,
@@ -440,9 +509,18 @@ async fn diff(
         credentials,
     } = opts;
     analyzer.cleanup_caches().await.map_err(|e| e.to_string())?;
-    let base = analyze_for_cli(analyzer, &base, lang, verify_dup, credentials.clone()).await?;
-    let target = analyze_for_cli(analyzer, &target, lang, verify_dup, credentials).await?;
-    let diff = diff_images(&base, &target);
+    let base_res = analyze_for_cli(analyzer, &base, lang, verify_dup, credentials.clone()).await?;
+    let target_res = analyze_for_cli(analyzer, &target, lang, verify_dup, credentials).await?;
+    let diff = analyzer
+        .compute_diff(
+            &base,
+            &target,
+            Arc::new(base_res),
+            Arc::new(target_res),
+            diff_opts,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     let gate_cfg = loaded.config.gate_config();
     let failures = evaluate_diff_gate(&diff, gate_cfg.highest_size_increase);
     let verdict = is_ci().then(|| gate_verdict_md(&failures, lang));
@@ -451,6 +529,11 @@ async fn diff(
     if output_file.is_empty() || output_file == "-" {
         print!("{md}");
     } else {
+        let shown_delta = if diff.base_layers_ignored {
+            diff.upper_size_delta
+        } else {
+            diff.size_delta
+        };
         println!("{}", tr(lang, "cli.result").bold().green());
         println!(
             "{}",
@@ -461,8 +544,8 @@ async fn diff(
                     &ByteSize(diff.target.total_size).to_string(),
                     &format!(
                         "{}{}",
-                        if diff.size_delta < 0 { "-" } else { "+" },
-                        ByteSize(diff.size_delta.unsigned_abs())
+                        if shown_delta < 0 { "-" } else { "+" },
+                        ByteSize(shown_delta.unsigned_abs())
                     ),
                 ]
             )
@@ -551,23 +634,42 @@ pub async fn run(args: Args, loaded: LoadedConfig, analyzer: Analyzer) {
         args.password_stdin,
     );
 
-    if let Some(Command::Diff { base, target }) = args.command {
+    if let Some(Command::Diff {
+        base,
+        target,
+        archs,
+        ignore_base_layers,
+        no_ignore_base_layers,
+        skip_base_layers,
+    }) = args.command
+    {
         TRACE_ID
             .scope(generate_trace_id(), async {
-                let outcome = diff(
-                    &analyzer,
-                    &loaded,
-                    DiffRunOptions {
-                        base,
-                        target,
-                        output_file: args.output_file.unwrap_or_default(),
-                        summary_file: args.summary,
-                        verify_dup,
-                        lang,
-                        credentials,
-                    },
-                )
-                .await;
+                let outcome = match resolve_diff_targets(base, target, archs) {
+                    Ok((base_ref, target_ref)) => {
+                        let mode = resolve_base_layer_mode(
+                            ignore_base_layers,
+                            no_ignore_base_layers,
+                            skip_base_layers,
+                        );
+                        diff(
+                            &analyzer,
+                            &loaded,
+                            DiffRunOptions {
+                                base: base_ref,
+                                target: target_ref,
+                                diff_opts: DiffOptions::default().base_layer_mode(mode),
+                                output_file: args.output_file.unwrap_or_default(),
+                                summary_file: args.summary,
+                                verify_dup,
+                                lang,
+                                credentials,
+                            },
+                        )
+                        .await
+                    }
+                    Err(err) => Err(err),
+                };
                 exit_on(outcome, lang);
             })
             .await;
@@ -610,7 +712,8 @@ mod tests {
             Args::try_parse_from(["diving", "diff", "app:1", "app:2", "-o", "d.json"]).unwrap();
         assert!(matches!(
             &args.command,
-            Some(Command::Diff { base, target }) if base == "app:1" && target == "app:2"
+            Some(Command::Diff { base, target: Some(t), archs: None, .. })
+                if base == "app:1" && t == "app:2"
         ));
         assert_eq!(args.output_file.as_deref(), Some("d.json"));
 
@@ -623,6 +726,68 @@ mod tests {
         let args = Args::try_parse_from(["diving", "redis:alpine", "-o", "-"]).unwrap();
         assert!(args.command.is_none());
         assert_eq!(args.image.as_deref(), Some("redis:alpine"));
+    }
+
+    #[test]
+    fn diff_supports_archs_and_base_layer_flags() {
+        let args = Args::try_parse_from([
+            "diving",
+            "diff",
+            "redis:alpine",
+            "--archs",
+            "amd64,arm64",
+            "--ignore-base-layers",
+        ])
+        .unwrap();
+        let Some(Command::Diff {
+            base,
+            target,
+            archs,
+            ignore_base_layers,
+            no_ignore_base_layers,
+            skip_base_layers,
+        }) = args.command
+        else {
+            panic!("expected Diff");
+        };
+        let (b, t) = resolve_diff_targets(base, target, archs).unwrap();
+        assert_eq!(b, "redis:alpine?arch=amd64");
+        assert_eq!(t, "redis:alpine?arch=arm64");
+        assert_eq!(
+            resolve_base_layer_mode(ignore_base_layers, no_ignore_base_layers, skip_base_layers),
+            BaseLayerMode::ForceAuto
+        );
+
+        let args =
+            Args::try_parse_from(["diving", "diff", "a:1", "a:2", "--skip-base-layers", "2"])
+                .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Diff {
+                skip_base_layers: Some(2),
+                ..
+            })
+        ));
+
+        // Conflicting options are rejected cleanly.
+        assert!(Args::try_parse_from([
+            "diving",
+            "diff",
+            "app:latest",
+            "app:other",
+            "--archs",
+            "amd64,arm64"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "diving",
+            "diff",
+            "app:latest",
+            "app:other",
+            "--ignore-base-layers",
+            "--no-ignore-base-layers"
+        ])
+        .is_err());
     }
 
     #[test]

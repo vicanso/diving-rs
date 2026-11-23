@@ -1481,6 +1481,50 @@
   font-size: 13px;
 }
 
+.diffParityBanner {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-muted);
+  font-size: 13px;
+  color: var(--ink);
+}
+.diffParityBanner.consistent {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, var(--bg-muted));
+}
+.diffParityBanner.binaryDiffsOnly {
+  border-color: color-mix(in srgb, var(--info) 45%, var(--border));
+  background: color-mix(in srgb, var(--info) 10%, var(--bg-muted));
+}
+.diffParityBanner.configOrFileDrift {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-muted));
+}
+.diffParityMeta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.diffModeSelect {
+  min-width: 170px;
+}
+
+.diffFileBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.diffFilesToolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
 .diffLayerColumns {
   display: grid;
   grid-template-columns: 1fr 1fr;

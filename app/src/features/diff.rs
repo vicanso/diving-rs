@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use diving_core::{ChangeSet, DiffLayer, ImageDiff, Recommendation};
+use diving_core::{
+    BaseLayerMode, BaseLayerSkipReason, ChangeSet, DiffLayer, ImageDiff, ParityStatus,
+    Recommendation,
+};
 use nsh_core::prelude::*;
 
 use crate::domain::{
@@ -14,10 +17,10 @@ use crate::i18n::{
     strip_inline_markdown, t, tf,
 };
 use crate::ui::{
-    BadgeTone, BannerTone, ButtonVariant, IconName, TabOption, UiSize, diverge_down, diverge_up,
-    font_mono_family, radius_control, radius_inset, theme, ui_badge, ui_banner, ui_button,
-    ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill, ui_panel, ui_panel_titled,
-    ui_select, ui_separator, ui_skeleton, ui_tabs,
+    BadgeTone, BannerTone, ButtonVariant, IconName, SelectItem, TabOption, UiSize, diverge_down,
+    diverge_up, font_mono_family, radius_control, radius_inset, theme, ui_badge, ui_banner,
+    ui_button, ui_checkbox, ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill,
+    ui_panel, ui_panel_titled, ui_select, ui_separator, ui_skeleton, ui_spinner, ui_tabs,
 };
 
 const MINUS_SIGN: char = '−';
@@ -410,6 +413,51 @@ fn diff_error_view(state: AppState, err: DiffErrorState) -> impl IntoElement {
     )
 }
 
+fn base_layer_mode_key(mode: BaseLayerMode) -> String {
+    match mode {
+        BaseLayerMode::Auto => "auto".to_owned(),
+        BaseLayerMode::ForceAuto => "forceAuto".to_owned(),
+        BaseLayerMode::Off => "off".to_owned(),
+        BaseLayerMode::Skip(n) => format!("skip:{n}"),
+    }
+}
+
+fn parse_base_layer_mode_key(key: Option<&str>) -> BaseLayerMode {
+    match key.unwrap_or("auto") {
+        "forceAuto" => BaseLayerMode::ForceAuto,
+        "off" => BaseLayerMode::Off,
+        other => other
+            .strip_prefix("skip:")
+            .and_then(|n| n.parse::<usize>().ok())
+            .map_or(BaseLayerMode::Auto, BaseLayerMode::Skip),
+    }
+}
+
+fn base_layer_mode_items(lang: UiLang) -> Vec<SelectItem> {
+    let mut items = vec![
+        SelectItem::new("auto", t(lang, "diff.mode_auto")),
+        SelectItem::new("forceAuto", t(lang, "diff.mode_force")),
+        SelectItem::new("off", t(lang, "diff.mode_off")),
+    ];
+    for n in 1..=5 {
+        items.push(SelectItem::new(
+            format!("skip:{n}"),
+            tf(lang, "diff.mode_skip_n", &[&n.to_string()]),
+        ));
+    }
+    items
+}
+
+fn skip_reason_key(reason: BaseLayerSkipReason) -> &'static str {
+    match reason {
+        BaseLayerSkipReason::CrossArchCreatedGap => "diff.skip_created_gap",
+        BaseLayerSkipReason::CrossArchFirstLayer => "diff.skip_first_layer",
+        BaseLayerSkipReason::ForcedCreatedGap => "diff.skip_forced_gap",
+        BaseLayerSkipReason::ForcedFirstLayer => "diff.skip_forced_first",
+        _ => "diff.skip_manual",
+    }
+}
+
 fn render_diff_report(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
     scroll().flex_1().child(
         view()
@@ -417,7 +465,8 @@ fn render_diff_report(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
             .p_5()
             .flex_col()
             .gap_5()
-            .child(summary_card(Arc::clone(&diff), state.lang))
+            .child(summary_card(state.clone(), Arc::clone(&diff)))
+            .child(config_runtime_panel(state.clone(), Arc::clone(&diff)))
             .child(layers_diff_panel(state.clone(), Arc::clone(&diff)))
             .child(dir_changes_panel(state.clone(), Arc::clone(&diff)))
             .child(file_changes_panel(state.clone(), Arc::clone(&diff)))
@@ -425,7 +474,12 @@ fn render_diff_report(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
     )
 }
 
-fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement {
+fn summary_card(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
+    let lang = state.lang;
+    let mode_sig = state.diff_base_layer_mode;
+    let recomputing_sig = state.diff_recomputing;
+    let mode_state = state.clone();
+
     let base_name = diff.base.name.clone();
     let base_arch = diff.base.arch.clone();
     let base_stale = diff.base.stale_as_of.clone();
@@ -433,14 +487,25 @@ fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement 
     let target_arch = diff.target.arch.clone();
     let target_stale = diff.target.stale_as_of.clone();
 
-    let metrics: Vec<(&'static str, String, String, String, i64)> = vec![
-        (
-            "diff.metric_image_size",
-            format_bytes(diff.base.total_size),
-            format_bytes(diff.target.total_size),
-            format_signed_bytes(diff.size_delta),
-            diff.size_delta,
-        ),
+    let mut metrics: Vec<(&'static str, String, String, String, i64)> = vec![(
+        "diff.metric_image_size",
+        format_bytes(diff.base.total_size),
+        format_bytes(diff.target.total_size),
+        format_signed_bytes(diff.size_delta),
+        diff.size_delta,
+    )];
+    if diff.base_layers_ignored {
+        let base_upper: u64 = diff.base_layers.iter().map(|l| l.unpack_size).sum();
+        let target_upper: u64 = diff.target_layers.iter().map(|l| l.unpack_size).sum();
+        metrics.push((
+            "diff.metric_upper_size",
+            format_bytes(base_upper),
+            format_bytes(target_upper),
+            format_signed_bytes(diff.upper_size_delta),
+            diff.upper_size_delta,
+        ));
+    }
+    metrics.extend([
         (
             "diff.metric_compressed",
             format_bytes(diff.base.size),
@@ -462,7 +527,17 @@ fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement 
             format_signed_count(diff.target.file_count as isize - diff.base.file_count as isize),
             diff.target.file_count as i64 - diff.base.file_count as i64,
         ),
-    ];
+    ]);
+
+    let parity_tone = match diff.parity.status {
+        ParityStatus::Consistent => BannerTone::Success,
+        ParityStatus::BinaryDiffsOnly => BannerTone::Info,
+        ParityStatus::ConfigOrFileDrift => BannerTone::Warning,
+    };
+    let parity = diff.parity.clone();
+    let content_verified = diff.content_verified;
+    let content_verified_files = diff.content_verified_files;
+    let content_skipped_files = diff.content_skipped_files;
 
     ui_panel(
         None,
@@ -470,6 +545,46 @@ fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement 
         view()
             .flex_col()
             .gap_4()
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        text(move || t(lang.get(), "diff.mode_label"))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || theme().muted_foreground),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(view().w(px(230.0)).child(ui_select(
+                                move || base_layer_mode_items(lang.get()),
+                                move || {
+                                    Some(SharedString::from(base_layer_mode_key(mode_sig.get())))
+                                },
+                                "",
+                                "Base layers policy",
+                                UiSize::Sm,
+                                move || recomputing_sig.get(),
+                                move |selected| {
+                                    let next = parse_base_layer_mode_key(
+                                        selected.as_ref().map(|s| s.as_str()),
+                                    );
+                                    mode_state.set_diff_base_layer_mode(next);
+                                },
+                            )))
+                            .child(when(
+                                move || recomputing_sig.get(),
+                                move || ui_spinner(px(14.0), move || theme().primary),
+                            )),
+                    ),
+            )
             .child(
                 view()
                     .flex_row()
@@ -580,6 +695,66 @@ fn summary_card(diff: Arc<ImageDiff>, lang: Signal<UiLang>) -> impl IntoElement 
                                 )
                         },
                     )),
+            )
+            .child(
+                view()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(ui_banner(
+                        parity_tone,
+                        move || {
+                            let l = lang.get();
+                            SharedString::from(match parity.status {
+                                ParityStatus::Consistent => {
+                                    t(l, "diff.parity_consistent").to_owned()
+                                }
+                                ParityStatus::BinaryDiffsOnly => tf(
+                                    l,
+                                    "diff.parity_binary_only",
+                                    &[&parity.expected_binary_changes.to_string()],
+                                ),
+                                ParityStatus::ConfigOrFileDrift => tf(
+                                    l,
+                                    "diff.parity_drift",
+                                    &[
+                                        &parity.unexpected_file_changes.to_string(),
+                                        &parity.config_changes.to_string(),
+                                        &parity.runtime_changes.to_string(),
+                                        &parity.expected_binary_changes.to_string(),
+                                    ],
+                                ),
+                            })
+                        },
+                        None,
+                    ))
+                    .when(
+                        content_verified_files > 0 || content_skipped_files > 0,
+                        |col| {
+                            col.child(
+                                text(move || {
+                                    let l = lang.get();
+                                    if content_verified {
+                                        tf(
+                                            l,
+                                            "diff.content_verified",
+                                            &[
+                                                &content_verified_files.to_string(),
+                                                &content_skipped_files.to_string(),
+                                            ],
+                                        )
+                                    } else {
+                                        tf(
+                                            l,
+                                            "diff.content_unverified",
+                                            &[&content_skipped_files.to_string()],
+                                        )
+                                    }
+                                })
+                                .text_xs()
+                                .text_color(move || theme().muted_foreground),
+                            )
+                        },
+                    ),
             ),
     )
 }
@@ -630,6 +805,230 @@ fn diff_side_card(
         )
 }
 
+fn build_config_runtime_rows(diff: &ImageDiff) -> Vec<(String, String, String)> {
+    let mut rows = Vec::new();
+    let cd = &diff.config_diff;
+    let show_opt = |s: &str| {
+        if s.is_empty() {
+            "—".to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    let show_cmd = |v: &[String]| {
+        if v.is_empty() {
+            "—".to_owned()
+        } else {
+            v.join(" ")
+        }
+    };
+    if let Some(c) = &cd.base_os {
+        rows.push(("Base OS".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+    }
+    if let Some(c) = &cd.user {
+        rows.push(("USER".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+    }
+    if let Some(c) = &cd.working_dir {
+        rows.push(("WORKDIR".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+    }
+    if let Some(c) = &cd.entrypoint {
+        rows.push((
+            "ENTRYPOINT".to_owned(),
+            show_cmd(&c.base),
+            show_cmd(&c.target),
+        ));
+    }
+    if let Some(c) = &cd.cmd {
+        rows.push(("CMD".to_owned(), show_cmd(&c.base), show_cmd(&c.target)));
+    }
+    if let Some(c) = &cd.has_healthcheck {
+        rows.push((
+            "HEALTHCHECK".to_owned(),
+            c.base.to_string(),
+            c.target.to_string(),
+        ));
+    }
+    if !cd.added_ports.is_empty() || !cd.removed_ports.is_empty() {
+        rows.push((
+            "EXPOSE".to_owned(),
+            if cd.removed_ports.is_empty() {
+                "—".to_owned()
+            } else {
+                cd.removed_ports.join(", ")
+            },
+            if cd.added_ports.is_empty() {
+                "—".to_owned()
+            } else {
+                cd.added_ports.join(", ")
+            },
+        ));
+    }
+    for env in &cd.env_changes {
+        rows.push((
+            format!("ENV {}", env.key),
+            env.base.as_deref().unwrap_or("—").to_owned(),
+            env.target.as_deref().unwrap_or("—").to_owned(),
+        ));
+    }
+    for label in &cd.label_changes {
+        rows.push((
+            format!("LABEL {}", label.key),
+            label.base.as_deref().unwrap_or("—").to_owned(),
+            label.target.as_deref().unwrap_or("—").to_owned(),
+        ));
+    }
+    let rd = &diff.runtime_diff;
+    if let Some(c) = &rd.entrypoint {
+        rows.push((
+            "Runtime entrypoint".to_owned(),
+            show_opt(&c.base),
+            show_opt(&c.target),
+        ));
+    }
+    if let Some(c) = &rd.libc {
+        rows.push((
+            "Runtime libc".to_owned(),
+            show_opt(&c.base),
+            show_opt(&c.target),
+        ));
+    }
+    if let Some(c) = &rd.required_glibc {
+        rows.push((
+            "Min glibc".to_owned(),
+            show_opt(&c.base),
+            show_opt(&c.target),
+        ));
+    }
+    if let Some(c) = &rd.os_glibc {
+        rows.push((
+            "OS glibc".to_owned(),
+            show_opt(&c.base),
+            show_opt(&c.target),
+        ));
+    }
+    if let Some(c) = &rd.issue {
+        rows.push((
+            "Runtime issue".to_owned(),
+            show_opt(&c.base),
+            show_opt(&c.target),
+        ));
+    }
+    if !rd.added_unstripped.is_empty() || !rd.removed_unstripped.is_empty() {
+        rows.push((
+            "Unstripped binaries".to_owned(),
+            if rd.removed_unstripped.is_empty() {
+                rd.base_unstripped_count.to_string()
+            } else {
+                format!(
+                    "{} (−{})",
+                    rd.base_unstripped_count,
+                    rd.removed_unstripped.join(", ")
+                )
+            },
+            if rd.added_unstripped.is_empty() {
+                rd.target_unstripped_count.to_string()
+            } else {
+                format!(
+                    "{} (+{})",
+                    rd.target_unstripped_count,
+                    rd.added_unstripped.join(", ")
+                )
+            },
+        ));
+    }
+    rows
+}
+
+fn config_runtime_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
+    let lang = state.lang;
+    let rows = build_config_runtime_rows(&diff);
+    let is_same = diff.config_diff.same && diff.runtime_diff.same;
+
+    ui_panel_titled(
+        move || SharedString::from(t(lang.get(), "diff.config_runtime_section")),
+        None,
+        if is_same || rows.is_empty() {
+            ui_banner(
+                BannerTone::Success,
+                move || SharedString::from(t(lang.get(), "diff.config_runtime_ok")),
+                None,
+            )
+            .into_element()
+        } else {
+            view()
+                .flex_col()
+                .gap_1()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            text(move || t(lang.get(), "diff.col_setting"))
+                                .w(px(180.0))
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || theme().muted_foreground),
+                        )
+                        .child(
+                            text(move || t(lang.get(), "diff.base_label"))
+                                .flex_1()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || theme().muted_foreground),
+                        )
+                        .child(
+                            text(move || t(lang.get(), "diff.target_label"))
+                                .flex_1()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || theme().muted_foreground),
+                        ),
+                )
+                .children(rows.into_iter().map(|(setting, b_val, t_val)| {
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_1p5()
+                        .border_b_1()
+                        .border_color(move || theme().border.opacity(0.45))
+                        .child(
+                            text(setting)
+                                .w(px(180.0))
+                                .text_xs()
+                                .font_family(font_mono_family())
+                                .font_weight(FontWeight::MEDIUM)
+                                .number_of_lines(1)
+                                .text_color(move || theme().foreground),
+                        )
+                        .child(
+                            text(b_val)
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_xs()
+                                .font_family(font_mono_family())
+                                .number_of_lines(2)
+                                .text_color(move || theme().muted_foreground),
+                        )
+                        .child(
+                            text(t_val)
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_xs()
+                                .font_family(font_mono_family())
+                                .number_of_lines(2)
+                                .text_color(move || theme().foreground),
+                        )
+                }))
+                .into_element()
+        },
+    )
+}
+
 fn delta_color(delta: i64) -> AdaptiveColor {
     if delta > 0 {
         diverge_up()
@@ -644,6 +1043,12 @@ fn layers_diff_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement 
     let lang = state.lang;
     let shared_count = diff.shared_layers;
     let shared_size = format_bytes(diff.shared_size);
+    let base_ignored = diff.base_layers_ignored;
+    let base_skip_cnt = diff.base_skipped_layers;
+    let target_skip_cnt = diff.target_skipped_layers;
+    let base_skip_sz = format_bytes(diff.base_skipped_size);
+    let target_skip_sz = format_bytes(diff.target_skipped_size);
+    let reason_key = skip_reason_key(diff.base_skip_reason);
 
     ui_panel_titled(
         move || SharedString::from(t(lang.get(), "diff.layers_section")),
@@ -652,16 +1057,30 @@ fn layers_diff_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement 
             .flex_col()
             .gap_3()
             .child(ui_banner(
-                if shared_count > 0 {
+                if base_ignored || shared_count > 0 {
                     BannerTone::Info
                 } else {
                     BannerTone::Warning
                 },
                 move || {
-                    SharedString::from(if shared_count > 0 {
-                        format_shared_base_layers(lang.get(), shared_count, &shared_size)
+                    let l = lang.get();
+                    SharedString::from(if base_ignored {
+                        let reason = t(l, reason_key);
+                        tf(
+                            l,
+                            "diff.skipped_base_layers",
+                            &[
+                                &base_skip_cnt.to_string(),
+                                &base_skip_sz,
+                                &target_skip_cnt.to_string(),
+                                &target_skip_sz,
+                                reason,
+                            ],
+                        )
+                    } else if shared_count > 0 {
+                        format_shared_base_layers(l, shared_count, &shared_size)
                     } else {
-                        t(lang.get(), "diff.no_shared_layers").to_owned()
+                        t(l, "diff.no_shared_layers").to_owned()
                     })
                 },
                 None,
@@ -858,10 +1277,12 @@ fn diverging_bar(delta: i64, ratio: f32) -> impl IntoElement {
 fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
     let lang = state.lang;
     let active = state.diff_file_tab;
+    let unexpected_only = state.diff_unexpected_only;
     let added_count = diff.added.count;
     let removed_count = diff.removed.count;
     let changed_count = diff.changed.count;
     let total = added_count + removed_count + changed_count;
+    let has_expected_binaries = diff.parity.expected_binary_changes > 0;
 
     let bucket_data = computed(move || {
         let bucket: &ChangeSet = match active.get() {
@@ -869,51 +1290,80 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
             DiffFileTab::Removed => &diff.removed,
             DiffFileTab::Resized => &diff.changed,
         };
-        (bucket.count, SharedRef::new(bucket.files.clone()))
+        let files = if active.get() == DiffFileTab::Resized && unexpected_only.get() {
+            bucket
+                .files
+                .iter()
+                .filter(|f| !f.is_expected_binary_only())
+                .cloned()
+                .collect()
+        } else {
+            bucket.files.clone()
+        };
+        (bucket.count, bucket.files.len(), SharedRef::new(files))
     });
-    let is_empty = computed(move || bucket_data.with(|(_, files)| files.is_empty()));
+    let is_empty = computed(move || bucket_data.with(|(_, _, files)| files.is_empty()));
 
     ui_panel_titled(
         move || SharedString::from(format!("{} ({total})", t(lang.get(), "diff.files_section"))),
         Some(
-            ui_tabs(
-                vec![
-                    TabOption::new(
-                        DiffFileTab::Added,
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_3()
+                .when(has_expected_binaries, |row| {
+                    row.child(when(
+                        move || active.get() == DiffFileTab::Resized,
                         move || {
-                            SharedString::from(format!(
-                                "{} ({added_count})",
-                                t(lang.get(), "diff.tab_added")
-                            ))
+                            ui_checkbox(
+                                move || SharedString::from(t(lang.get(), "diff.unexpected_only")),
+                                move || unexpected_only.get(),
+                                false,
+                                false,
+                                move |next| unexpected_only.set(next),
+                            )
                         },
-                        None,
-                    ),
-                    TabOption::new(
-                        DiffFileTab::Removed,
-                        move || {
-                            SharedString::from(format!(
-                                "{} ({removed_count})",
-                                t(lang.get(), "diff.tab_removed")
-                            ))
-                        },
-                        None,
-                    ),
-                    TabOption::new(
-                        DiffFileTab::Resized,
-                        move || {
-                            SharedString::from(format!(
-                                "{} ({changed_count})",
-                                t(lang.get(), "diff.tab_resized")
-                            ))
-                        },
-                        None,
-                    ),
-                ],
-                active,
-                "File changes category",
-                move |next| state.diff_file_tab.set(next),
-            )
-            .into_element(),
+                    ))
+                })
+                .child(ui_tabs(
+                    vec![
+                        TabOption::new(
+                            DiffFileTab::Added,
+                            move || {
+                                SharedString::from(format!(
+                                    "{} ({added_count})",
+                                    t(lang.get(), "diff.tab_added")
+                                ))
+                            },
+                            None,
+                        ),
+                        TabOption::new(
+                            DiffFileTab::Removed,
+                            move || {
+                                SharedString::from(format!(
+                                    "{} ({removed_count})",
+                                    t(lang.get(), "diff.tab_removed")
+                                ))
+                            },
+                            None,
+                        ),
+                        TabOption::new(
+                            DiffFileTab::Resized,
+                            move || {
+                                SharedString::from(format!(
+                                    "{} ({changed_count})",
+                                    t(lang.get(), "diff.tab_resized")
+                                ))
+                            },
+                            None,
+                        ),
+                    ],
+                    active,
+                    "File changes category",
+                    move |next| state.diff_file_tab.set(next),
+                ))
+                .into_element(),
         ),
         dynamic(move || {
             if is_empty.get() {
@@ -930,17 +1380,17 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                 .flex_col()
                 .gap_2()
                 .child(when(
-                    move || bucket_data.with(|(total_len, files)| *total_len > files.len()),
+                    move || bucket_data.with(|(total_len, raw_len, _)| *total_len > *raw_len),
                     move || {
                         ui_banner(
                             BannerTone::Info,
                             move || {
-                                let (total_len, shown_len) =
-                                    bucket_data.with(|(t_len, files)| (*t_len, files.len()));
+                                let (total_len, raw_len) =
+                                    bucket_data.with(|(t_len, r_len, _)| (*t_len, *r_len));
                                 SharedString::from(tf(
                                     lang.get(),
                                     "diff.truncated_files",
-                                    &[&shown_len.to_string(), &total_len.to_string()],
+                                    &[&raw_len.to_string(), &total_len.to_string()],
                                 ))
                             },
                             None,
@@ -950,28 +1400,28 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                 .child(
                     view()
                         .h(move || {
-                            let len = bucket_data.with(|(_, files)| files.len());
+                            let len = bucket_data.with(|(_, _, files)| files.len());
                             let h_pt = (len as f32 * DIFF_FILE_ROW_HEIGHT)
                                 .clamp(DIFF_FILE_ROW_HEIGHT, DIFF_FILE_MAX_HEIGHT);
                             px(h_pt)
                         })
                         .child(
                             virtual_list(
-                                move || bucket_data.with(|(_, files)| files.len()),
+                                move || bucket_data.with(|(_, _, files)| files.len()),
                                 move |at| {
                                     view()
                                         .w_full()
                                         .h(px(DIFF_FILE_ROW_HEIGHT))
                                         .flex_row()
                                         .items_center()
-                                        .gap_3()
+                                        .gap_2()
                                         .px_2()
                                         .border_b_1()
                                         .border_color(move || theme().border.opacity(0.45))
                                         .child(ui_badge(
                                             move || {
                                                 SharedString::from(bucket_data.with(
-                                                    |(_, files)| {
+                                                    |(_, _, files)| {
                                                         files
                                                             .get(at.index())
                                                             .map_or_else(String::new, |row| {
@@ -984,7 +1434,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                         ))
                                         .child(
                                             text(move || {
-                                                bucket_data.with(|(_, files)| {
+                                                bucket_data.with(|(_, _, files)| {
                                                     files
                                                         .get(at.index())
                                                         .map_or_else(String::new, |row| {
@@ -999,9 +1449,74 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                             .number_of_lines(1)
                                             .text_color(move || theme().foreground),
                                         )
+                                        .child(when(
+                                            move || {
+                                                active.get() == DiffFileTab::Resized
+                                                    && bucket_data.with(|(_, _, files)| {
+                                                        files
+                                                            .get(at.index())
+                                                            .is_some_and(|r| r.is_binary)
+                                                    })
+                                            },
+                                            move || {
+                                                ui_badge(
+                                                    move || {
+                                                        SharedString::from(t(
+                                                            lang.get(),
+                                                            "diff.badge_binary",
+                                                        ))
+                                                    },
+                                                    BadgeTone::Neutral,
+                                                )
+                                            },
+                                        ))
+                                        .child(when(
+                                            move || {
+                                                active.get() == DiffFileTab::Resized
+                                                    && bucket_data.with(|(_, _, files)| {
+                                                        files.get(at.index()).is_some_and(|r| {
+                                                            r.content_changed
+                                                                || r.base_mode != r.target_mode
+                                                                || r.base_link != r.target_link
+                                                        })
+                                                    })
+                                            },
+                                            move || {
+                                                ui_badge(
+                                                    move || {
+                                                        let l = lang.get();
+                                                        let key =
+                                                            bucket_data.with(|(_, _, files)| {
+                                                                match files.get(at.index()) {
+                                                                    Some(r)
+                                                                        if r.content_changed =>
+                                                                    {
+                                                                        "diff.badge_content"
+                                                                    }
+                                                                    Some(r)
+                                                                        if r.base_mode
+                                                                            != r.target_mode =>
+                                                                    {
+                                                                        "diff.badge_mode"
+                                                                    }
+                                                                    Some(r)
+                                                                        if r.base_link
+                                                                            != r.target_link =>
+                                                                    {
+                                                                        "diff.badge_link"
+                                                                    }
+                                                                    _ => "diff.badge_content",
+                                                                }
+                                                            });
+                                                        SharedString::from(t(l, key))
+                                                    },
+                                                    BadgeTone::Warning,
+                                                )
+                                            },
+                                        ))
                                         .child(
                                             text(move || {
-                                                bucket_data.with(|(_, files)| {
+                                                bucket_data.with(|(_, _, files)| {
                                                     files.get(at.index()).map_or_else(
                                                         String::new,
                                                         |row| {
@@ -1023,7 +1538,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                         )
                                         .child(
                                             text(move || {
-                                                bucket_data.with(|(_, files)| {
+                                                bucket_data.with(|(_, _, files)| {
                                                     files.get(at.index()).map_or_else(
                                                         || "0 B".to_owned(),
                                                         |row| format_signed_bytes(row.delta()),
@@ -1037,7 +1552,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                             .tabular_nums()
                                             .text_right()
                                             .text_color(move || {
-                                                let delta = bucket_data.with(|(_, files)| {
+                                                let delta = bucket_data.with(|(_, _, files)| {
                                                     files.get(at.index()).map_or(0, |r| r.delta())
                                                 });
                                                 delta_color(delta)
@@ -1049,7 +1564,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                             .min_h(px(0.0))
                             .estimated_item_size(px(DIFF_FILE_ROW_HEIGHT))
                             .keys(move || {
-                                bucket_data.with(|(_, files)| {
+                                bucket_data.with(|(_, _, files)| {
                                     files
                                         .iter()
                                         .map(|f| format!("{}:{}", f.layer, f.path))
@@ -1203,7 +1718,10 @@ fn rec_diff_column(
 mod tests {
     use std::time::Duration;
 
-    use diving_core::{ChangeSet, DiffSide, FileChange, ImageDiff, Recommendation};
+    use diving_core::{
+        BaseLayerSkipReason, ChangeSet, ConfigDiff, DiffSide, FileChange, ImageDiff, ParityStatus,
+        ParitySummary, Recommendation, ScalarChange,
+    };
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
     use nsh_testing::Headless;
 
@@ -1221,6 +1739,7 @@ mod tests {
                 base_size: 0,
                 target_size: (i as u64 + 1) * 1024,
                 layer: (i % 4) + 1,
+                ..Default::default()
             })
             .collect();
         let diff = ImageDiff {
@@ -1258,6 +1777,7 @@ mod tests {
                     base_size: 1024,
                     target_size: 0,
                     layer: 1,
+                    ..Default::default()
                 }],
             },
             resolved_recommendations: vec![Recommendation {
@@ -1269,6 +1789,101 @@ mod tests {
                 est_saved_bytes: 0,
                 ..Default::default()
             }],
+            ..Default::default()
+        };
+        state.diff_result.set(Some(SharedRef::new(diff)));
+        diff_workspace(state)
+    }
+
+    #[component]
+    fn CrossArchParityHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.route.set(AppRoute::Diff);
+        let diff = ImageDiff {
+            base: DiffSide {
+                name: "svc:amd64".to_owned(),
+                arch: "amd64".to_owned(),
+                total_size: 12_000,
+                size: 6_000,
+                layer_count: 2,
+                file_count: 2,
+                ..Default::default()
+            },
+            target: DiffSide {
+                name: "svc:arm64".to_owned(),
+                arch: "arm64".to_owned(),
+                total_size: 20_000,
+                size: 9_000,
+                layer_count: 2,
+                file_count: 2,
+                ..Default::default()
+            },
+            size_delta: 8_000,
+            upper_size_delta: 400,
+            base_layers_ignored: true,
+            base_skip_reason: BaseLayerSkipReason::CrossArchCreatedGap,
+            base_skipped_layers: 1,
+            target_skipped_layers: 1,
+            base_skipped_size: 8_000,
+            target_skipped_size: 15_600,
+            base_layers: vec![DiffLayer {
+                layer: 2,
+                digest: "sha256:app-amd".to_owned(),
+                cmd: "COPY server /usr/bin/server".to_owned(),
+                size: 500,
+                unpack_size: 4_000,
+            }],
+            target_layers: vec![DiffLayer {
+                layer: 2,
+                digest: "sha256:app-arm".to_owned(),
+                cmd: "COPY server /usr/bin/server".to_owned(),
+                size: 600,
+                unpack_size: 4_400,
+            }],
+            changed: ChangeSet {
+                count: 2,
+                bytes: 400,
+                files: vec![
+                    FileChange {
+                        path: "usr/bin/server".to_owned(),
+                        base_size: 1_000,
+                        target_size: 1_400,
+                        layer: 2,
+                        base_mode: "-rwxr-xr-x".to_owned(),
+                        target_mode: "-rwxr-xr-x".to_owned(),
+                        is_binary: true,
+                        ..Default::default()
+                    },
+                    FileChange {
+                        path: "app/settings.json".to_owned(),
+                        base_size: 32,
+                        target_size: 32,
+                        layer: 2,
+                        base_mode: "-rw-r--r--".to_owned(),
+                        target_mode: "-rw-r--r--".to_owned(),
+                        content_changed: true,
+                        ..Default::default()
+                    },
+                ],
+            },
+            config_diff: ConfigDiff {
+                same: false,
+                user: Some(ScalarChange {
+                    base: "app".to_owned(),
+                    target: "root".to_owned(),
+                }),
+                ..Default::default()
+            },
+            parity: ParitySummary {
+                status: ParityStatus::ConfigOrFileDrift,
+                expected_binary_changes: 1,
+                unexpected_file_changes: 1,
+                same_size_content_changes: 1,
+                config_changes: 1,
+                ..Default::default()
+            },
+            content_verified: true,
+            content_verified_files: 1,
             ..Default::default()
         };
         state.diff_result.set(Some(SharedRef::new(diff)));
@@ -1308,5 +1923,41 @@ mod tests {
         app.press("Added (100)").expect("switch back to Added tab");
         app.wait_for_within("/usr/share/item-000.dat", Duration::from_secs(3))
             .expect("added row 000 restored");
+    }
+
+    #[test]
+    fn cross_arch_diff_renders_parity_banner_config_diff_and_unexpected_filter() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(900.0)),
+            ..EngineConfig::new(Root::of::<CrossArchParityHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start cross arch parity harness");
+        app.wait_for_within(
+            "text:/^Parity: Config or file drift/",
+            Duration::from_secs(3),
+        )
+        .expect("render parity banner");
+        assert!(app.shows("Upper Layers Size"));
+        assert!(app.shows("Config & Runtime Parity"));
+        assert!(app.shows("USER"));
+        assert!(app.shows(
+            "Skipped leading base layers: 1 base (7.8 KiB) / 1 target (15.2 KiB) · detected >1h layer build gap"
+        ));
+
+        app.press("Modified (2)").expect("switch to Modified tab");
+        app.wait_for_within("/usr/bin/server", Duration::from_secs(3))
+            .expect("render expected binary row");
+        assert!(app.shows("/app/settings.json"));
+
+        app.press("Unexpected only")
+            .expect("toggle Unexpected only filter");
+        app.wait_for_gone("/usr/bin/server", Duration::from_secs(3))
+            .expect("filter out expected binary row");
+        assert!(app.shows("/app/settings.json"));
     }
 }

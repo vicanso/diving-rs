@@ -22,7 +22,10 @@ pub use tracing as __tracing;
 
 pub use analyzer::{AnalyzeOptions, Analyzer, AnalyzerBuilder, PreviewOptions};
 pub use diff::{
-    diff_images, to_diff_markdown, ChangeSet, DiffLayer, DiffSide, DirChange, FileChange, ImageDiff,
+    diff_images, diff_images_with_options, to_diff_markdown, BaseLayerMode, BaseLayerSkipReason,
+    ChangeSet, ConfigDiff, DiffLayer, DiffOptions, DiffSide, DirChange, FileChange, ImageDiff,
+    KeyValueDiff, ParityStatus, ParitySummary, RuntimeDiff, ScalarChange,
+    DIFF_CONTENT_HASH_MAX_BYTES,
 };
 pub use error::{Error, Result};
 pub use gate::{
