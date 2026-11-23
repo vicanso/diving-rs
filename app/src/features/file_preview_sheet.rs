@@ -5,7 +5,7 @@ use std::time::Duration;
 use nsh_core::prelude::*;
 
 use crate::domain::{AppState, FilePreviewContent, format_bytes};
-use crate::i18n::{t, tf};
+use crate::i18n::{format_user_error, t, tf};
 use crate::status_notice_banner;
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, theme, ui_badge, ui_banner, ui_button,
@@ -195,8 +195,19 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             .into_element();
                     }
                     if let Some(err) = content_state.preview_error.get() {
-                        return ui_banner(BannerTone::Danger, SharedString::from(err), None)
-                            .into_element();
+                        return ui_banner(
+                            BannerTone::Danger,
+                            move || {
+                                let msg = if err == "error.preview_cancelled" {
+                                    t(lang.get(), "error.preview_cancelled").to_owned()
+                                } else {
+                                    format_user_error(lang.get(), &err)
+                                };
+                                SharedString::from(msg)
+                            },
+                            None,
+                        )
+                        .into_element();
                     }
                     let is_symlink = content_state
                         .preview_target
@@ -303,6 +314,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{DivingService, PreviewTarget};
+    use crate::i18n::UiLang;
     use crate::ui::app_tokens;
 
     fn test_state() -> AppState {
@@ -460,5 +472,81 @@ mod tests {
         app.wait_for_within("Symbolic link → busybox", Duration::from_secs(2))
             .expect("symlink target displayed cleanly");
         assert!(app.shows("Symbolic link"));
+    }
+
+    #[component]
+    fn SheetErrorI18nHarness() -> impl IntoElement {
+        let state = test_state();
+        provide_context(state.clone());
+        state.preview_content.set(None);
+        state
+            .preview_error
+            .set(Some("Tar fail: truncated layer".to_owned()));
+
+        let zh_state = state.clone();
+        let cancel_state = state.clone();
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(ui_button(
+                        "Switch ZH",
+                        ButtonVariant::Outline,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || zh_state.set_lang(UiLang::Zh),
+                    ))
+                    .child(ui_button(
+                        "Cancelled err",
+                        ButtonVariant::Outline,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            cancel_state
+                                .preview_error
+                                .set(Some("error.preview_cancelled".to_owned()));
+                        },
+                    )),
+            )
+            .child(file_preview_sheet(state))
+    }
+
+    #[test]
+    fn sheet_preview_error_formats_and_updates_on_lang_toggle() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<SheetErrorI18nHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start sheet error i18n harness");
+        app.wait_for_within(
+            "Unable to read local archive: truncated layer",
+            Duration::from_secs(2),
+        )
+        .expect("EN formatted preview error shown");
+
+        app.press("Switch ZH").expect("toggle ZH");
+        app.wait_for_within(
+            "无法读取本地镜像归档：truncated layer",
+            Duration::from_secs(2),
+        )
+        .expect("ZH formatted preview error updated live");
+
+        app.press("Cancelled err")
+            .expect("set cancelled preview error key");
+        app.wait_for_within("文件预览任务已取消", Duration::from_secs(2))
+            .expect("cancelled preview error localized in ZH");
     }
 }

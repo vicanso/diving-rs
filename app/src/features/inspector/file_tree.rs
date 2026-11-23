@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diving_core::DockerAnalyzeResult;
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, FileTreeFilter, FileTreeRow, IndexedTree, SharedRef, build_indexed_tree,
-    classify_layer_opcode, count_layer_file_ops, flatten_indexed_tree, format_bytes,
-    format_command_lines,
+    AppRoute, AppState, FileTreeFilter, FileTreeRow, IndexedTree, InspectorTab, SharedRef,
+    build_indexed_tree, classify_layer_opcode, count_layer_file_ops, flatten_indexed_tree,
+    format_bytes, format_command_lines,
 };
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
@@ -466,6 +467,45 @@ fn column_header(state: AppState) -> impl IntoElement {
         )
 }
 
+fn step_tree_selection(
+    rows: &Memo<Vec<FileTreeRow>>,
+    state: &AppState,
+    list_ref: &ElementRef,
+    delta: isize,
+) {
+    rows.with_untracked(|list| {
+        if list.is_empty() {
+            return;
+        }
+        let cur_pos = state
+            .selected_file_path
+            .get_untracked()
+            .and_then(|sel| list.iter().position(|row| row.key == sel));
+        let next_pos = match cur_pos {
+            Some(pos) => (pos as isize + delta).clamp(0, (list.len() - 1) as isize) as usize,
+            None if delta >= 0 => 0,
+            None => list.len() - 1,
+        };
+        if let Some(row) = list.get(next_pos) {
+            state.selected_file_path.set(Some(row.key.clone()));
+            list_ref.scroll_to_index(next_pos as u32, Percentage(0.5), px(0.0), false);
+        }
+    });
+}
+
+fn toggle_selected_tree_dir(rows: &Memo<Vec<FileTreeRow>>, state: &AppState, expand: bool) {
+    let Some(sel) = state.selected_file_path.get_untracked() else {
+        return;
+    };
+    let row = rows.with_untracked(|list| list.iter().find(|r| r.key == sel).cloned());
+    if let Some(row) = row
+        && row.is_dir
+        && row.expanded != expand
+    {
+        state.toggle_tree_dir(&row.key, row.expanded);
+    }
+}
+
 fn virtual_tree(
     state: AppState,
     res: Arc<DockerAnalyzeResult>,
@@ -477,9 +517,60 @@ fn virtual_tree(
     let show_meta = state.tree_show_meta_cols;
     let empty_res = res.clone();
 
+    let list_ref = element_ref();
+    let focus_in_state = state.clone();
+    list_ref.on_focus_in(move || focus_in_state.file_tree_focused.set(true));
+    let focus_out_state = state.clone();
+    list_ref.on_focus_out(move || focus_out_state.file_tree_focused.set(false));
+    let cleanup_state = state.clone();
+    cleanup(move || cleanup_state.file_tree_focused.set(false));
+
+    let active_state = state.clone();
+    let tree_active = computed(move || {
+        active_state.file_tree_focused.get()
+            && !active_state.command_palette_open.get()
+            && !active_state.provenance_open.get()
+            && !active_state.compare_dialog_open.get()
+            && !active_state.local_picker_open.get()
+            && !active_state.preview_sheet_open.get()
+            && active_state.route.get() == AppRoute::Inspector
+            && active_state.active_tab.get() == InspectorTab::FileTree
+    });
+    let nav_state = state.clone();
+    effect(move || {
+        if !tree_active.get() {
+            return;
+        }
+        let tree_nav = KeyOptions {
+            when: When::NotEditing,
+            repeat: true,
+            for_focus: true,
+            ..Default::default()
+        };
+        let up_state = nav_state.clone();
+        let up_list = list_ref;
+        on_key_with("up", tree_nav, move |_| {
+            step_tree_selection(&rows, &up_state, &up_list, -1);
+        });
+        let down_state = nav_state.clone();
+        let down_list = list_ref;
+        on_key_with("down", tree_nav, move |_| {
+            step_tree_selection(&rows, &down_state, &down_list, 1);
+        });
+        let right_state = nav_state.clone();
+        on_key_with("right", tree_nav, move |_| {
+            toggle_selected_tree_dir(&rows, &right_state, true);
+        });
+        let left_state = nav_state.clone();
+        on_key_with("left", tree_nav, move |_| {
+            toggle_selected_tree_dir(&rows, &left_state, false);
+        });
+    });
+
     virtual_list(
         move || rows.with(Vec::len),
         move |at| {
+            let focus_state = state.clone();
             let press_state = state.clone();
             let key_state = state.clone();
             let preview_btn_state = state.clone();
@@ -505,42 +596,26 @@ fn virtual_tree(
                     }
                 })
                 .hover(|s| s.bg(move || theme().accent))
+                .on_focus(move || {
+                    if let Some(key) =
+                        rows.with_untracked(|r| r.get(at.index()).map(|n| n.key.clone()))
+                    {
+                        focus_state.selected_file_path.set(Some(key));
+                    }
+                })
                 .on_key_down(move |ev: &KeyEvent| {
                     let idx = at.index();
                     let Some(row) = rows.with(|r| r.get(idx).cloned()) else {
                         return;
                     };
-                    match ev.key.as_str() {
-                        "Enter" | " " => {
-                            if row.is_dir {
-                                key_state.toggle_tree_dir(&row.key, row.expanded);
-                            } else if row.is_previewable() {
-                                key_state.open_file_preview(&row);
-                            } else {
-                                key_state.selected_file_path.set(Some(row.key));
-                            }
+                    if matches!(ev.key.as_str(), "Enter" | " ") {
+                        if row.is_dir {
+                            key_state.toggle_tree_dir(&row.key, row.expanded);
+                        } else if row.is_previewable() {
+                            key_state.open_file_preview(&row);
+                        } else {
+                            key_state.selected_file_path.set(Some(row.key));
                         }
-                        "ArrowRight" if row.is_dir && !row.expanded => {
-                            key_state.toggle_tree_dir(&row.key, false);
-                        }
-                        "ArrowLeft" if row.is_dir && row.expanded => {
-                            key_state.toggle_tree_dir(&row.key, true);
-                        }
-                        "ArrowDown" => {
-                            if let Some(next_key) =
-                                rows.with(|r| r.get(idx + 1).map(|n| n.key.clone()))
-                            {
-                                key_state.selected_file_path.set(Some(next_key));
-                            }
-                        }
-                        "ArrowUp" if idx > 0 => {
-                            if let Some(prev_key) =
-                                rows.with(|r| r.get(idx - 1).map(|n| n.key.clone()))
-                            {
-                                key_state.selected_file_path.set(Some(prev_key));
-                            }
-                        }
-                        _ => {}
                     }
                 })
                 .on_press(move || {
@@ -773,6 +848,7 @@ fn virtual_tree(
                 ))
         },
     )
+    .element_ref(&list_ref)
     .flex_1()
     .min_h(px(0.0))
     .estimated_item_size(px(28.0))
@@ -814,6 +890,7 @@ mod tests {
 
     use super::*;
     use crate::domain::DivingService;
+    use crate::features::install_desktop_menus_and_keys;
     use crate::ui::app_tokens;
 
     fn file_tree_fixture() -> Arc<DockerAnalyzeResult> {
@@ -986,5 +1063,109 @@ mod tests {
             .expect("file tree unmounted");
         app.fast_forward(Duration::from_millis(200))
             .expect("120ms filter debounce timer after unmount must not panic");
+    }
+
+    #[component]
+    fn FileTreeFocusNavHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        install_desktop_menus_and_keys(state.clone());
+        let res = file_tree_fixture();
+        state.result.set(Some(res.clone()));
+        state.route.set(AppRoute::Inspector);
+        state.active_tab.set(InspectorTab::FileTree);
+        state.selected_layer.set(0);
+        state.tree_expand_all.set(true);
+
+        let lang = state.lang;
+        let selected_layer = state.selected_layer;
+        let selected_file = state.selected_file_path;
+        let toggle_lang_state = state.clone();
+
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(text(move || {
+                        format!(
+                            "layer={};file={}",
+                            selected_layer.get(),
+                            selected_file.get().unwrap_or_default()
+                        )
+                    }))
+                    .child(ui_button(
+                        move || {
+                            SharedString::from(match lang.get() {
+                                UiLang::En => "Outside focus",
+                                UiLang::Zh => "外部焦点",
+                            })
+                        },
+                        ButtonVariant::Outline,
+                        UiSize::Sm,
+                        None,
+                        false,
+                        false,
+                        move || toggle_lang_state.set_lang(UiLang::Zh),
+                    )),
+            )
+            .child(file_tree_tab(state, res))
+    }
+
+    #[test]
+    fn focused_file_tree_arrows_navigate_tree_without_stepping_layers() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(Root::of::<FileTreeFocusNavHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start file_tree focus nav harness");
+        app.wait_for_within("app.conf", Duration::from_secs(2))
+            .expect("file tree rows rendered");
+        assert!(app.shows("layer=0;file="));
+
+        // Before FileTree is focused, Down/Up step layers globally.
+        app.press_key("down").expect("step down to layer 1");
+        app.wait_for_within("layer=1;file=", Duration::from_secs(2))
+            .expect("layer stepped to 1");
+        app.press_key("up").expect("step back up to layer 0");
+        app.wait_for_within("layer=0;file=", Duration::from_secs(2))
+            .expect("layer stepped back to 0");
+        app.wait_for_within("app.conf", Duration::from_secs(2))
+            .expect("layer 0 rows visible again");
+
+        // Tab until focus enters the virtualized FileTree (`etc` row gets selected on focus).
+        for _ in 0..20 {
+            app.press_key("tab").expect("tab forward");
+            if app.shows("layer=0;file=etc") {
+                break;
+            }
+        }
+        assert!(
+            app.shows("layer=0;file=etc"),
+            "Tab should reach FileTree row `etc`"
+        );
+
+        // Inside focused FileTree, Down/Up move selected file row and NEVER step layer.
+        app.press_key("down").expect("move down inside file tree");
+        app.wait_for_within("layer=0;file=etc/app.conf", Duration::from_secs(2))
+            .expect("arrow down selected child row without stepping layer");
+        app.press_key("up").expect("move up inside file tree");
+        app.wait_for_within("layer=0;file=etc", Duration::from_secs(2))
+            .expect("arrow up selected parent row without stepping layer");
+
+        // Moving focus back out of FileTree (Shift+Tab onto toolbar `Collapse all`) restores global layer stepping.
+        app.press_key("shift+tab").expect("tab back out of tree");
+        app.press_key("down")
+            .expect("step layer down once outside file tree");
+        app.wait_for_within("layer=1;file=", Duration::from_secs(2))
+            .expect("leaving FileTree focus must restore global layer stepping");
     }
 }

@@ -408,6 +408,10 @@ mod tests {
     fn DockerfileEmptyHarness() -> impl IntoElement {
         let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
         let state = AppState::new(DivingService::with_analyzer(analyzer));
+        assert!(
+            state.dockerfile_wrap.get_untracked(),
+            "dockerfile_wrap must default to true"
+        );
         provide_context(state.clone());
         dockerfile_tab(state, sample_res(""))
     }

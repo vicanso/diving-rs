@@ -97,9 +97,14 @@ define bump_version
 		nsh_txt = open(nsh_path).read(); \
 		nsh_txt = re.sub(r"^(\s*\"version\"\s*:\s*\")([^\"]+)(\")", rf"\g<1>{ver}\g<3>", nsh_txt, count=1, flags=re.M); \
 		open(nsh_path, "w").write(nsh_txt); \
+		app_cargo_path = "app/Cargo.toml"; \
+		app_cargo_txt = open(app_cargo_path).read(); \
+		app_cargo_txt = re.sub(r"^version\s*=\s*\"[^\"]+\"", f"version = \"{ver}\"", app_cargo_txt, count=1, flags=re.M); \
+		open(app_cargo_path, "w").write(app_cargo_txt); \
 		print(ver)') \
 	&& cargo update -p diving-core -p diving-app -p diving -p diving-web --offline >/dev/null \
-	&& git add Cargo.toml Cargo.lock app/nsh.json \
+	&& cargo update --manifest-path app/Cargo.toml -p nsh-app-diving -p diving-core -p diving-app --offline >/dev/null \
+	&& git add Cargo.toml Cargo.lock app/Cargo.toml app/Cargo.lock app/nsh.json \
 	&& git commit -m "chore: version $$NEXT" \
 	&& git tag "v$$NEXT" \
 	&& echo "Bumped to $$NEXT (tag v$$NEXT). Run 'git push && git push --tags' to publish."

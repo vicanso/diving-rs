@@ -27,6 +27,7 @@ use snafu::ResultExt;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+use tempfile::{Builder as TempBuilder, NamedTempFile};
 use tokio::sync::OnceCell as TokioOnceCell;
 
 pub(crate) struct PipelineContext {
@@ -51,6 +52,14 @@ pub(crate) fn image_ref_key(registry: &str, repo: &str, tag: &str) -> String {
 }
 
 fn new_client(ctx: &PipelineContext, registry: &str) -> RegistryClient {
+    new_client_with_local_cache(ctx, registry, false)
+}
+
+fn new_client_with_local_cache(
+    ctx: &PipelineContext,
+    registry: &str,
+    cache_local_blobs: bool,
+) -> RegistryClient {
     RegistryClient {
         registry: registry.to_string(),
         http_client: ctx.http_client.clone(),
@@ -60,6 +69,7 @@ fn new_client(ctx: &PipelineContext, registry: &str) -> RegistryClient {
         layer_concurrency: ctx.layer_concurrency,
         block_private_hosts: ctx.block_private_hosts,
         local_index: Arc::new(TokioOnceCell::new()),
+        cache_local_blobs,
     }
 }
 
@@ -115,7 +125,7 @@ async fn analyze_client(
     if !client.is_local() {
         emit_progress(params.on_progress.as_ref(), ProgressEvent::FetchingManifest);
     }
-    let (manifest, supported_archs) = client.get_manifest(params).await?;
+    let (mut manifest, supported_archs) = client.get_manifest(params).await?;
     let config = client
         .get_image_config(params, &manifest.config.digest)
         .await?;
@@ -136,7 +146,7 @@ async fn analyze_client(
         );
     }
     let info_list = client
-        .get_all_layer_info(params, manifest.layers.clone())
+        .get_all_layer_info(params, &mut manifest.layers)
         .await?;
 
     tl_info!(repo = repo.as_str(), tag = tag, "analyze image done");
@@ -339,6 +349,25 @@ pub(crate) async fn preview_image(
     })
 }
 
+async fn analyze_saved_tar(
+    ctx: &PipelineContext,
+    tmpfile: NamedTempFile,
+    opts: PipelineOptions,
+) -> Result<Arc<DockerAnalyzeResult>> {
+    let filename = tmpfile.path().to_string_lossy().to_string();
+    let client = new_client_with_local_cache(ctx, REGISTRY_LOCAL_FILE, true);
+    let mut params = DockerImageParams {
+        img: filename,
+        verify_dup: opts.verify_dup,
+        credentials: opts.credentials,
+        on_progress: opts.on_progress,
+        ..Default::default()
+    };
+    let result = analyze_client(ctx, &client, &mut params, opts.lang).await;
+    drop(tmpfile);
+    result
+}
+
 pub(crate) async fn analyze_once(
     ctx: &PipelineContext,
     image_info: ImageInfo,
@@ -350,19 +379,9 @@ pub(crate) async fn analyze_once(
         _ => None,
     };
     if let Some(cli) = save_cli {
-        let tmpfile = tempfile::Builder::new().tempfile().context(IoSnafu {})?;
-        let filename = tmpfile.path().to_string_lossy().to_string();
+        let tmpfile = TempBuilder::new().tempfile().context(IoSnafu {})?;
         save_local_image_to_file(cli, &image_info.name, tmpfile.path()).await?;
-
-        let client = new_client(ctx, REGISTRY_LOCAL_FILE);
-        let mut params = DockerImageParams {
-            img: filename,
-            verify_dup: opts.verify_dup,
-            credentials: opts.credentials,
-            on_progress: opts.on_progress,
-            ..Default::default()
-        };
-        analyze_client(ctx, &client, &mut params, opts.lang).await
+        analyze_saved_tar(ctx, tmpfile, opts).await
     } else {
         let client = new_client(ctx, &image_info.registry);
         let mut params = DockerImageParams {
@@ -418,4 +437,311 @@ pub(crate) async fn analyze_or_last_known(
     cached.supported_archs = normalize_supported_archs(&cached.supported_archs);
     cached.stale_as_of = Some(as_of);
     Ok(Arc::new(cached))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::DiffOptions;
+    use crate::store::{is_safe_blob_id, sha256_hex, CacheConfig};
+    use crate::Analyzer;
+    use serde_json::{json, to_vec};
+    use std::fs::{self, write as write_bytes};
+    use tar::{Builder as TarBuilder, Header as TarHeader};
+    use tempfile::tempdir;
+
+    fn make_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = TarBuilder::new(Vec::new());
+        for &(path, data) in entries {
+            let mut header = TarHeader::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder.append(&header, data).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn make_docker_save_tar(layer2_diff_id: &str, settings_json: &[u8]) -> Vec<u8> {
+        let dup_payload = [0x5au8; 64 * 1024];
+        let layer1 = make_tar(&[
+            ("etc/os-release", b"PRETTY_NAME=\"Test Linux\"\n"),
+            ("a/shared.dat", &dup_payload),
+        ]);
+        let layer2 = make_tar(&[
+            ("app/settings.json", settings_json),
+            ("b/shared.dat", &dup_payload),
+        ]);
+        let config = json!({
+            "architecture": "amd64",
+            "os": "linux",
+            "created": "2024-06-01T00:00:00Z",
+            "history": [
+                {"created": "2024-01-01T00:00:00Z", "created_by": "/bin/sh -c #(nop) ADD rootfs.tar /"},
+                {"created": "2024-06-01T00:00:00Z", "created_by": "/bin/sh -c #(nop) ENV APP=1", "empty_layer": true},
+                {"created": "2024-06-01T00:00:00Z", "created_by": "/bin/sh -c COPY app /app"}
+            ],
+            "rootfs": {"type": "layers", "diff_ids": ["sha256:l1", layer2_diff_id]}
+        });
+        let manifest = json!([{
+            "Config": "config.json",
+            "RepoTags": ["svc:latest"],
+            "Layers": ["layer1/layer.tar", "layer2/layer.tar"]
+        }]);
+        make_tar(&[
+            ("manifest.json", manifest.to_string().as_bytes()),
+            ("config.json", config.to_string().as_bytes()),
+            ("layer1/layer.tar", &layer1),
+            ("layer2/layer.tar", &layer2),
+        ])
+    }
+
+    fn test_ctx(store: Arc<CacheStore>) -> PipelineContext {
+        PipelineContext {
+            http_client: reqwest::Client::new(),
+            store,
+            registry_caches: Arc::new(RegistryCaches::default()),
+            docker_config: None,
+            sensitive_patterns: Arc::new(SensitivePatterns::default()),
+            layer_concurrency: Some(2),
+            block_private_hosts: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analyze_saved_tar_caches_non_empty_layers_for_preview_export_and_diff() {
+        let dir = tempdir().unwrap();
+        let layer_dir = dir.path().join("layers");
+        let analysis_dir = dir.path().join("analysis");
+        let cfg = CacheConfig::persistent(&layer_dir, &analysis_dir);
+        let store = Arc::new(CacheStore::from_config(cfg.clone()).unwrap());
+        let analyzer = Analyzer::builder()
+            .cache(cfg)
+            .allow_local_sources(true)
+            .build()
+            .unwrap();
+        let ctx = test_ctx(store);
+
+        let base_tmp = TempBuilder::new().suffix(".tar").tempfile().unwrap();
+        let base_path = base_tmp.path().to_path_buf();
+        write_bytes(
+            &base_path,
+            make_docker_save_tar("sha256:l2-a", br#"{"id":"A"}"#),
+        )
+        .unwrap();
+        let base_res = analyze_saved_tar(
+            &ctx,
+            base_tmp,
+            PipelineOptions {
+                lang: Lang::En,
+                verify_dup: true,
+                credentials: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("analyze base saved tar");
+        assert!(!base_path.exists(), "temp tar should be dropped");
+        assert_eq!(base_res.duplicate_groups.len(), 1);
+
+        let target_tmp = TempBuilder::new().suffix(".tar").tempfile().unwrap();
+        let target_path = target_tmp.path().to_path_buf();
+        write_bytes(
+            &target_path,
+            make_docker_save_tar("sha256:l2-b", br#"{"id":"B"}"#),
+        )
+        .unwrap();
+        let target_res = analyze_saved_tar(
+            &ctx,
+            target_tmp,
+            PipelineOptions {
+                lang: Lang::En,
+                verify_dup: true,
+                credentials: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("analyze target saved tar");
+        assert!(!target_path.exists(), "temp tar should be dropped");
+
+        // Non-empty layers are atomically cached under sha256 digests; empty ENV layer is untouched.
+        assert_eq!(base_res.layers.len(), 3);
+        assert!(base_res.layers[1].empty);
+        assert!(base_res.layers[1].digest.is_empty());
+        for idx in [0, 2] {
+            let digest = &base_res.layers[idx].digest;
+            assert!(
+                digest.starts_with("sha256:") && is_safe_blob_id(digest),
+                "unexpected digest {digest}"
+            );
+            assert!(analyzer.has_layer_blob(digest));
+        }
+
+        // No orphaned temp files left in layer_dir.
+        for entry in fs::read_dir(&layer_dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp-"), "leftover temp file {name}");
+        }
+
+        // FilePreviewSheet (read_file_head) and Save file as... (stream_file) work after temp tar cleanup.
+        let (head, total) = analyzer
+            .read_file_head(
+                &base_res.layers[2].digest,
+                &base_res.layers[2].media_type,
+                "app/settings.json",
+                64,
+            )
+            .expect("preview cached docker/podman layer file");
+        assert_eq!(head, br#"{"id":"A"}"#);
+        assert_eq!(total, 10);
+
+        let mut exported = Vec::new();
+        analyzer
+            .stream_file(
+                &target_res.layers[2].digest,
+                &target_res.layers[2].media_type,
+                "app/settings.json",
+                1024,
+                |chunk| {
+                    exported.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .expect("stream cached docker/podman layer file");
+        assert_eq!(exported, br#"{"id":"B"}"#);
+
+        // compute_diff hashes same-size files from cached blobs for docker:// and podman:// images.
+        let diff = analyzer
+            .compute_diff(
+                "docker://svc:1",
+                "podman://svc:2",
+                base_res,
+                target_res,
+                DiffOptions::default(),
+            )
+            .await
+            .expect("compute diff over cached local blobs");
+        assert!(diff.content_verified);
+        assert_eq!(diff.parity.same_size_content_changes, 1);
+        assert!(diff
+            .changed
+            .files
+            .iter()
+            .any(|c| c.path == "app/settings.json" && c.content_changed));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analyze_saved_tar_caches_oci_blobs_and_skips_zero_byte_layers() {
+        let dir = tempdir().unwrap();
+        let layer_dir = dir.path().join("layers");
+        let analysis_dir = dir.path().join("analysis");
+        let cfg = CacheConfig::persistent(&layer_dir, &analysis_dir);
+        let store = Arc::new(CacheStore::from_config(cfg.clone()).unwrap());
+        let analyzer = Analyzer::builder()
+            .cache(cfg)
+            .allow_local_sources(true)
+            .build()
+            .unwrap();
+        let ctx = test_ctx(store);
+
+        let layer_bytes = make_tar(&[("etc/app.conf", b"port=8080\n")]);
+        let layer_digest = format!("sha256:{}", sha256_hex(&layer_bytes));
+        let layer_blob_rel = format!("blobs/{}", layer_digest.replacen(':', "/", 1));
+
+        let empty_blob_rel =
+            "blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000";
+        let config_bytes = to_vec(&json!({
+            "architecture": "amd64",
+            "os": "linux",
+            "created": "2024-06-01T00:00:00Z",
+            "history": [
+                {"created": "2024-06-01T00:00:00Z", "created_by": "COPY app.conf /etc/app.conf"},
+                {"created": "2024-06-01T00:00:00Z", "created_by": "COPY empty /"}
+            ],
+            "rootfs": {"type": "layers", "diff_ids": ["sha256:aaa", "sha256:bbb"]}
+        }))
+        .unwrap();
+        let config_digest = format!("sha256:{}", sha256_hex(&config_bytes));
+        let config_blob_rel = format!("blobs/{}", config_digest.replacen(':', "/", 1));
+
+        let manifest_bytes = to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config_bytes.len()
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": layer_digest,
+                    "size": layer_bytes.len()
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "size": 0
+                }
+            ]
+        }))
+        .unwrap();
+        let manifest_digest = format!("sha256:{}", sha256_hex(&manifest_bytes));
+        let manifest_blob_rel = format!("blobs/{}", manifest_digest.replacen(':', "/", 1));
+        let index_bytes = to_vec(&json!({
+            "schemaVersion": 2,
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": manifest_digest,
+                "size": manifest_bytes.len(),
+                "platform": {"architecture": "amd64", "os": "linux"}
+            }]
+        }))
+        .unwrap();
+
+        let oci_tar = make_tar(&[
+            ("oci-layout", br#"{"imageLayoutVersion":"1.0.0"}"#),
+            ("index.json", &index_bytes),
+            (&manifest_blob_rel, &manifest_bytes),
+            (&config_blob_rel, &config_bytes),
+            (&layer_blob_rel, &layer_bytes),
+            (empty_blob_rel, b""),
+        ]);
+        let tmp = TempBuilder::new().suffix(".tar").tempfile().unwrap();
+        write_bytes(tmp.path(), oci_tar).unwrap();
+
+        let res = analyze_saved_tar(
+            &ctx,
+            tmp,
+            PipelineOptions {
+                lang: Lang::En,
+                verify_dup: false,
+                credentials: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("analyze saved OCI tar");
+
+        assert_eq!(res.layers[0].digest, layer_digest);
+        assert!(analyzer.has_layer_blob(&layer_digest));
+        let content = analyzer
+            .read_file(
+                &layer_digest,
+                &res.layers[0].media_type,
+                "etc/app.conf",
+                1024,
+            )
+            .expect("read cached OCI layer");
+        assert_eq!(content, b"port=8080\n");
+
+        // Zero-byte layer must not be cached.
+        assert!(!analyzer.has_layer_blob(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
 }

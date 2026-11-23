@@ -312,6 +312,7 @@ jobs:
         working-directory: app
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
+          DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
           SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -429,6 +430,7 @@ jobs:
         working-directory: app
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
+          DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
           TARGET_ARCH: ${{ matrix.platform.arch }}
         run: |
           set -euo pipefail
@@ -532,6 +534,7 @@ jobs:
         working-directory: app
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
+          DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
           TARGET_ARCH: ${{ matrix.platform.arch }}
         run: |
           $ErrorActionPreference = 'Stop'

@@ -168,7 +168,8 @@ fn bind_global_keys(state: AppState) {
 }
 
 fn step_selected_layer(state: &AppState, delta: isize) {
-    if state.any_overlay_open()
+    if state.file_tree_focused.get_untracked()
+        || state.any_overlay_open()
         || state.route.get_untracked() != AppRoute::Inspector
         || state.active_tab.get_untracked() != InspectorTab::FileTree
     {

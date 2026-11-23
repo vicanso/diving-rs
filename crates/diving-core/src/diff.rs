@@ -595,14 +595,26 @@ fn dir_bucket(path: &str) -> &str {
     &path[..end]
 }
 
-fn change_set<K: Ord>(
+fn change_set<R: Ord, D: Ord>(
     mut files: Vec<FileChange>,
-    sort_key: impl Fn(&FileChange) -> K,
+    retain_key: impl Fn(&FileChange) -> R,
+    display_key: impl Fn(&FileChange) -> D,
 ) -> ChangeSet {
-    files.sort_by_key(|f| Reverse(sort_key(f)));
     let bytes = files.iter().map(FileChange::delta).sum();
     let count = files.len();
-    files.truncate(DIFF_MAX_FILES);
+    if files.len() > DIFF_MAX_FILES {
+        files.sort_by(|a, b| {
+            retain_key(b)
+                .cmp(&retain_key(a))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        files.truncate(DIFF_MAX_FILES);
+    }
+    files.sort_by(|a, b| {
+        display_key(b)
+            .cmp(&display_key(a))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     ChangeSet {
         count,
         bytes,
@@ -881,6 +893,16 @@ fn build_parity_summary(
     }
 }
 
+fn changed_retention_key(c: &FileChange) -> (bool, bool, bool, u64, u64) {
+    (
+        !c.is_expected_binary_only(),
+        c.content_changed,
+        c.base_mode != c.target_mode || c.base_link != c.target_link,
+        c.delta().unsigned_abs(),
+        c.target_size.max(c.base_size),
+    )
+}
+
 fn changed_sort_key(c: &FileChange) -> (u64, bool, bool, bool, u64) {
     (
         c.delta().unsigned_abs(),
@@ -1155,9 +1177,9 @@ where
             .sum(),
         base_layers: base_upper,
         target_layers: target_upper,
-        added: change_set(added, |f| f.target_size),
-        removed: change_set(removed, |f| f.base_size),
-        changed: change_set(changed, changed_sort_key),
+        added: change_set(added, |f| f.target_size, |f| f.target_size),
+        removed: change_set(removed, |f| f.base_size, |f| f.base_size),
+        changed: change_set(changed, changed_retention_key, changed_sort_key),
         dirs,
         config_diff,
         runtime_diff,
@@ -2224,5 +2246,151 @@ mod tests {
         let md = to_diff_markdown(&diff, Lang::En, None);
         assert!(md.contains("Config & runtime differences"));
         assert!(md.contains("Content hash check: verified 1"));
+    }
+
+    #[test]
+    fn changed_retains_same_size_content_changed_behind_many_resized_files() {
+        let mut base_items = Vec::new();
+        let mut target_items = Vec::new();
+        for i in 0..60 {
+            let name = format!("bin-{i:02}.so");
+            base_items.push(FileTreeItem {
+                mode: "-rwxr-xr-x".into(),
+                ..leaf(&name, 1000 + i as u64 * 10)
+            });
+            target_items.push(FileTreeItem {
+                mode: "-rwxr-xr-x".into(),
+                ..leaf(&name, 2000 + i as u64 * 20)
+            });
+        }
+        // Add >50 unexpected non-binary size changes too so both cases are exercised.
+        for i in 0..10 {
+            let name = format!("doc-{i:02}.txt");
+            base_items.push(FileTreeItem {
+                mode: "-rw-r--r--".into(),
+                ..leaf(&name, 100 + i as u64)
+            });
+            target_items.push(FileTreeItem {
+                mode: "-rw-r--r--".into(),
+                ..leaf(&name, 300 + i as u64)
+            });
+        }
+        base_items.push(FileTreeItem {
+            mode: "-rw-r--r--".into(),
+            ..leaf("app.json", 42)
+        });
+        target_items.push(FileTreeItem {
+            mode: "-rw-r--r--".into(),
+            ..leaf("app.json", 42)
+        });
+
+        let base = image(
+            "app:1",
+            vec![layer("sha256:a", 100)],
+            vec![base_items],
+            vec![],
+        );
+        let target = image(
+            "app:2",
+            vec![layer("sha256:b", 100)],
+            vec![target_items],
+            vec![],
+        );
+
+        let diff = diff_images_with_opener(
+            &base,
+            &target,
+            &DiffOptions::default(),
+            true,
+            |is_target, _, _| {
+                let mut map = HashMap::new();
+                map.insert(
+                    "app.json".to_string(),
+                    if is_target { "new" } else { "old" }.to_string(),
+                );
+                Some(map)
+            },
+        );
+        assert_eq!(diff.changed.count, 71);
+        assert_eq!(diff.changed.files.len(), DIFF_MAX_FILES);
+        assert_eq!(diff.parity.same_size_content_changes, 1);
+        assert!(diff
+            .changed
+            .files
+            .iter()
+            .any(|c| c.path == "app.json" && c.content_changed));
+
+        // Even when >50 unexpected non-binary size changes exist, same-size content_changed survives.
+        let mut base_docs = Vec::new();
+        let mut target_docs = Vec::new();
+        for i in 0..60 {
+            let name = format!("note-{i:02}.txt");
+            base_docs.push(FileTreeItem {
+                mode: "-rw-r--r--".into(),
+                ..leaf(&name, 100)
+            });
+            target_docs.push(FileTreeItem {
+                mode: "-rw-r--r--".into(),
+                ..leaf(&name, 500 + i as u64)
+            });
+        }
+        base_docs.push(FileTreeItem {
+            mode: "-rw-r--r--".into(),
+            ..leaf("secret.yaml", 32)
+        });
+        target_docs.push(FileTreeItem {
+            mode: "-rw-r--r--".into(),
+            ..leaf("secret.yaml", 32)
+        });
+        let b2 = image(
+            "docs:1",
+            vec![layer("sha256:a", 100)],
+            vec![base_docs],
+            vec![],
+        );
+        let t2 = image(
+            "docs:2",
+            vec![layer("sha256:b", 100)],
+            vec![target_docs],
+            vec![],
+        );
+        let diff2 = diff_images_with_opener(
+            &b2,
+            &t2,
+            &DiffOptions::default(),
+            true,
+            |is_target, _, _| {
+                let mut map = HashMap::new();
+                map.insert(
+                    "secret.yaml".to_string(),
+                    if is_target { "b" } else { "a" }.to_string(),
+                );
+                Some(map)
+            },
+        );
+        assert_eq!(diff2.changed.count, 61);
+        assert_eq!(diff2.changed.files.len(), DIFF_MAX_FILES);
+        assert!(diff2
+            .changed
+            .files
+            .iter()
+            .any(|c| c.path == "secret.yaml" && c.content_changed));
+
+        // Deterministic tie-breaking by path ascending.
+        let diff2_repeat = diff_images_with_opener(
+            &b2,
+            &t2,
+            &DiffOptions::default(),
+            true,
+            |is_target, _, _| {
+                let mut map = HashMap::new();
+                map.insert(
+                    "secret.yaml".to_string(),
+                    if is_target { "b" } else { "a" }.to_string(),
+                );
+                Some(map)
+            },
+        );
+        assert_eq!(diff2.changed.files, diff2_repeat.changed.files);
     }
 }

@@ -18,9 +18,10 @@ use crate::i18n::{
 };
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, SelectItem, TabOption, UiSize, diverge_down,
-    diverge_up, font_mono_family, radius_control, radius_inset, theme, ui_badge, ui_banner,
+    diverge_up, font_mono_family, info, radius_control, radius_inset, theme, ui_badge, ui_banner,
     ui_button, ui_checkbox, ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill,
     ui_panel, ui_panel_titled, ui_select, ui_separator, ui_skeleton, ui_spinner, ui_tabs,
+    ui_tooltip,
 };
 
 const MINUS_SIGN: char = '−';
@@ -805,118 +806,180 @@ fn diff_side_card(
         )
 }
 
-fn build_config_runtime_rows(diff: &ImageDiff) -> Vec<(String, String, String)> {
+#[derive(Clone)]
+enum ConfigRowSetting {
+    Key(&'static str),
+    Literal(String),
+}
+
+impl ConfigRowSetting {
+    fn resolve(&self, lang: UiLang) -> String {
+        match self {
+            Self::Key(k) => t(lang, k).to_owned(),
+            Self::Literal(s) => s.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ConfigRowValue {
+    Text(String),
+    Bool(bool),
+}
+
+impl ConfigRowValue {
+    fn resolve(&self, lang: UiLang) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Bool(true) => t(lang, "diff.healthcheck_configured").to_owned(),
+            Self::Bool(false) => t(lang, "diff.healthcheck_none").to_owned(),
+        }
+    }
+
+    fn tooltip_text(&self, lang: UiLang) -> Option<String> {
+        let resolved = self.resolve(lang);
+        if resolved == "—" || resolved.is_empty() {
+            None
+        } else {
+            Some(resolved)
+        }
+    }
+}
+
+struct ConfigRuntimeRow {
+    setting: ConfigRowSetting,
+    base: ConfigRowValue,
+    target: ConfigRowValue,
+}
+
+fn build_config_runtime_rows(diff: &ImageDiff) -> Vec<ConfigRuntimeRow> {
     let mut rows = Vec::new();
     let cd = &diff.config_diff;
     let show_opt = |s: &str| {
         if s.is_empty() {
-            "—".to_owned()
+            ConfigRowValue::Text("—".to_owned())
         } else {
-            s.to_owned()
+            ConfigRowValue::Text(s.to_owned())
         }
     };
     let show_cmd = |v: &[String]| {
         if v.is_empty() {
-            "—".to_owned()
+            ConfigRowValue::Text("—".to_owned())
         } else {
-            v.join(" ")
+            ConfigRowValue::Text(v.join(" "))
         }
     };
     if let Some(c) = &cd.base_os {
-        rows.push(("Base OS".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_base_os"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &cd.user {
-        rows.push(("USER".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("USER".to_owned()),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &cd.working_dir {
-        rows.push(("WORKDIR".to_owned(), show_opt(&c.base), show_opt(&c.target)));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("WORKDIR".to_owned()),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &cd.entrypoint {
-        rows.push((
-            "ENTRYPOINT".to_owned(),
-            show_cmd(&c.base),
-            show_cmd(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("ENTRYPOINT".to_owned()),
+            base: show_cmd(&c.base),
+            target: show_cmd(&c.target),
+        });
     }
     if let Some(c) = &cd.cmd {
-        rows.push(("CMD".to_owned(), show_cmd(&c.base), show_cmd(&c.target)));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("CMD".to_owned()),
+            base: show_cmd(&c.base),
+            target: show_cmd(&c.target),
+        });
     }
     if let Some(c) = &cd.has_healthcheck {
-        rows.push((
-            "HEALTHCHECK".to_owned(),
-            c.base.to_string(),
-            c.target.to_string(),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("HEALTHCHECK".to_owned()),
+            base: ConfigRowValue::Bool(c.base),
+            target: ConfigRowValue::Bool(c.target),
+        });
     }
     if !cd.added_ports.is_empty() || !cd.removed_ports.is_empty() {
-        rows.push((
-            "EXPOSE".to_owned(),
-            if cd.removed_ports.is_empty() {
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal("EXPOSE".to_owned()),
+            base: ConfigRowValue::Text(if cd.removed_ports.is_empty() {
                 "—".to_owned()
             } else {
                 cd.removed_ports.join(", ")
-            },
-            if cd.added_ports.is_empty() {
+            }),
+            target: ConfigRowValue::Text(if cd.added_ports.is_empty() {
                 "—".to_owned()
             } else {
                 cd.added_ports.join(", ")
-            },
-        ));
+            }),
+        });
     }
     for env in &cd.env_changes {
-        rows.push((
-            format!("ENV {}", env.key),
-            env.base.as_deref().unwrap_or("—").to_owned(),
-            env.target.as_deref().unwrap_or("—").to_owned(),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal(format!("ENV {}", env.key)),
+            base: ConfigRowValue::Text(env.base.as_deref().unwrap_or("—").to_owned()),
+            target: ConfigRowValue::Text(env.target.as_deref().unwrap_or("—").to_owned()),
+        });
     }
     for label in &cd.label_changes {
-        rows.push((
-            format!("LABEL {}", label.key),
-            label.base.as_deref().unwrap_or("—").to_owned(),
-            label.target.as_deref().unwrap_or("—").to_owned(),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Literal(format!("LABEL {}", label.key)),
+            base: ConfigRowValue::Text(label.base.as_deref().unwrap_or("—").to_owned()),
+            target: ConfigRowValue::Text(label.target.as_deref().unwrap_or("—").to_owned()),
+        });
     }
     let rd = &diff.runtime_diff;
     if let Some(c) = &rd.entrypoint {
-        rows.push((
-            "Runtime entrypoint".to_owned(),
-            show_opt(&c.base),
-            show_opt(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_runtime_entrypoint"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &rd.libc {
-        rows.push((
-            "Runtime libc".to_owned(),
-            show_opt(&c.base),
-            show_opt(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_runtime_libc"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &rd.required_glibc {
-        rows.push((
-            "Min glibc".to_owned(),
-            show_opt(&c.base),
-            show_opt(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_min_glibc"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &rd.os_glibc {
-        rows.push((
-            "OS glibc".to_owned(),
-            show_opt(&c.base),
-            show_opt(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_os_glibc"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if let Some(c) = &rd.issue {
-        rows.push((
-            "Runtime issue".to_owned(),
-            show_opt(&c.base),
-            show_opt(&c.target),
-        ));
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_runtime_issue"),
+            base: show_opt(&c.base),
+            target: show_opt(&c.target),
+        });
     }
     if !rd.added_unstripped.is_empty() || !rd.removed_unstripped.is_empty() {
-        rows.push((
-            "Unstripped binaries".to_owned(),
-            if rd.removed_unstripped.is_empty() {
+        rows.push(ConfigRuntimeRow {
+            setting: ConfigRowSetting::Key("diff.setting_unstripped"),
+            base: ConfigRowValue::Text(if rd.removed_unstripped.is_empty() {
                 rd.base_unstripped_count.to_string()
             } else {
                 format!(
@@ -924,8 +987,8 @@ fn build_config_runtime_rows(diff: &ImageDiff) -> Vec<(String, String, String)> 
                     rd.base_unstripped_count,
                     rd.removed_unstripped.join(", ")
                 )
-            },
-            if rd.added_unstripped.is_empty() {
+            }),
+            target: ConfigRowValue::Text(if rd.added_unstripped.is_empty() {
                 rd.target_unstripped_count.to_string()
             } else {
                 format!(
@@ -933,10 +996,43 @@ fn build_config_runtime_rows(diff: &ImageDiff) -> Vec<(String, String, String)> 
                     rd.target_unstripped_count,
                     rd.added_unstripped.join(", ")
                 )
-            },
-        ));
+            }),
+        });
     }
     rows
+}
+
+fn config_value_cell(
+    value: ConfigRowValue,
+    lang: Signal<UiLang>,
+    is_target: bool,
+) -> impl IntoElement {
+    let tip_value = value.clone();
+    let has_tip = value.tooltip_text(lang.get_untracked()).is_some();
+
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .when(has_tip, |el| {
+            let tv = tip_value;
+            el.tooltip(ui_tooltip(move || {
+                SharedString::from(tv.tooltip_text(lang.get()).unwrap_or_default())
+            }))
+        })
+        .child(
+            text(move || value.resolve(lang.get()))
+                .w_full()
+                .text_xs()
+                .font_family(font_mono_family())
+                .number_of_lines(2)
+                .text_color(move || {
+                    if is_target {
+                        theme().foreground
+                    } else {
+                        theme().muted_foreground
+                    }
+                }),
+        )
 }
 
 fn config_runtime_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
@@ -987,7 +1083,8 @@ fn config_runtime_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoEleme
                                 .text_color(move || theme().muted_foreground),
                         ),
                 )
-                .children(rows.into_iter().map(|(setting, b_val, t_val)| {
+                .children(rows.into_iter().map(|row| {
+                    let setting = row.setting;
                     view()
                         .flex_row()
                         .items_center()
@@ -997,7 +1094,7 @@ fn config_runtime_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoEleme
                         .border_b_1()
                         .border_color(move || theme().border.opacity(0.45))
                         .child(
-                            text(setting)
+                            text(move || setting.resolve(lang.get()))
                                 .w(px(180.0))
                                 .text_xs()
                                 .font_family(font_mono_family())
@@ -1005,24 +1102,8 @@ fn config_runtime_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoEleme
                                 .number_of_lines(1)
                                 .text_color(move || theme().foreground),
                         )
-                        .child(
-                            text(b_val)
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .text_xs()
-                                .font_family(font_mono_family())
-                                .number_of_lines(2)
-                                .text_color(move || theme().muted_foreground),
-                        )
-                        .child(
-                            text(t_val)
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .text_xs()
-                                .font_family(font_mono_family())
-                                .number_of_lines(2)
-                                .text_color(move || theme().foreground),
-                        )
+                        .child(config_value_cell(row.base, lang, false))
+                        .child(config_value_cell(row.target, lang, true))
                 }))
                 .into_element()
         },
@@ -1290,17 +1371,27 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
             DiffFileTab::Removed => &diff.removed,
             DiffFileTab::Resized => &diff.changed,
         };
-        let files = if active.get() == DiffFileTab::Resized && unexpected_only.get() {
-            bucket
+        if active.get() == DiffFileTab::Resized && unexpected_only.get() {
+            let files: Vec<_> = bucket
                 .files
                 .iter()
                 .filter(|f| !f.is_expected_binary_only())
                 .cloned()
-                .collect()
+                .collect();
+            let shown_len = files.len();
+            let total_matching = bucket
+                .count
+                .saturating_sub(diff.parity.expected_binary_changes)
+                .max(shown_len);
+            (total_matching, shown_len, SharedRef::new(files))
         } else {
-            bucket.files.clone()
-        };
-        (bucket.count, bucket.files.len(), SharedRef::new(files))
+            let shown_len = bucket.files.len();
+            (
+                bucket.count,
+                shown_len,
+                SharedRef::new(bucket.files.clone()),
+            )
+        }
     });
     let is_empty = computed(move || bucket_data.with(|(_, _, files)| files.is_empty()));
 
@@ -1708,7 +1799,7 @@ fn rec_diff_column(
                         text(format_bytes(rec.est_saved_bytes))
                             .text_xs()
                             .font_family(font_mono_family())
-                            .text_color(move || theme().primary),
+                            .text_color(info),
                     )
                 })
         }))
@@ -1720,7 +1811,7 @@ mod tests {
 
     use diving_core::{
         BaseLayerSkipReason, ChangeSet, ConfigDiff, DiffSide, FileChange, ImageDiff, ParityStatus,
-        ParitySummary, Recommendation, ScalarChange,
+        ParitySummary, Recommendation, RuntimeDiff, ScalarChange,
     };
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
     use nsh_testing::Headless;
@@ -1959,5 +2050,181 @@ mod tests {
         app.wait_for_gone("/usr/bin/server", Duration::from_secs(3))
             .expect("filter out expected binary row");
         assert!(app.shows("/app/settings.json"));
+    }
+
+    #[component]
+    fn ConfigLocalizationAndTruncationHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.route.set(AppRoute::Diff);
+        let mut changed_files: Vec<FileChange> = (0..48)
+            .map(|i| FileChange {
+                path: format!("usr/bin/tool-{i:02}"),
+                base_size: 10_000,
+                target_size: 10_500 + i as u64,
+                layer: 2,
+                base_mode: "-rwxr-xr-x".to_owned(),
+                target_mode: "-rwxr-xr-x".to_owned(),
+                is_binary: true,
+                ..Default::default()
+            })
+            .collect();
+        changed_files.push(FileChange {
+            path: "etc/app.conf".to_owned(),
+            base_size: 64,
+            target_size: 64,
+            layer: 2,
+            base_mode: "-rw-r--r--".to_owned(),
+            target_mode: "-rw-r--r--".to_owned(),
+            content_changed: true,
+            ..Default::default()
+        });
+        changed_files.push(FileChange {
+            path: "etc/other.conf".to_owned(),
+            base_size: 128,
+            target_size: 128,
+            layer: 2,
+            base_mode: "-rw-r--r--".to_owned(),
+            target_mode: "-rw-r--r--".to_owned(),
+            content_changed: true,
+            ..Default::default()
+        });
+
+        let diff = ImageDiff {
+            base: DiffSide {
+                name: "svc:v1".to_owned(),
+                arch: "amd64".to_owned(),
+                ..Default::default()
+            },
+            target: DiffSide {
+                name: "svc:v2".to_owned(),
+                arch: "arm64".to_owned(),
+                ..Default::default()
+            },
+            config_diff: ConfigDiff {
+                same: false,
+                base_os: Some(ScalarChange {
+                    base: "debian 12".to_owned(),
+                    target: "alpine 3.20".to_owned(),
+                }),
+                has_healthcheck: Some(ScalarChange {
+                    base: false,
+                    target: true,
+                }),
+                ..Default::default()
+            },
+            runtime_diff: RuntimeDiff {
+                same: false,
+                entrypoint: Some(ScalarChange {
+                    base: "/usr/bin/app".to_owned(),
+                    target: "/usr/local/bin/app".to_owned(),
+                }),
+                libc: Some(ScalarChange {
+                    base: "glibc".to_owned(),
+                    target: "musl".to_owned(),
+                }),
+                required_glibc: Some(ScalarChange {
+                    base: "2.34".to_owned(),
+                    target: "—".to_owned(),
+                }),
+                os_glibc: Some(ScalarChange {
+                    base: "2.36".to_owned(),
+                    target: "—".to_owned(),
+                }),
+                issue: Some(ScalarChange {
+                    base: "none".to_owned(),
+                    target: "glibc binary on musl".to_owned(),
+                }),
+                base_unstripped_count: 1,
+                target_unstripped_count: 2,
+                added_unstripped: vec!["/usr/local/bin/app".to_owned()],
+                ..Default::default()
+            },
+            changed: ChangeSet {
+                count: 80,
+                bytes: 25_000,
+                files: changed_files,
+            },
+            parity: ParitySummary {
+                status: ParityStatus::ConfigOrFileDrift,
+                expected_binary_changes: 78,
+                unexpected_file_changes: 2,
+                same_size_content_changes: 2,
+                config_changes: 2,
+                runtime_changes: 6,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state.diff_result.set(Some(SharedRef::new(diff)));
+        let lang_state = state.clone();
+
+        view()
+            .flex_col()
+            .flex_1()
+            .child(ui_button(
+                "ToggleZH",
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || lang_state.set_lang(UiLang::Zh),
+            ))
+            .child(diff_workspace(state))
+    }
+
+    #[test]
+    fn config_runtime_table_localizes_and_unexpected_filter_updates_truncation_banner() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(900.0)),
+            ..EngineConfig::new(
+                Root::of::<ConfigLocalizationAndTruncationHarness>().tokens(app_tokens()),
+            )
+        };
+        let mut app = Headless::start(config).expect("start config/truncation harness");
+        app.wait_for_within("Base OS", Duration::from_secs(3))
+            .expect("EN Base OS row visible");
+        assert!(app.shows("Runtime entrypoint"));
+        assert!(app.shows("Runtime libc"));
+        assert!(app.shows("Min glibc"));
+        assert!(app.shows("OS glibc"));
+        assert!(app.shows("Runtime issue"));
+        assert!(app.shows("Unstripped binaries"));
+        assert!(app.shows("Configured"));
+        assert!(app.shows("Not configured"));
+
+        // Switch to ZH and confirm all Config & Runtime labels and HEALTHCHECK booleans localize.
+        app.press("ToggleZH").expect("switch to ZH");
+        app.wait_for_within("基础系统", Duration::from_secs(3))
+            .expect("ZH Base OS label");
+        assert!(app.shows("运行时入口"));
+        assert!(app.shows("运行时 libc"));
+        assert!(app.shows("最低 glibc"));
+        assert!(app.shows("系统 glibc"));
+        assert!(app.shows("运行时问题"));
+        assert!(app.shows("未剥离符号的二进制"));
+        assert!(app.shows("已配置"));
+        assert!(app.shows("未配置"));
+
+        // On Modified tab, pre-filter shows 50 of 80; toggling Unexpected only hides the stale banner.
+        app.press("文件变更 (80)").expect("switch to Modified tab");
+        app.wait_for_within(
+            "当前仅显示变化最显著的 50 / 80 个文件。",
+            Duration::from_secs(3),
+        )
+        .expect("pre-filter truncation banner shown");
+        app.press("仅看非预期差异").expect("toggle Unexpected only");
+        app.wait_for_gone(
+            "当前仅显示变化最显著的 50 / 80 个文件。",
+            Duration::from_secs(3),
+        )
+        .expect("stale pre-filter truncation banner hidden when all 2 unexpected files fit");
+        assert!(app.shows("/etc/app.conf"));
+        assert!(app.shows("/etc/other.conf"));
     }
 }

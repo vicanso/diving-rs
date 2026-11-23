@@ -15,12 +15,13 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use http::StatusCode;
 use lru::LruCache;
+use ring::digest::{Context, SHA256};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, SeekFrom};
+use std::fs::{self, File};
+use std::io::{BufReader, Read, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -342,6 +343,66 @@ pub(crate) struct RegistryClient {
     pub(crate) layer_concurrency: Option<usize>,
     pub(crate) block_private_hosts: bool,
     pub(crate) local_index: Arc<TokioOnceCell<Arc<TarIndex>>>,
+    pub(crate) cache_local_blobs: bool,
+}
+
+fn parse_oci_sha256_digest(entry: &str) -> Option<String> {
+    let hex = entry.strip_prefix("blobs/sha256/")?;
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(format!("sha256:{}", hex.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
+fn cache_local_layer_blob(
+    index: &TarIndex,
+    store: &CacheStore,
+    entry: &str,
+    size: u64,
+) -> Result<String> {
+    if let Some(known) = parse_oci_sha256_digest(entry) {
+        let dest = store.blob_path(&known);
+        if fs::metadata(&dest)
+            .map(|m| m.len() == size)
+            .unwrap_or(false)
+        {
+            return Ok(known);
+        }
+    }
+
+    let (mut reader, _) = index.open_reader(entry)?;
+    let tmp = tmp_sibling_path(&store.blob_path("local-layer"));
+    let write_res = (|| -> Result<String> {
+        let mut out = File::create(&tmp).context(IoSnafu {})?;
+        let mut hasher = Context::new(&SHA256);
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buf).context(IoSnafu {})?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n]).context(IoSnafu {})?;
+        }
+        out.flush().context(IoSnafu {})?;
+        drop(out);
+        let digest = format!("sha256:{}", hex::encode(hasher.finish().as_ref()));
+        let dest = store.blob_path(&digest);
+        if fs::metadata(&dest)
+            .map(|m| m.len() == size)
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_file(&tmp);
+        } else {
+            fs::rename(&tmp, &dest).context(IoSnafu {})?;
+        }
+        Ok(digest)
+    })();
+    if write_res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    write_res
 }
 
 impl RegistryClient {
@@ -735,15 +796,26 @@ impl RegistryClient {
         &self,
         params: &DockerImageParams,
         layer: ImageManifestLayer,
-    ) -> Result<ImageLayerInfo> {
+    ) -> Result<(ImageLayerInfo, Option<String>)> {
         let img = &params.img;
         if self.is_local() {
             let index = self.local_tar_index(img).await?;
             let media_type = layer.media_type.clone();
             let digest = layer.digest.clone();
+            let cache_blob = self.cache_local_blobs && layer.size > 0;
+            let store = self.store.clone();
+            let size = layer.size;
             return tokio::task::spawn_blocking(move || {
-                let (reader, size) = index.open_reader(&digest)?;
-                get_files_from_layer(BufReader::new(reader), &media_type, size)
+                if cache_blob {
+                    let cached_digest = cache_local_layer_blob(&index, &store, &digest, size)?;
+                    let file = File::open(store.blob_path(&cached_digest)).context(IoSnafu {})?;
+                    let info = get_files_from_layer(BufReader::new(file), &media_type, size)?;
+                    Ok((info, Some(cached_digest)))
+                } else {
+                    let (reader, size) = index.open_reader(&digest)?;
+                    let info = get_files_from_layer(BufReader::new(reader), &media_type, size)?;
+                    Ok((info, None))
+                }
             })
             .await
             .map_err(|_| Error::Other {
@@ -827,13 +899,13 @@ impl RegistryClient {
                 size: compressed_size,
             },
         );
-        Ok(info)
+        Ok((info, None))
     }
 
     pub(crate) async fn get_all_layer_info(
         &self,
         params: &DockerImageParams,
-        layers: Vec<ImageManifestLayer>,
+        layers: &mut [ImageManifestLayer],
     ) -> Result<Vec<ImageLayerInfo>> {
         if layers.len() > MAX_LAYERS_PER_IMAGE {
             return Err(Error::Other {
@@ -850,7 +922,7 @@ impl RegistryClient {
         let sem = Arc::new(Semaphore::new(threads));
 
         let mut handles = Vec::with_capacity(layers.len());
-        for layer in layers {
+        for layer in layers.iter().cloned() {
             let client = self.clone();
             let p = params.clone();
             let sem = sem.clone();
@@ -864,10 +936,13 @@ impl RegistryClient {
         }
 
         let mut info_list = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let info = handle.await.map_err(|_| Error::Other {
+        for (layer, handle) in layers.iter_mut().zip(handles) {
+            let (info, cached_digest) = handle.await.map_err(|_| Error::Other {
                 message: "task join error".to_string(),
             })??;
+            if let Some(digest) = cached_digest {
+                layer.digest = digest;
+            }
             info_list.push(info);
         }
         Ok(info_list)

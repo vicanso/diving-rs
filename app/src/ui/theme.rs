@@ -315,4 +315,101 @@ mod tests {
             );
         }
     }
+
+    fn blend_over(fg: Hsla, bg: Hsla) -> Hsla {
+        let f: Rgba = fg.into();
+        let b: Rgba = bg.into();
+        let a = f.a;
+        Rgba {
+            r: f.r * a + b.r * (1.0 - a),
+            g: f.g * a + b.g * (1.0 - a),
+            b: f.b * a + b.b * (1.0 - a),
+            a: 1.0,
+        }
+        .into()
+    }
+
+    #[test]
+    fn semantic_and_tertiary_tokens_meet_wcag_aa_contrast() {
+        let (parsed, _) = Theme::from_json_lenient(THEME_JSON).expect("valid JSON");
+        let color = |key: &str| parsed.color(key).expect(key);
+
+        let bg = color("background");
+        let card = color("card");
+        let sidebar = color("sidebar");
+        let muted = color("muted");
+
+        for (fg_key, surface_key, surface) in [
+            ("text-tertiary", "background", bg),
+            ("text-tertiary", "card", card),
+            ("text-tertiary", "sidebar", sidebar),
+            ("text-tertiary", "muted", muted),
+            ("muted-foreground", "background", bg),
+            ("muted-foreground", "card", card),
+            ("muted-foreground", "sidebar", sidebar),
+            ("muted-foreground", "muted", muted),
+            ("primary-foreground", "primary", color("primary")),
+            (
+                "sidebar-primary-foreground",
+                "sidebar-primary",
+                color("sidebar-primary"),
+            ),
+            (
+                "destructive-foreground",
+                "destructive",
+                color("destructive"),
+            ),
+            ("diverge-up", "background", bg),
+            ("diverge-up", "card", card),
+            ("diverge-up", "muted", muted),
+            ("diverge-down", "background", bg),
+            ("diverge-down", "card", card),
+            ("diverge-down", "muted", muted),
+        ] {
+            let fg = color(fg_key);
+            let light_ratio = contrast_ratio(fg.light, surface.light);
+            let dark_ratio = contrast_ratio(fg.dark, surface.dark);
+            assert!(
+                light_ratio >= 4.5,
+                "light {fg_key} on {surface_key} contrast {light_ratio:.2} < 4.5"
+            );
+            assert!(
+                dark_ratio >= 4.5,
+                "dark {fg_key} on {surface_key} contrast {dark_ratio:.2} < 4.5"
+            );
+        }
+
+        for (fg_key, soft_key) in [
+            ("success", "success-soft"),
+            ("warning", "warning-soft"),
+            ("danger", "danger-soft"),
+            ("info", "info-soft"),
+            ("op-added", "op-added-bg"),
+            ("op-modified", "op-modified-bg"),
+            ("op-removed", "op-removed-bg"),
+        ] {
+            let fg = color(fg_key);
+            let soft = color(soft_key);
+            let light_soft_on_card = blend_over(soft.light, card.light);
+            let dark_soft_on_card = blend_over(soft.dark, card.dark);
+            let light_soft_on_muted = blend_over(soft.light, muted.light);
+            let dark_soft_on_muted = blend_over(soft.dark, muted.dark);
+            assert!(
+                contrast_ratio(fg.light, light_soft_on_card) >= 4.5,
+                "light {fg_key} on {soft_key}/card < 4.5"
+            );
+            assert!(
+                contrast_ratio(fg.dark, dark_soft_on_card) >= 4.5,
+                "dark {fg_key} on {soft_key}/card < 4.5"
+            );
+            assert!(
+                contrast_ratio(fg.light, light_soft_on_muted) >= 4.5,
+                "light {fg_key} on {soft_key}/muted < 4.5"
+            );
+            assert!(
+                contrast_ratio(fg.dark, dark_soft_on_muted) >= 4.5,
+                "dark {fg_key} on {soft_key}/muted < 4.5"
+            );
+        }
+    }
 }

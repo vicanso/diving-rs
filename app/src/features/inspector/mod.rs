@@ -14,7 +14,7 @@ use nsh_core::prelude::*;
 use crate::domain::{
     AppState, InspectorTab, format_bytes, format_runtime_compat, image_source_kind,
 };
-use crate::i18n::{UiLang, localize_risk_tag, t, tf};
+use crate::i18n::{UiLang, format_user_error, localize_risk_tag, t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, danger, font_mono_family, success,
     text_tertiary, theme, ui_badge, ui_banner, ui_button, ui_empty_state, ui_icon,
@@ -37,7 +37,10 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                 let err_sig = error_state.analyze_error;
                 view().px_4().pt_2().child(ui_banner(
                     BannerTone::Danger,
-                    move || SharedString::from(err_sig.get().unwrap_or_default()),
+                    move || {
+                        let raw = err_sig.get().unwrap_or_default();
+                        SharedString::from(format_user_error(lang.get(), &raw))
+                    },
                     Some(
                         ui_button(
                             move || SharedString::from(t(lang.get(), "common.close")),
@@ -550,5 +553,63 @@ mod tests {
             .expect("ZH risk tag localized");
         assert!(app.shows("以 root 运行"));
         assert!(app.shows("镜像层数过多：42"));
+    }
+
+    #[component]
+    fn InspectorErrorBannerHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        state
+            .analyze_error
+            .set(Some("Tar fail: corrupt header".to_owned()));
+        let zh_state = state.clone();
+        view()
+            .flex_1()
+            .flex_col()
+            .bg(move || theme().background)
+            .child(ui_button(
+                "Switch ZH",
+                ButtonVariant::Ghost,
+                UiSize::Sm,
+                None,
+                false,
+                false,
+                move || zh_state.set_lang(UiLang::Zh),
+            ))
+            .child(inspector_workspace(state))
+    }
+
+    #[test]
+    fn inspector_error_banner_formats_and_updates_on_lang_toggle() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<InspectorErrorBannerHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start inspector error banner harness");
+        app.wait_for_within(
+            "Unable to read local archive: corrupt header",
+            Duration::from_secs(2),
+        )
+        .expect("EN formatted error banner shown in Inspector");
+        assert!(!app.shows("Tar fail:"));
+
+        app.press("Switch ZH").expect("toggle ZH");
+        app.wait_for_within(
+            "无法读取本地镜像归档：corrupt header",
+            Duration::from_secs(2),
+        )
+        .expect("ZH formatted error banner updated live in Inspector");
+
+        app.press("关闭").expect("dismiss error banner");
+        app.wait_for_gone(
+            "无法读取本地镜像归档：corrupt header",
+            Duration::from_secs(2),
+        )
+        .expect("Inspector error banner dismissed");
     }
 }

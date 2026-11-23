@@ -28,7 +28,7 @@ use crate::domain::service::{
     AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
 };
 use crate::domain::treemap::FsNode;
-use crate::i18n::{UiLang, t, tf};
+use crate::i18n::{UiLang, format_user_error, t, tf};
 
 const KEY_LANG: &str = "diving.lang";
 const KEY_APPEARANCE: &str = "diving.appearance";
@@ -109,6 +109,7 @@ pub struct AppState {
     pub tree_expanded: Signal<HashSet<String>>,
     pub tree_collapsed: Signal<HashSet<String>>,
     pub selected_file_path: Signal<Option<String>>,
+    pub file_tree_focused: Signal<bool>,
     pub preview_sheet_open: Signal<bool>,
     pub preview_request_id: Signal<u64>,
     pub preview_target: Signal<Option<PreviewTarget>>,
@@ -134,7 +135,9 @@ pub struct AppState {
     pub diff_error: Signal<Option<DiffErrorState>>,
     pub diff_result: Signal<Option<SharedRef<ImageDiff>>>,
     pub diff_base_ref: Signal<String>,
+    pub diff_base_arch: Signal<Option<SharedString>>,
     pub diff_target_ref: Signal<String>,
+    pub diff_target_arch: Signal<Option<SharedString>>,
     pub diff_base_result: Signal<Option<Arc<DockerAnalyzeResult>>>,
     pub diff_target_result: Signal<Option<Arc<DockerAnalyzeResult>>>,
     pub diff_base_layer_mode: Signal<BaseLayerMode>,
@@ -238,13 +241,14 @@ impl AppState {
             tree_expanded: signal(HashSet::new()),
             tree_collapsed: signal(HashSet::new()),
             selected_file_path: signal(None),
+            file_tree_focused: signal(false),
             preview_sheet_open: signal(false),
             preview_request_id: signal(0),
             preview_target: signal(None),
             preview_loading: signal(false),
             preview_content: signal(None),
             preview_error: signal(None),
-            dockerfile_wrap: signal(false),
+            dockerfile_wrap: signal(true),
             status_notice: signal(None),
             notice_seq: signal(0),
             search_input_ref: element_ref(),
@@ -263,7 +267,9 @@ impl AppState {
             diff_error: signal(None),
             diff_result: signal(None),
             diff_base_ref: signal(String::new()),
+            diff_base_arch: signal(None),
             diff_target_ref: signal(String::new()),
+            diff_target_arch: signal(None),
             diff_base_result: signal(None),
             diff_target_result: signal(None),
             diff_base_layer_mode: signal(BaseLayerMode::Auto),
@@ -924,7 +930,7 @@ impl AppState {
         self.spawn_app_task(async move {
             let outcome = match rx.await {
                 Ok(res) => res,
-                Err(_) => Err(t(state.lang.get_untracked(), "error.preview_cancelled").to_owned()),
+                Err(_) => Err("error.preview_cancelled".to_owned()),
             };
             if state.preview_request_id.get_untracked() != req_id {
                 return;
@@ -987,7 +993,7 @@ impl AppState {
                     let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
                     state.show_status_notice(msg);
                 }
-                Ok(Err(err)) => state.show_status_notice(err),
+                Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                 Err(_) => {}
             }
         });
@@ -1046,7 +1052,7 @@ impl AppState {
                         let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
                         state.show_status_notice(msg);
                     }
-                    Ok(Err(err)) => state.show_status_notice(err),
+                    Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                     Err(_) => {}
                 }
             }
@@ -1074,7 +1080,7 @@ impl AppState {
                         let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
                         state.show_status_notice(msg);
                     }
-                    Ok(Err(err)) => state.show_status_notice(err),
+                    Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                     Err(_) => {}
                 }
             }
@@ -1095,7 +1101,7 @@ impl AppState {
                         let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
                         state.show_status_notice(msg);
                     }
-                    Ok(Err(err)) => state.show_status_notice(err),
+                    Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                     Err(_) => {}
                 }
             }
@@ -1114,7 +1120,7 @@ impl AppState {
                     let msg = tf(lang, "notice.cache_cleaned", &[&removed, &freed]);
                     state.show_status_notice(msg);
                 }
-                Ok(Err(err)) => state.show_status_notice(err),
+                Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                 Err(_) => {}
             }
         });
@@ -1182,11 +1188,11 @@ impl AppState {
                 if !base.is_empty() && !target.is_empty() {
                     self.start_compare_pair_with_options(
                         base,
-                        self.compare_base_arch
+                        self.diff_base_arch
                             .get_untracked()
                             .map(|s| s.as_str().to_owned()),
                         target,
-                        self.compare_target_arch
+                        self.diff_target_arch
                             .get_untracked()
                             .map(|s| s.as_str().to_owned()),
                         true,
@@ -1216,11 +1222,24 @@ impl AppState {
     }
 
     pub fn open_compare_dialog(&self) {
+        if self.route.get_untracked() == AppRoute::Diff {
+            let active_base = self.diff_base_ref.get_untracked();
+            let active_target = self.diff_target_ref.get_untracked();
+            if !active_base.is_empty() && !active_target.is_empty() {
+                self.compare_base_input.set(active_base);
+                self.compare_target_input.set(active_target);
+                self.compare_base_arch
+                    .set(self.diff_base_arch.get_untracked());
+                self.compare_target_arch
+                    .set(self.diff_target_arch.get_untracked());
+            }
+            self.compare_dialog_open.set(true);
+            return;
+        }
         let current = self.current_image.get_untracked();
         let current_arch = self.arch_input.get_untracked();
         let source = (current.clone(), current_arch.clone());
         if !current.is_empty()
-            && self.route.get_untracked() != AppRoute::Diff
             && (self.compare_target_input.get_untracked().trim().is_empty()
                 || self.compare_synced_source.get_untracked() != source)
         {
@@ -1282,20 +1301,24 @@ impl AppState {
         }
         let req_id = self.diff_request_id.get_untracked().wrapping_add(1);
         self.diff_request_id.set(req_id);
+        let base_arch_sig = base_arch
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(|a| SharedString::from(a.to_owned()));
+        let target_arch_sig = target_arch
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(|a| SharedString::from(a.to_owned()));
         self.compare_base_input.set(base.clone());
         self.compare_target_input.set(target.clone());
-        self.compare_base_arch.set(
-            base_arch
-                .as_deref()
-                .map(|a| SharedString::from(a.to_owned())),
-        );
-        self.compare_target_arch.set(
-            target_arch
-                .as_deref()
-                .map(|a| SharedString::from(a.to_owned())),
-        );
+        self.compare_base_arch.set(base_arch_sig.clone());
+        self.compare_target_arch.set(target_arch_sig.clone());
         self.diff_base_ref.set(base.clone());
+        self.diff_base_arch.set(base_arch_sig);
         self.diff_target_ref.set(target.clone());
+        self.diff_target_arch.set(target_arch_sig);
         self.diff_result.set(None);
         self.diff_base_result.set(None);
         self.diff_target_result.set(None);
@@ -1406,11 +1429,11 @@ impl AppState {
         let base_ref = self.diff_base_ref.get_untracked();
         let target_ref = self.diff_target_ref.get_untracked();
         let base_arch = self
-            .compare_base_arch
+            .diff_base_arch
             .get_untracked()
             .map(|s| s.as_str().to_owned());
         let target_arch = self
-            .compare_target_arch
+            .diff_target_arch
             .get_untracked()
             .map(|s| s.as_str().to_owned());
         let diff_opts =
@@ -1444,14 +1467,16 @@ impl AppState {
     pub fn swap_diff(&self) {
         let base_ref = self.diff_base_ref.get_untracked();
         let target_ref = self.diff_target_ref.get_untracked();
-        let base_arch = self.compare_base_arch.get_untracked();
-        let target_arch = self.compare_target_arch.get_untracked();
+        let base_arch = self.diff_base_arch.get_untracked();
+        let target_arch = self.diff_target_arch.get_untracked();
         self.diff_base_ref.set(target_ref.clone());
         self.diff_target_ref.set(base_ref.clone());
+        self.diff_base_arch.set(target_arch.clone());
+        self.diff_target_arch.set(base_arch.clone());
         self.compare_base_input.set(target_ref.clone());
         self.compare_target_input.set(base_ref.clone());
-        self.compare_base_arch.set(target_arch);
-        self.compare_target_arch.set(base_arch);
+        self.compare_base_arch.set(target_arch.clone());
+        self.compare_target_arch.set(base_arch.clone());
 
         let base_res = self.diff_base_result.get_untracked();
         let target_res = self.diff_target_result.get_untracked();
@@ -1461,7 +1486,12 @@ impl AppState {
             self.diff_error.set(None);
             self.recompute_active_diff();
         } else if !base_ref.is_empty() && !target_ref.is_empty() {
-            self.submit_compare_dialog();
+            self.start_compare_pair(
+                target_ref,
+                target_arch.map(|s| s.as_str().to_owned()),
+                base_ref,
+                base_arch.map(|s| s.as_str().to_owned()),
+            );
         }
     }
 
@@ -1469,13 +1499,13 @@ impl AppState {
         let (image_ref, explicit_arch, res) = if is_target {
             (
                 self.diff_target_ref.get_untracked(),
-                self.compare_target_arch.get_untracked(),
+                self.diff_target_arch.get_untracked(),
                 self.diff_target_result.get_untracked(),
             )
         } else {
             (
                 self.diff_base_ref.get_untracked(),
-                self.compare_base_arch.get_untracked(),
+                self.diff_base_arch.get_untracked(),
                 self.diff_base_result.get_untracked(),
             )
         };
@@ -1517,7 +1547,7 @@ impl AppState {
                         let msg = tf(lang, "notice.exported_to", &[&dest.display().to_string()]);
                         state.show_status_notice(msg);
                     }
-                    Ok(Err(err)) => state.show_status_notice(err),
+                    Ok(Err(err)) => state.show_status_notice(format_user_error(lang, &err)),
                     Err(_) => {}
                 }
             }
@@ -1706,7 +1736,12 @@ fn short_digest(digest: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use diving_core::Analyzer;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
+    use nsh_testing::Headless;
+
     use super::*;
+    use crate::ui::app_tokens;
 
     #[test]
     fn windows_uri_and_explicit_arch_helpers_work() {
@@ -1734,5 +1769,134 @@ mod tests {
             parse_explicit_arch_query("docker://redis:alpine?arch=arm64"),
             None
         );
+    }
+
+    #[component]
+    fn CancelledCompareDialogHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        state.diff_base_ref.set("redis:alpine".to_owned());
+        state.diff_base_arch.set(Some(SharedString::from("amd64")));
+        state.diff_target_ref.set("redis:alpine".to_owned());
+        state
+            .diff_target_arch
+            .set(Some(SharedString::from("arm64")));
+        state.compare_base_input.set("redis:alpine".to_owned());
+        state
+            .compare_base_arch
+            .set(Some(SharedString::from("amd64")));
+        state.compare_target_input.set("redis:alpine".to_owned());
+        state
+            .compare_target_arch
+            .set(Some(SharedString::from("arm64")));
+        let base_res = Arc::new(DockerAnalyzeResult {
+            arch: "amd64".to_owned(),
+            ..Default::default()
+        });
+        let target_res = Arc::new(DockerAnalyzeResult {
+            arch: "arm64".to_owned(),
+            ..Default::default()
+        });
+        state.diff_base_result.set(Some(base_res));
+        state.diff_target_result.set(Some(target_res));
+        state.route.set(AppRoute::Diff);
+
+        // User opens Compare dialog, mutates inputs/archs, then cancels without submitting.
+        state.open_compare_dialog();
+        state.compare_base_input.set("nginx:alpine".to_owned());
+        state
+            .compare_base_arch
+            .set(Some(SharedString::from("arm64")));
+        state.compare_target_input.set("busybox:latest".to_owned());
+        state.compare_target_arch.set(None);
+        state.dismiss_top_overlay_or_search();
+        assert!(!state.compare_dialog_open.get_untracked());
+
+        // Active diff archs stay intact for Mod+R and Swap.
+        assert_eq!(
+            state
+                .diff_base_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("amd64")
+        );
+        assert_eq!(
+            state
+                .diff_target_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("arm64")
+        );
+
+        state.swap_diff();
+        assert_eq!(
+            state
+                .diff_base_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("arm64")
+        );
+        assert_eq!(
+            state
+                .diff_target_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("amd64")
+        );
+        assert_eq!(state.compare_base_input.get_untracked(), "redis:alpine");
+        assert_eq!(state.compare_target_input.get_untracked(), "redis:alpine");
+        assert_eq!(
+            state
+                .compare_base_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("arm64")
+        );
+        assert_eq!(
+            state
+                .compare_target_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("amd64")
+        );
+
+        // Mutate and cancel again, then verify reopening restores active diff params.
+        state.open_compare_dialog();
+        state.compare_base_input.set("other:v1".to_owned());
+        state.compare_base_arch.set(None);
+        state.dismiss_top_overlay_or_search();
+        state.open_compare_dialog();
+        assert_eq!(state.compare_base_input.get_untracked(), "redis:alpine");
+        assert_eq!(
+            state
+                .compare_base_arch
+                .get_untracked()
+                .as_ref()
+                .map(SharedString::as_str),
+            Some("arm64")
+        );
+        text("compare-dialog-state-ok")
+    }
+
+    #[test]
+    fn cancelled_compare_dialog_edits_do_not_leak_into_swap_reanalyze_or_reopen() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<CancelledCompareDialogHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start compare dialog state harness");
+        app.wait_for_within("compare-dialog-state-ok", Duration::from_secs(2))
+            .expect("compare dialog state assertions passed");
     }
 }

@@ -345,6 +345,7 @@ mod tests {
 
     use super::*;
     use crate::domain::DivingService;
+    use crate::i18n::UiLang;
     use crate::ui::app_tokens;
 
     #[component]
@@ -353,7 +354,20 @@ mod tests {
         state
             .analyze_error
             .set(Some("Tar fail: unexpected EOF".to_owned()));
-        landing_view(state)
+        let zh_state = state.clone();
+        view()
+            .flex_1()
+            .flex_col()
+            .child(ui_button(
+                "Switch ZH",
+                ButtonVariant::Outline,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || zh_state.set_lang(UiLang::Zh),
+            ))
+            .child(landing_view(state))
     }
 
     #[test]
@@ -374,5 +388,12 @@ mod tests {
         assert!(app.shows("Inspect layer waste, file trees, secrets, and runtime compatibility across Docker/OCI images."));
         assert!(app.shows("Unable to read local archive: unexpected EOF"));
         assert!(!app.shows("Tar fail:"));
+
+        app.press("Switch ZH").expect("toggle ZH");
+        app.wait_for_within(
+            "无法读取本地镜像归档：unexpected EOF",
+            Duration::from_secs(2),
+        )
+        .expect("landing error banner re-localizes live on EN/ZH toggle");
     }
 }

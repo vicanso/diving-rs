@@ -5,11 +5,14 @@ use nsh_core::prelude::*;
 
 use crate::domain::{AppRoute, AppState, InspectorTab, count_layer_file_ops, findings_total_count};
 use crate::features::arch_select_items;
+use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{UiLang, t};
+#[cfg(debug_assertions)]
+use crate::ui::ui_menu_separator;
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, SelectItem, TabOption, UiSize, radius_control, theme,
     ui_bare_input_with_ref, ui_borderless_select, ui_button, ui_icon_button, ui_image_pill_button,
-    ui_menu, ui_menu_item, ui_menu_separator, ui_menu_trigger_icon, ui_segmented, ui_tabs,
+    ui_menu, ui_menu_item, ui_menu_trigger_icon, ui_segmented, ui_tabs,
 };
 
 fn appearance_icon(appearance: Appearance) -> IconName {
@@ -33,10 +36,11 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let export_disabled_state = state.clone();
     let export_state = state.clone();
     let export_json_state = state.clone();
-    let clean_state = state.clone();
-    let gallery_state = state;
+    #[cfg(debug_assertions)]
+    let gallery_state = state.clone();
+    let clean_state = state;
 
-    ui_menu(ui_menu_trigger_icon(
+    let menu = ui_menu(ui_menu_trigger_icon(
         IconName::More,
         "More actions",
         Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
@@ -101,15 +105,16 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
         None,
         false,
         move || clean_state.clear_cache(),
-    ))
-    .child(ui_menu_separator())
-    .child(ui_menu_item(
+    ));
+    #[cfg(debug_assertions)]
+    let menu = menu.child(ui_menu_separator()).child(ui_menu_item(
         move || SharedString::from(t(lang.get(), "nav.ui_gallery")),
         Some(IconName::Eye),
         None,
         false,
         move || gallery_state.open_gallery(),
-    ))
+    ));
+    menu
 }
 
 /// Renders the unified 48pt top header bar for the right main stage.
@@ -275,6 +280,15 @@ fn landing_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEleme
         ))
 }
 
+fn effective_header_width(sidebar_open: bool) -> Points {
+    let total = window().width;
+    if sidebar_open {
+        (total - px(APP_SIDEBAR_WIDTH)).max(px(0.0))
+    } else {
+        total
+    }
+}
+
 fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement {
     let lang = state.lang;
     let sidebar_open = state.app_sidebar_open;
@@ -291,7 +305,8 @@ fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEle
     let inline_state = state.clone();
     let pill_state = state.clone();
     let tabs_state = state;
-    let compact = computed(move || window().width < px(1120.0));
+    let compact = computed(move || effective_header_width(sidebar_open.get()) < px(1120.0));
+    let tight = computed(move || effective_header_width(sidebar_open.get()) < px(980.0));
 
     view()
         .flex_1()
@@ -306,6 +321,7 @@ fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEle
                 .items_center()
                 .gap_1p5()
                 .min_w(px(0.0))
+                .style_when(move || !header_search_open.get(), |s| s.flex_shrink(1.0))
                 .style_when(header_search_open, |s| s.flex_1().max_w(px(460.0)))
                 .window_drag(false)
                 .child(left_nav)
@@ -319,7 +335,12 @@ fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEle
                         view()
                             .min_w(px(0.0))
                             .flex_shrink(1.0)
-                            .style_when(move || compact.get(), |s| s.max_w(px(136.0)))
+                            .overflow_hidden()
+                            .style_when(move || tight.get(), |s| s.max_w(px(120.0)))
+                            .style_when(
+                                move || compact.get() && !tight.get(),
+                                |s| s.max_w(px(136.0)),
+                            )
                             .child(ui_image_pill_button(
                                 move || {
                                     let name = cur_img.get();
@@ -348,7 +369,7 @@ fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEle
         )
         .child(when(
             move || !header_search_open.get() && has_result.get().is_some(),
-            move || inspector_header_tabs(tabs_state.clone()),
+            move || inspector_header_tabs(tabs_state.clone(), tight),
         ))
         .child(
             view()
@@ -460,7 +481,7 @@ fn inline_header_search_bar(state: AppState) -> impl IntoElement {
                         move || {
                             let ui_lang = lang.get();
                             if let Some(res) = res_sig.get()
-                                && !res.supported_archs.is_empty()
+                                && res.supported_archs.len() > 1
                             {
                                 let mut items = Vec::with_capacity(res.supported_archs.len() + 1);
                                 items.push(SelectItem::new("", t(ui_lang, "landing.arch_auto")));
@@ -469,7 +490,15 @@ fn inline_header_search_bar(state: AppState) -> impl IntoElement {
                                 }
                                 items
                             } else {
-                                arch_select_items(ui_lang)
+                                let mut items = arch_select_items(ui_lang);
+                                if let Some(res) = res_sig.get() {
+                                    for arch in &res.supported_archs {
+                                        if !items.iter().any(|item| item.value.as_ref() == arch) {
+                                            items.push(SelectItem::new(arch.clone(), arch.clone()));
+                                        }
+                                    }
+                                }
+                                items
                             }
                         }
                     },
@@ -508,7 +537,7 @@ fn inline_header_search_bar(state: AppState) -> impl IntoElement {
         ))
 }
 
-fn inspector_header_tabs(state: AppState) -> impl IntoElement {
+fn inspector_header_tabs(state: AppState, tight: Memo<bool>) -> impl IntoElement {
     let lang = state.lang;
     let active_tab = state.active_tab;
     let selected_layer = state.selected_layer;
@@ -531,33 +560,40 @@ fn inspector_header_tabs(state: AppState) -> impl IntoElement {
         SharedString::from(format!("{} ({count})", t(lang.get(), "tab.findings")))
     };
 
-    view().flex_shrink_0().window_drag(false).child(ui_tabs(
-        vec![
-            TabOption::new(
-                InspectorTab::FileTree,
-                files_tab_label,
-                Some(IconName::Layers),
-            ),
-            TabOption::new(
-                InspectorTab::Treemap,
-                move || SharedString::from(t(lang.get(), "tab.treemap")),
-                Some(IconName::Treemap),
-            ),
-            TabOption::new(
-                InspectorTab::Findings,
-                findings_tab_label,
-                Some(IconName::Findings),
-            ),
-            TabOption::new(
-                InspectorTab::Dockerfile,
-                move || SharedString::from(t(lang.get(), "tab.dockerfile")),
-                Some(IconName::Dockerfile),
-            ),
-        ],
-        active_tab,
-        "Inspector workspace tabs",
-        move |tab| active_tab.set(tab),
-    ))
+    view()
+        .min_w(px(0.0))
+        .flex_shrink(1.0)
+        .window_drag(false)
+        .child(dynamic(move || {
+            let show_icons = !tight.get();
+            ui_tabs(
+                vec![
+                    TabOption::new(
+                        InspectorTab::FileTree,
+                        files_tab_label,
+                        show_icons.then_some(IconName::Layers),
+                    ),
+                    TabOption::new(
+                        InspectorTab::Treemap,
+                        move || SharedString::from(t(lang.get(), "tab.treemap")),
+                        show_icons.then_some(IconName::Treemap),
+                    ),
+                    TabOption::new(
+                        InspectorTab::Findings,
+                        findings_tab_label,
+                        show_icons.then_some(IconName::Findings),
+                    ),
+                    TabOption::new(
+                        InspectorTab::Dockerfile,
+                        move || SharedString::from(t(lang.get(), "tab.dockerfile")),
+                        show_icons.then_some(IconName::Dockerfile),
+                    ),
+                ],
+                active_tab,
+                "Inspector workspace tabs",
+                move |tab| active_tab.set(tab),
+            )
+        }))
 }
 
 fn diff_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement {
@@ -571,7 +607,7 @@ fn diff_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement 
     let cmp_state = state.clone();
     let export_state = state.clone();
     let util_state = state;
-    let compact = computed(move || window().width < px(1120.0));
+    let compact = computed(move || effective_header_width(sidebar_open.get()) < px(1120.0));
 
     view()
         .flex_1()
@@ -585,12 +621,15 @@ fn diff_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement 
                 .flex_row()
                 .items_center()
                 .gap_2()
+                .min_w(px(0.0))
+                .flex_shrink(1.0)
                 .window_drag(false)
                 .child(left_nav)
                 .child(
                     text(move || t(lang.get(), "diff.title"))
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
+                        .number_of_lines(1)
                         .text_color(move || theme().foreground),
                 ),
         )
@@ -672,15 +711,35 @@ fn diff_header(state: AppState, left_nav: impl IntoElement) -> impl IntoElement 
                                     .into_element()
                                 }
                             }))
-                            .child(ui_button(
-                                move || SharedString::from(t(lang.get(), "diff.export_md")),
-                                ButtonVariant::Default,
-                                UiSize::Sm,
-                                Some(IconName::Download),
-                                false,
-                                false,
-                                move || s_export.export_diff_markdown(),
-                            ))
+                            .child(dynamic(move || {
+                                let s = s_export.clone();
+                                if compact.get() {
+                                    ui_icon_button(
+                                        IconName::Download,
+                                        "Export Markdown report",
+                                        Some(move || {
+                                            SharedString::from(t(lang.get(), "diff.export_md"))
+                                        }),
+                                        ButtonVariant::Primary,
+                                        UiSize::Sm,
+                                        false,
+                                        false,
+                                        move || s.export_diff_markdown(),
+                                    )
+                                    .into_element()
+                                } else {
+                                    ui_button(
+                                        move || SharedString::from(t(lang.get(), "diff.export_md")),
+                                        ButtonVariant::Default,
+                                        UiSize::Sm,
+                                        Some(IconName::Download),
+                                        false,
+                                        false,
+                                        move || s.export_diff_markdown(),
+                                    )
+                                    .into_element()
+                                }
+                            }))
                     },
                 ))
                 .child(when(
@@ -701,6 +760,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{DivingService, SharedRef};
+    use crate::features::sidebar::app_sidebar;
     use crate::ui::app_tokens;
 
     #[component]
@@ -708,43 +768,97 @@ mod tests {
         let state = AppState::new(DivingService::new());
         state.app_sidebar_open.set(false);
         state.route.set(AppRoute::Inspector);
-        state.current_image.set("redis:alpine".to_owned());
         state
-            .result
-            .set(Some(Arc::new(DockerAnalyzeResult::default())));
+            .current_image
+            .set("very-long-registry.example.com/org/redis:alpine-3.20".to_owned());
+        state.result.set(Some(Arc::new(DockerAnalyzeResult {
+            arch: "amd64".to_owned(),
+            supported_archs: vec!["amd64".to_owned()],
+            ..Default::default()
+        })));
         state.summary.set(Some(SharedRef::new(
             DockerAnalyzeResult::default().summary(),
         )));
 
         let diff_state = state.clone();
         let gallery_state = state.clone();
+        let search_state = state.clone();
+        let sidebar_state = state.clone();
 
         view()
-            .flex_col()
-            .child(content_header_bar(state))
-            .child(ui_button(
-                "GoDiff",
-                ButtonVariant::Ghost,
-                UiSize::Xs,
-                None,
-                false,
-                false,
-                move || {
-                    diff_state.route.set(AppRoute::Diff);
-                    diff_state
-                        .diff_result
-                        .set(Some(SharedRef::new(ImageDiff::default())));
-                },
+            .flex_row()
+            .w_full()
+            .h_full()
+            .child(when(
+                move || sidebar_state.app_sidebar_open.get(),
+                move || app_sidebar(sidebar_state.clone()),
             ))
-            .child(ui_button(
-                "GoGallery",
-                ButtonVariant::Ghost,
-                UiSize::Xs,
-                None,
-                false,
-                false,
-                move || gallery_state.open_gallery(),
-            ))
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex_col()
+                    .child(content_header_bar(state))
+                    .child(ui_button(
+                        "GoDiff",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            diff_state.route.set(AppRoute::Diff);
+                            diff_state
+                                .diff_result
+                                .set(Some(SharedRef::new(ImageDiff::default())));
+                        },
+                    ))
+                    .child(ui_button(
+                        "OpenHeaderSearch",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            search_state.route.set(AppRoute::Inspector);
+                            search_state.open_header_search();
+                        },
+                    ))
+                    .child(ui_button(
+                        "GoGallery",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || gallery_state.open_gallery(),
+                    )),
+            )
+    }
+
+    fn assert_header_fits_within(app: &Headless, max_right: f32) {
+        let nodes = app.screen().layout_nodes();
+        let header_children: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n.bounds.origin.y.0 > 0.0
+                    && n.bounds.origin.y.0 + n.bounds.size.height.0 < 48.0
+                    && n.bounds.size.height.0 > 0.0
+                    && n.bounds.size.height.0 < 48.0
+            })
+            .collect();
+        assert!(
+            !header_children.is_empty(),
+            "expected layout nodes inside 48pt header bar"
+        );
+        for node in header_children {
+            let right = node.bounds.origin.x.0 + node.bounds.size.width.0;
+            assert!(
+                right <= max_right,
+                "header child right edge ({right:.1}) exceeded max_right ({max_right:.1})"
+            );
+        }
     }
 
     #[test]
@@ -765,20 +879,56 @@ mod tests {
         assert_eq!(app.screen().matches("label:Switch color theme"), Ok(true));
         assert!(app.shows("EN"));
 
+        // Verify Inspector header items stay clear of the 960pt viewport right edge.
+        assert_header_fits_within(&app, 960.0 - 12.0);
+
         // Clicking More actions opens the popup menu cleanly.
         app.press("label:More actions")
             .expect("press More actions trigger");
         app.wait_for_within("role:menuitem[Open OCI folder…]", Duration::from_secs(3))
             .expect("More actions menu opened");
+        assert_eq!(app.shows("UI Gallery"), cfg!(debug_assertions));
         app.press_key("escape").expect("close menu");
 
-        // Switch to Diff and verify utilities remain mounted.
+        // Open header search on a single-arch image: amd64 and arm64 remain selectable.
+        app.press("OpenHeaderSearch")
+            .expect("open header search bar");
+        app.wait_for_within("label:Header target architecture", Duration::from_secs(3))
+            .expect("header arch dropdown visible");
+        app.press("label:Header target architecture")
+            .expect("open header arch dropdown");
+        app.wait_for_within("linux/arm64", Duration::from_secs(3))
+            .expect("arm64 remains selectable on single-arch image");
+        assert!(app.shows("linux/amd64"));
+        app.press_key("escape").expect("close arch dropdown");
+        app.press("label:Close image switcher")
+            .expect("close header search");
+
+        // Switch to Diff and verify utilities remain mounted inside 960pt viewport.
         app.press("GoDiff").expect("switch to Diff");
         app.wait_for_within("Swap", Duration::from_secs(3))
             .expect("Diff actions visible");
         assert_eq!(app.screen().matches("label:New analysis"), Ok(true));
         assert_eq!(app.screen().matches("label:Open Command Palette"), Ok(true));
         assert_eq!(app.screen().matches("label:More actions"), Ok(true));
+        assert_header_fits_within(&app, 960.0 - 12.0);
+
+        // Toggle sidebar open at 960x640 on Diff: header actions stay within viewport.
+        app.press("label:Toggle sidebar")
+            .expect("open sidebar at 960x640");
+        app.wait_for_within("Workbench", Duration::from_secs(3))
+            .expect("sidebar opened");
+        assert_eq!(
+            app.screen().matches("label:Export Markdown report"),
+            Ok(true)
+        );
+        assert_header_fits_within(&app, 960.0 - 12.0);
+
+        // Collapse sidebar again before switching to Gallery so header unmount check stays isolated.
+        app.press("label:Toggle sidebar")
+            .expect("close sidebar before Gallery");
+        app.wait_for_gone("Workbench", Duration::from_secs(3))
+            .expect("sidebar collapsed");
 
         // Switch to Gallery: content_header_bar unmounts to avoid double header.
         app.press("GoGallery").expect("switch to Gallery");

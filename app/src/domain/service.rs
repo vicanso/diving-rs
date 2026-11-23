@@ -22,7 +22,6 @@ use crate::domain::model::{
     FilePreviewContent, ImageSourceKind, classify_file_preview, image_source_kind,
 };
 use crate::domain::treemap::{FsNode, build_final_tree};
-use crate::i18n::{format_user_error, ui_lang_from_core};
 
 const FILE_PREVIEW_LIMIT: u64 = 128 * 1024;
 const FILE_EXPORT_LIMIT: u64 = 100 * 1024 * 1024;
@@ -210,7 +209,6 @@ impl DivingService {
                     let _ = progress_tx.send(AnalyzeMessage::Progress(ev));
                 }));
 
-            let ui_lang = ui_lang_from_core(lang);
             let outcome = main_analyzer.analyze(&main_target, opts).await;
             main_done.store(true, Ordering::SeqCst);
             match outcome {
@@ -218,10 +216,7 @@ impl DivingService {
                     let _ = main_tx.send(AnalyzeMessage::Finished(result));
                 }
                 Err(err) => {
-                    let _ = main_tx.send(AnalyzeMessage::Failed(format_user_error(
-                        ui_lang,
-                        &err.to_string(),
-                    )));
+                    let _ = main_tx.send(AnalyzeMessage::Failed(err.to_string()));
                 }
             }
         });
@@ -288,7 +283,6 @@ impl DivingService {
                 analyzer.analyze(&target_ref, target_opts),
             );
 
-            let ui_lang = ui_lang_from_core(lang);
             let outcome = match (base_res, target_res) {
                 (Ok(base), Ok(target)) => {
                     let diff = analyzer
@@ -307,15 +301,11 @@ impl DivingService {
                         target,
                     }
                 }
-                (Err(b_err), Ok(_)) => {
-                    DiffRunResult::BaseFailed(format_user_error(ui_lang, &b_err.to_string()))
-                }
-                (Ok(_), Err(t_err)) => {
-                    DiffRunResult::TargetFailed(format_user_error(ui_lang, &t_err.to_string()))
-                }
+                (Err(b_err), Ok(_)) => DiffRunResult::BaseFailed(b_err.to_string()),
+                (Ok(_), Err(t_err)) => DiffRunResult::TargetFailed(t_err.to_string()),
                 (Err(b_err), Err(t_err)) => DiffRunResult::BothFailed {
-                    base: format_user_error(ui_lang, &b_err.to_string()),
-                    target: format_user_error(ui_lang, &t_err.to_string()),
+                    base: b_err.to_string(),
+                    target: t_err.to_string(),
                 },
             };
             let _ = tx.send(DiffMessage::Finished(outcome));
@@ -591,14 +581,134 @@ impl DivingService {
 
 fn format_image_target(image: &str, arch: Option<&str>) -> String {
     let trimmed = image.trim();
+    let kind = image_source_kind(trimmed);
     if matches!(
-        image_source_kind(trimmed),
+        kind,
         ImageSourceKind::LocalDocker | ImageSourceKind::LocalPodman
     ) {
         return trimmed.to_owned();
     }
-    match arch.map(str::trim).filter(|a| !a.is_empty()) {
-        Some(arch) if !trimmed.contains("?arch=") => format!("{trimmed}?arch={arch}"),
-        _ => trimmed.to_owned(),
+    let Some(arch) = arch.map(str::trim).filter(|a| !a.is_empty()) else {
+        return trimmed.to_owned();
+    };
+    if kind == ImageSourceKind::LocalFile {
+        let path = trimmed
+            .rsplit_once("?arch=")
+            .map_or(trimmed, |(path, _)| path);
+        return format!("{path}?arch={arch}");
+    }
+    let Some((base, query)) = trimmed.split_once('?') else {
+        return format!("{trimmed}?arch={arch}");
+    };
+    let mut replaced = false;
+    let mut params: Vec<String> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| {
+            if let Some((key, _)) = pair.split_once('=')
+                && key.trim() == "arch"
+            {
+                if replaced {
+                    None
+                } else {
+                    replaced = true;
+                    Some(format!("arch={arch}"))
+                }
+            } else {
+                Some(pair.to_owned())
+            }
+        })
+        .collect();
+    if !replaced {
+        params.push(format!("arch={arch}"));
+    }
+    format!("{base}?{}", params.join("&"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_image_target_sets_replaces_and_preserves_query_params() {
+        assert_eq!(format_image_target("redis:alpine", None), "redis:alpine");
+        assert_eq!(
+            format_image_target("redis:alpine", Some("   ")),
+            "redis:alpine"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine", Some("arm64")),
+            "redis:alpine?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?arch=amd64", Some("arm64")),
+            "redis:alpine?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?arch=amd64", None),
+            "redis:alpine?arch=amd64"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?foo=1&arch=amd64&bar=2", Some("arm64")),
+            "redis:alpine?foo=1&arch=arm64&bar=2"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?foo=1", Some("arm64")),
+            "redis:alpine?foo=1&arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?arch=amd64&arch=386", Some("arm64")),
+            "redis:alpine?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("redis:alpine?", Some("arm64")),
+            "redis:alpine?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("file:///tmp/oci?arch=amd64", Some("arm64")),
+            "file:///tmp/oci?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("file:///tmp/dir?name/oci", Some("arm64")),
+            "file:///tmp/dir?name/oci?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("docker://redis:alpine", Some("arm64")),
+            "docker://redis:alpine"
+        );
+        assert_eq!(
+            format_image_target("podman://redis:alpine", Some("arm64")),
+            "podman://redis:alpine"
+        );
+    }
+
+    #[test]
+    fn start_analyze_emits_raw_core_error_without_preformatting() {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let service = DivingService::with_analyzer(analyzer);
+        let (_handle, mut rx) = service.start_analyze_with_options(
+            "file:///nonexistent/diving-service-missing.tar".to_owned(),
+            None,
+            Lang::En,
+            false,
+            true,
+            false,
+        );
+        let err = service.inner.rt.block_on(async {
+            while let Some(msg) = rx.recv().await {
+                if let AnalyzeMessage::Failed(err) = msg {
+                    return err;
+                }
+            }
+            panic!("expected AnalyzeMessage::Failed");
+        });
+        assert!(
+            !err.starts_with("Unable to read local archive:"),
+            "analyze error must stay raw for live EN/ZH formatting, got: {err}"
+        );
+        assert!(
+            !err.starts_with("无法读取本地镜像归档："),
+            "analyze error must stay raw for live EN/ZH formatting, got: {err}"
+        );
     }
 }

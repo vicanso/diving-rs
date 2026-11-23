@@ -36,7 +36,6 @@ impl UiLang {
 const CATALOG: &[(&str, &str, &str)] = &[
     // App shell & navigation
     ("app.title", "Diving", "Diving"),
-    ("app.version_badge", "v0.12.3", "v0.12.3"),
     ("nav.back_home", "Back to Home", "返回首页"),
     ("nav.ui_gallery", "UI Gallery", "组件画廊"),
     ("menu.more_actions", "More actions", "更多操作"),
@@ -506,6 +505,21 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "{0} failed: {1}",
         "{0} 执行失败：{1}",
     ),
+    (
+        "error.invalid_digest_prefix",
+        "Invalid layer digest: {0}",
+        "无效的镜像层摘要：{0}",
+    ),
+    (
+        "error.file_not_found",
+        "File not found in layer archive.",
+        "在镜像层归档中未找到该文件。",
+    ),
+    (
+        "error.decompress_prefix",
+        "Unable to decompress layer data: {0}",
+        "无法解压镜像层数据：{0}",
+    ),
     // Status bar & notices
     (
         "status.hints_files",
@@ -691,6 +705,23 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "镜像配置与运行时探测结果完全一致。",
     ),
     ("diff.col_setting", "Setting", "配置/运行时项"),
+    ("diff.setting_base_os", "Base OS", "基础系统"),
+    (
+        "diff.setting_runtime_entrypoint",
+        "Runtime entrypoint",
+        "运行时入口",
+    ),
+    ("diff.setting_runtime_libc", "Runtime libc", "运行时 libc"),
+    ("diff.setting_min_glibc", "Min glibc", "最低 glibc"),
+    ("diff.setting_os_glibc", "OS glibc", "系统 glibc"),
+    ("diff.setting_runtime_issue", "Runtime issue", "运行时问题"),
+    (
+        "diff.setting_unstripped",
+        "Unstripped binaries",
+        "未剥离符号的二进制",
+    ),
+    ("diff.healthcheck_configured", "Configured", "已配置"),
+    ("diff.healthcheck_none", "Not configured", "未配置"),
     ("diff.unexpected_only", "Unexpected only", "仅看非预期差异"),
     ("diff.badge_binary", "Binary", "二进制"),
     ("diff.badge_content", "Content", "内容变更"),
@@ -795,6 +826,12 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("menu.window", "Window", "窗口"),
 ];
 
+/// Returns the desktop version badge string (preferring `DIVING_APP_VERSION` in CI/nightly builds).
+pub fn app_version_badge() -> String {
+    let ver = option_env!("DIVING_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    format!("v{ver}")
+}
+
 /// Looks up a localized UI label by key, returning the key itself as a visible fallback if unknown.
 pub fn t(lang: UiLang, key: &'static str) -> &'static str {
     for (k, en, zh) in CATALOG {
@@ -884,6 +921,15 @@ pub fn format_user_error(lang: UiLang, raw: &str) -> String {
     }
     if let Some(rest) = trimmed.strip_prefix("IO fail:") {
         return tf(lang, "error.io_prefix", &[rest.trim()]);
+    }
+    if let Some(rest) = trimmed.strip_prefix("Invalid blob digest:") {
+        return tf(lang, "error.invalid_digest_prefix", &[rest.trim()]);
+    }
+    if trimmed == "File not found" {
+        return t(lang, "error.file_not_found").to_owned();
+    }
+    if let Some(rest) = trimmed.strip_prefix("Decompress fail:") {
+        return tf(lang, "error.decompress_prefix", &[rest.trim()]);
     }
     if let Some(rest) = trimmed.strip_prefix("failed to run ")
         && let Some((cmd, detail)) = rest.split_once(':')
@@ -1122,6 +1168,40 @@ mod tests {
             ),
             "docker save alpine:latest 执行失败：exit status: 1"
         );
+        assert_eq!(
+            format_user_error(UiLang::En, "Invalid blob digest: sha256:bad"),
+            "Invalid layer digest: sha256:bad"
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "Invalid blob digest: sha256:bad"),
+            "无效的镜像层摘要：sha256:bad"
+        );
+        assert_eq!(
+            format_user_error(UiLang::En, "File not found"),
+            "File not found in layer archive."
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "File not found"),
+            "在镜像层归档中未找到该文件。"
+        );
+        assert_eq!(
+            format_user_error(UiLang::En, "Decompress fail: corrupt gzip"),
+            "Unable to decompress layer data: corrupt gzip"
+        );
+        assert_eq!(
+            format_user_error(UiLang::Zh, "Decompress fail: corrupt gzip"),
+            "无法解压镜像层数据：corrupt gzip"
+        );
+    }
+
+    #[test]
+    fn app_version_badge_matches_package_version() {
+        let expected = format!(
+            "v{}",
+            option_env!("DIVING_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(app_version_badge(), expected);
+        assert!(app_version_badge().starts_with('v'));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use crate::domain::{AppRoute, AppState, RecentImageEntry, format_bytes};
 use crate::features::title_bar::more_actions_menu;
-use crate::i18n::{UiLang, t};
+use crate::i18n::{UiLang, app_version_badge, t};
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, text_tertiary, theme,
     ui_button, ui_context_menu, ui_icon, ui_icon_button, ui_menu_item, ui_recent_item,
@@ -326,7 +326,7 @@ fn sidebar_footer(state: AppState) -> impl IntoElement {
                                 .text_color(move || theme().foreground),
                         )
                         .child(
-                            text(move || t(lang.get(), "app.version_badge"))
+                            text(app_version_badge())
                                 .text_xs()
                                 .font_family(font_mono_family())
                                 .text_color(text_tertiary),
