@@ -4,6 +4,7 @@
 # `.cargo/config.toml`, applying these release settings to both `nsh package` and
 # direct `cargo build --release` invocations under `app/`.
 [profile.release]
+opt-level = "s"
 codegen-units = 1
 lto = true
 strip = true

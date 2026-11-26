@@ -391,8 +391,8 @@ mod tests {
     use std::time::Duration;
 
     use diving_core::DockerAnalyzeResult;
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -439,7 +439,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(400.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<SidebarRecentHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<SidebarRecentHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start sidebar recent harness");
         app.wait_for_within("Open OCI folder…", Duration::from_secs(3))

@@ -1,6 +1,6 @@
-# Diving Desktop 设计系统与交互规范（NSH 0.6.1）
+# Diving Desktop 设计系统与交互规范（NSH 0.7.0）
 
-> 本文档是 `Diving Desktop`（位于仓库 `app/` 子目录）在进入界面与组件开发前确立的规范性设计文档（Design System、信息架构、Motion Inventory 与验收门禁）。所有 `app/src/ui/` 基础样式控件与 `app/src/features/` 业务屏幕必须严格遵守本文档与 Native Shell（NSH `0.6.1`）`nsh-design-guides` 规范。
+> 本文档是 `Diving Desktop`（位于仓库 `app/` 子目录）在进入界面与组件开发前确立的规范性设计文档（Design System、信息架构、Motion Inventory 与验收门禁）。所有 `app/src/ui/` 基础样式控件与 `app/src/features/` 业务屏幕必须严格遵守本文档与 Native Shell（NSH `0.7.0`）`nsh-design-guides` 规范。
 
 ---
 

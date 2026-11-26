@@ -125,7 +125,7 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                                     if payload.trim().is_empty() {
                                         return;
                                     }
-                                    set_clipboard(payload.clone());
+                                    drop(set_clipboard(payload.clone()));
                                     let next_seq = copy_seq.get_untracked().wrapping_add(1);
                                     copy_seq.set(next_seq);
                                     copied.set(true);
@@ -278,8 +278,8 @@ mod tests {
 
     use diving_core::Analyzer;
     use nsh_core::clipboard::{ClipboardBackend, MemoryClipboard};
-    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -358,7 +358,7 @@ mod tests {
             viewport: Size::new(Points(1280.0), Points(820.0)),
             clock: Clock::manual(SystemTime::UNIX_EPOCH),
             clipboard: Some(clipboard.clone()),
-            ..EngineConfig::new(Root::of::<DockerfileHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<DockerfileHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start dockerfile harness");
         app.wait_for_within("Image Metadata (2)", Duration::from_secs(2))
@@ -391,7 +391,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<DockerfileEmptyHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<DockerfileEmptyHarness>().tokens(app_tokens()))
         };
         let mut app_empty = Headless::start(config_empty).expect("start empty dockerfile harness");
         app_empty

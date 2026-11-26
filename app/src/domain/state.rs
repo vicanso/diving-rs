@@ -1737,8 +1737,8 @@ fn short_digest(digest: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use diving_core::Analyzer;
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::ui::app_tokens;
@@ -1893,7 +1893,9 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(960.0), Points(640.0)),
-            ..EngineConfig::new(Root::of::<CancelledCompareDialogHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(
+                windowed_root::<CancelledCompareDialogHarness>().tokens(app_tokens()),
+            )
         };
         let mut app = Headless::start(config).expect("start compare dialog state harness");
         app.wait_for_within("compare-dialog-state-ok", Duration::from_secs(2))

@@ -1,6 +1,6 @@
 # Diving Desktop
 
-Pure-Rust native desktop application built with [NSH](https://nsh.dev) (`0.6.1`) on top of `diving-core` and `diving-app`. Its UI root is `App` (`src/lib.rs`), declared in `nsh.json`.
+Pure-Rust native desktop application built with [NSH](https://nsh.dev) (`0.7.0`) on top of `diving-core` and `diving-app`. Its UI root is `App` (`src/lib.rs`), declared in `nsh.json`.
 
 ## Architecture
 

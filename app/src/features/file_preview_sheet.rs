@@ -143,7 +143,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                         _ => None,
                                     };
                                     if let Some(body) = payload {
-                                        set_clipboard(body);
+                                        drop(set_clipboard(body));
                                         let next_seq = copy_seq.get_untracked().wrapping_add(1);
                                         copy_seq.set(next_seq);
                                         copied.set(true);
@@ -309,8 +309,8 @@ mod tests {
 
     use diving_core::Analyzer;
     use nsh_core::clipboard::{ClipboardBackend, MemoryClipboard};
-    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::{DivingService, PreviewTarget};
@@ -364,7 +364,7 @@ mod tests {
             viewport: Size::new(Points(960.0), Points(640.0)),
             clock: Clock::manual(SystemTime::UNIX_EPOCH),
             clipboard: Some(clipboard.clone()),
-            ..EngineConfig::new(Root::of::<SheetTimerHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<SheetTimerHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start sheet harness");
         app.wait_for_within("Copy", Duration::from_secs(2))
@@ -454,7 +454,9 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<SheetNoticeBinarySymlinkHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(
+                windowed_root::<SheetNoticeBinarySymlinkHarness>().tokens(app_tokens()),
+            )
         };
         let mut app = Headless::start(config).expect("start sheet features harness");
         app.wait_for_within("Saved to /tmp/app.conf.", Duration::from_secs(2))
@@ -528,7 +530,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<SheetErrorI18nHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<SheetErrorI18nHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start sheet error i18n harness");
         app.wait_for_within(

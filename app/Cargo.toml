@@ -7,8 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-nsh-core = "0.6.1"
-nsh-base = "0.6.1"
+nsh-core = "0.7.0"
+nsh-base = "0.7.0"
 env_logger = "0.11"
 diving-core = { path = "../crates/diving-core" }
 diving-app = { path = "../crates/diving-app" }
@@ -20,21 +20,22 @@ serde_json = "1.0.154"
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nsh-platform-linux = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
+nsh-platform-linux = { version = "0.7.0", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nsh-platform-macos = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg"] }
+nsh-platform-macos = { version = "0.7.0", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-nsh-platform-windows = { version = "0.6.1", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
+nsh-platform-windows = { version = "0.7.0", default-features = false, features = ["shader", "editor", "highlight", "plot", "updater", "svg", "net"] }
 
 [dev-dependencies]
-nsh-engine = { version = "0.6.1", default-features = false }
-nsh-testing = { version = "0.6.1", default-features = false }
+nsh-engine = { version = "0.7.0", default-features = false }
+nsh-testing = { version = "0.7.0", default-features = false }
 tar = "0.4.46"
 tempfile = "3.27.0"
 
 [profile.release]
+opt-level = "s"
 codegen-units = 1
 lto = true
 strip = true

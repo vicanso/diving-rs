@@ -7,14 +7,14 @@ pub mod i18n;
 pub mod ui;
 
 use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
-use nsh_core::element::desktop::main_window;
+use nsh_core::element::desktop::{on_reopen, window as app_window};
 use nsh_core::prelude::*;
 
 use crate::domain::{AppRoute, AppState, DivingService};
 use crate::features::{
-    app_sidebar, command_palette_overlay, compare_dialog, content_header_bar, diff_workspace,
-    file_preview_sheet, inspector_workspace, install_desktop_menus_and_keys, landing_view,
-    local_picker_dialog, provenance_dialog,
+    app_sidebar, bind_global_keys, command_palette_overlay, compare_dialog, content_header_bar,
+    diff_workspace, file_preview_sheet, inspector_workspace, install_application_menu,
+    landing_view, local_picker_dialog, provenance_dialog,
 };
 use crate::i18n::{t, tf};
 use crate::ui::{
@@ -35,88 +35,102 @@ fn native(registry: &mut Registry) {
 pub fn App() -> impl IntoElement {
     register_fonts();
 
+    let state = AppState::new(DivingService::new());
+    provide_context(state.clone());
+    install_application_menu(state.clone());
+
+    let main_open = signal(true);
+    let mut attrs = WindowAttributes::default();
     if os().is_desktop() {
         let mut bar = TitleBarOptions::default();
         bar.style = TitleBarStyle::Hidden;
         bar.height = Some(px(48.0));
 
-        let mut attrs = WindowAttributes::default();
         attrs.title = Some("Diving".into());
         attrs.min_size = Some(Some(size(px(960.0), px(640.0))));
         attrs.title_bar = Some(bar);
 
-        main_window().set(attrs);
+        on_reopen(move || main_open.set(true));
     }
 
-    let state = AppState::new(DivingService::new());
-    provide_context(state.clone());
-    install_desktop_menus_and_keys(state.clone());
-    let sidebar_open = state.app_sidebar_open;
-    let sidebar_state = state.clone();
-    let route_state = state.clone();
-    let config_state = state.clone();
-    let progress_state = state.clone();
-    let drop_state = state.clone();
-    let notice_state = state.clone();
+    let win_state = state;
+    app_window()
+        .id("main")
+        .default_size(size(px(1280.0), px(820.0)))
+        .restore_bounds(true)
+        .attributes(attrs)
+        .open(main_open)
+        .on_open_change(move |ev| main_open.set(ev.open))
+        .content(move || {
+            let state = win_state.clone();
+            bind_global_keys(state.clone());
+            let sidebar_open = state.app_sidebar_open;
+            let sidebar_state = state.clone();
+            let route_state = state.clone();
+            let config_state = state.clone();
+            let progress_state = state.clone();
+            let drop_state = state.clone();
+            let notice_state = state.clone();
 
-    view()
-        .relative()
-        .flex_1()
-        .flex_row()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
-        .on_file_drop(move |ev: &FileDropEvent| {
-            if let Some(first) = ev.uris.first() {
-                drop_state.handle_dropped_uri(first);
-            }
-        })
-        .child(when(
-            move || sidebar_open.get(),
-            move || app_sidebar(sidebar_state.clone()),
-        ))
-        .child(
             view()
+                .relative()
                 .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .flex_col()
+                .flex_row()
                 .bg(move || theme().background)
-                .child(content_header_bar(state.clone()))
+                .text_color(move || theme().foreground)
+                .on_file_drop(move |ev: &FileDropEvent| {
+                    if let Some(first) = ev.uris.first() {
+                        drop_state.handle_dropped_uri(first);
+                    }
+                })
                 .child(when(
-                    move || config_state.config_warning.get().is_some(),
-                    move || config_warning_banner(config_state.clone()),
-                ))
-                .child(when(
-                    move || {
-                        progress_state.is_loading.get()
-                            && progress_state.route.get() != AppRoute::Landing
-                    },
-                    move || global_progress_strip(progress_state.clone()),
+                    move || sidebar_open.get(),
+                    move || app_sidebar(sidebar_state.clone()),
                 ))
                 .child(
                     view()
                         .flex_1()
+                        .min_w(px(0.0))
                         .min_h(px(0.0))
                         .flex_col()
-                        .child(dynamic(move || match route_state.route.get() {
-                            AppRoute::Landing => landing_view(route_state.clone()).into_element(),
-                            AppRoute::Inspector => {
-                                inspector_workspace(route_state.clone()).into_element()
-                            }
-                            AppRoute::Diff => diff_workspace(route_state.clone()).into_element(),
-                            AppRoute::Gallery => ui_gallery().into_element(),
-                        })),
-                ),
-        )
-        .child(when(
-            move || notice_state.status_notice.get().is_some(),
-            move || floating_status_toast(notice_state.clone()),
-        ))
-        .child(file_preview_sheet(state.clone()))
-        .child(compare_dialog(state.clone()))
-        .child(local_picker_dialog(state.clone()))
-        .child(provenance_dialog(state.clone()))
-        .child(command_palette_overlay(state))
+                        .bg(move || theme().background)
+                        .child(content_header_bar(state.clone()))
+                        .child(when(
+                            move || config_state.config_warning.get().is_some(),
+                            move || config_warning_banner(config_state.clone()),
+                        ))
+                        .child(when(
+                            move || {
+                                progress_state.is_loading.get()
+                                    && progress_state.route.get() != AppRoute::Landing
+                            },
+                            move || global_progress_strip(progress_state.clone()),
+                        ))
+                        .child(view().flex_1().min_h(px(0.0)).flex_col().child(dynamic(
+                            move || match route_state.route.get() {
+                                AppRoute::Landing => {
+                                    landing_view(route_state.clone()).into_element()
+                                }
+                                AppRoute::Inspector => {
+                                    inspector_workspace(route_state.clone()).into_element()
+                                }
+                                AppRoute::Diff => {
+                                    diff_workspace(route_state.clone()).into_element()
+                                }
+                                AppRoute::Gallery => ui_gallery().into_element(),
+                            },
+                        ))),
+                )
+                .child(when(
+                    move || notice_state.status_notice.get().is_some(),
+                    move || floating_status_toast(notice_state.clone()),
+                ))
+                .child(file_preview_sheet(state.clone()))
+                .child(compare_dialog(state.clone()))
+                .child(local_picker_dialog(state.clone()))
+                .child(provenance_dialog(state.clone()))
+                .child(command_palette_overlay(state))
+        })
 }
 
 /// Renders the localized status notice banner with a close button (reused by floating toast and modals).
@@ -261,7 +275,7 @@ mod tests {
 
     use diving_core::Op;
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_testing::{Headless, windowed_root};
     use tar::{Builder, EntryType, Header};
     use tempfile::Builder as TempBuilder;
 
@@ -397,15 +411,16 @@ mod tests {
             .expect("preview sheet open");
 
         app.press_key("mod+k").expect("open command palette");
-        app.wait_for_within("Theme: Dark", Duration::from_secs(3))
+        app.wait_for_within("Open local file…", Duration::from_secs(3))
             .expect("command palette open");
 
         app.type_text("Command Palette", "dark")
             .expect("type command query");
-        app.wait_for_gone("Theme: Light", Duration::from_secs(3))
+        app.wait_for_gone("Open local file…", Duration::from_secs(3))
             .expect("filtered to dark theme item");
+        assert!(app.shows("Theme: Dark"));
         app.press_key("escape").expect("1st Esc clears query");
-        app.wait_for_within("Theme: Light", Duration::from_secs(3))
+        app.wait_for_within("Open local file…", Duration::from_secs(3))
             .expect("query cleared restoring all items");
         assert!(
             app.shows("Layer #1"),
@@ -414,7 +429,7 @@ mod tests {
 
         app.press_key("escape")
             .expect("2nd Esc closes only Command Palette");
-        app.wait_for_gone("Theme: Dark", Duration::from_secs(3))
+        app.wait_for_gone("Open local file…", Duration::from_secs(3))
             .expect("command palette closed");
         assert!(
             app.shows("Layer #1"),
@@ -699,7 +714,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(960.0), Points(640.0)),
-            ..EngineConfig::new(Root::of::<StateNoticeHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<StateNoticeHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start state notice harness");
         app.wait_for_within("Saved to /tmp/report.md.", Duration::from_secs(3))

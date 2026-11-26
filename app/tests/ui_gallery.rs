@@ -3,8 +3,8 @@
 use std::time::{Duration, SystemTime};
 
 use nsh_app_diving::ui::{UiGallery, app_tokens};
-use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-use nsh_testing::Headless;
+use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Size};
+use nsh_testing::{Headless, windowed_root};
 
 fn desktop_gallery_config(clock: Clock) -> EngineConfig {
     EngineConfig {
@@ -15,7 +15,7 @@ fn desktop_gallery_config(clock: Clock) -> EngineConfig {
         },
         viewport: Size::new(Points(1280.0), Points(820.0)),
         clock,
-        ..EngineConfig::new(Root::of::<UiGallery>().tokens(app_tokens()))
+        ..EngineConfig::new(windowed_root::<UiGallery>().tokens(app_tokens()))
     }
 }
 

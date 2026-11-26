@@ -755,8 +755,8 @@ mod tests {
     use std::time::Duration;
 
     use diving_core::{DockerAnalyzeResult, ImageDiff};
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::{DivingService, SharedRef};
@@ -870,7 +870,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(960.0), Points(640.0)),
-            ..EngineConfig::new(Root::of::<CollapsedHeaderHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<CollapsedHeaderHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start collapsed header harness");
         app.wait_for_within("label:New analysis", Duration::from_secs(3))

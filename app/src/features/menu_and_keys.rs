@@ -8,10 +8,15 @@ use nsh_core::prelude::*;
 use crate::domain::{AppRoute, AppState, InspectorTab, visible_layer_indices};
 use crate::i18n::{UiLang, t};
 
-/// Registers global keyboard bindings and reactive desktop menu items inside the root `App` owner.
+/// Registers global keyboard bindings and reactive desktop menu items inside the root owner.
 pub fn install_desktop_menus_and_keys(state: AppState) {
-    bind_global_keys(state.clone());
+    install_application_menu(state.clone());
+    bind_global_keys(state);
+}
 
+/// Registers reactive desktop menu items at the application root so the menu bar
+/// survives when desktop windows close.
+pub fn install_application_menu(state: AppState) {
     if os().is_desktop() {
         let menu_state = state;
         effect(move || {
@@ -38,7 +43,8 @@ pub fn install_desktop_menus_and_keys(state: AppState) {
     }
 }
 
-fn bind_global_keys(state: AppState) {
+/// Registers per-window global keyboard bindings inside the active window's reactive tree.
+pub fn bind_global_keys(state: AppState) {
     let always = KeyOptions {
         when: When::Always,
         ..Default::default()

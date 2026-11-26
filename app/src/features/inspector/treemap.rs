@@ -877,8 +877,8 @@ mod tests {
     use std::time::Duration;
 
     use diving_core::{Analyzer, FileTreeItem, ImageLayer, Op};
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::{DivingService, build_final_tree};
@@ -958,7 +958,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<TreemapAsyncAndTableHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<TreemapAsyncAndTableHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start treemap harness");
 
@@ -1040,7 +1040,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<TreemapShrinkHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<TreemapShrinkHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start treemap shrink harness");
         app.wait_for_within("item-00.dat", Duration::from_secs(2))

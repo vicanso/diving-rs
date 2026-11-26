@@ -238,7 +238,7 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                                             if digest.is_empty() {
                                                 return;
                                             }
-                                            set_clipboard(digest.clone());
+                                            drop(set_clipboard(digest.clone()));
                                             let next_seq = copy_seq.get_untracked().wrapping_add(1);
                                             copy_seq.set(next_seq);
                                             copied.set(true);
@@ -821,7 +821,7 @@ fn virtual_tree(
                     false,
                     move || {
                         if let Some(row) = rows.with(|r| r.get(at.index()).cloned()) {
-                            set_clipboard(row.key);
+                            drop(set_clipboard(row.key));
                         }
                     },
                 ))
@@ -885,8 +885,8 @@ mod tests {
 
     use diving_core::{Analyzer, FileTreeItem, ImageLayer, Op};
     use nsh_core::clipboard::{ClipboardBackend, MemoryClipboard};
-    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -990,7 +990,7 @@ mod tests {
             viewport: Size::new(Points(1280.0), Points(820.0)),
             clock: Clock::manual(SystemTime::UNIX_EPOCH),
             clipboard: Some(clipboard.clone()),
-            ..EngineConfig::new(Root::of::<FileTreeHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<FileTreeHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start file_tree harness");
 
@@ -1049,7 +1049,7 @@ mod tests {
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
             clock: Clock::manual(SystemTime::UNIX_EPOCH),
-            ..EngineConfig::new(Root::of::<FileTreeHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<FileTreeHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start file_tree debounce harness");
         app.wait_for_within("Copy digest", Duration::from_secs(2))
@@ -1124,7 +1124,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<FileTreeFocusNavHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<FileTreeFocusNavHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start file_tree focus nav harness");
         app.wait_for_within("app.conf", Duration::from_secs(2))

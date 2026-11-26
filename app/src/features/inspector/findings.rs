@@ -675,8 +675,8 @@ mod tests {
     use std::time::Duration;
 
     use diving_core::{Analyzer, Recommendation, UnstrippedBinary};
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -738,7 +738,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<FindingsI18nHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<FindingsI18nHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start findings harness");
         app.wait_for_within("HIGH", Duration::from_secs(2))

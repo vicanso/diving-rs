@@ -20,6 +20,7 @@
     "picker": true,
     "clipboard": true,
     "statusBar": true,
-    "openUrl": { "schemes": ["https", "http"] }
+    "openUrl": { "schemes": ["https", "http"] },
+    "windows": { "kinds": ["normal"], "max": 2 }
   }
 }

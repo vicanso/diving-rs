@@ -84,7 +84,9 @@ test("treemap renders light theme screenshot on macos", async () => {
   await app.type("Image reference input", FIXTURE_REF);
   await app.press("Analyze");
   await app.waitFor("Layers");
-  await app.press("Treemap");
+  // Upstream nsh-platform-macos 0.7.0 (`window.rs:289`) disables background title-bar
+  // click pass-through for `app_window()`; use `mod+2` here (`inspector_e2e` tests tab click).
+  await app.keyboard.press("mod+2");
   await app.waitFor("Root");
   await captureIfGraphical(app, ".nsh/out/treemap-light.png");
 });
@@ -99,7 +101,7 @@ test("treemap renders dark theme screenshot on macos", async () => {
   await app.type("Image reference input", FIXTURE_REF);
   await app.press("Analyze");
   await app.waitFor("Layers");
-  await app.press("Treemap");
+  await app.keyboard.press("mod+2");
   await app.waitFor("Root");
   await captureIfGraphical(app, ".nsh/out/treemap-dark.png");
 });
@@ -160,7 +162,7 @@ test("inspector renders cleanly with reducedMotion on macos", async () => {
   await app.type("Image reference input", FIXTURE_REF);
   await app.press("Analyze");
   await app.waitFor("Layers");
-  await app.press("Treemap");
+  await app.keyboard.press("mod+2");
   await app.waitFor("Root");
 });
 

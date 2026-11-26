@@ -631,8 +631,8 @@ fn picker_footer(state: AppState) -> impl IntoElement {
 mod tests {
     use std::time::Duration;
 
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -671,7 +671,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<LocalPickerHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<LocalPickerHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start local picker harness");
         app.wait_for_within("repo/service-00:latest", Duration::from_secs(3))

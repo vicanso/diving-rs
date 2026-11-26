@@ -14,7 +14,7 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
   IMAGE_NAME: vicanso/diving
-  NSH_VERSION: v0.6.1
+  NSH_VERSION: v0.7.0
   APP_NAME: Diving
   RUST_VERSION: "1.100.0"
 

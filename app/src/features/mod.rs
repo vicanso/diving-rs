@@ -18,7 +18,9 @@ pub use file_preview_sheet::file_preview_sheet;
 pub use inspector::inspector_workspace;
 pub use landing::landing_view;
 pub use local_picker::local_picker_dialog;
-pub use menu_and_keys::install_desktop_menus_and_keys;
+pub use menu_and_keys::{
+    bind_global_keys, install_application_menu, install_desktop_menus_and_keys,
+};
 pub use provenance_dialog::provenance_dialog;
 pub use sidebar::app_sidebar;
 pub use title_bar::content_header_bar;

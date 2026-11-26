@@ -1813,8 +1813,8 @@ mod tests {
         BaseLayerSkipReason, ChangeSet, ConfigDiff, DiffSide, FileChange, ImageDiff, ParityStatus,
         ParitySummary, Recommendation, RuntimeDiff, ScalarChange,
     };
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::{AppRoute, DivingService};
@@ -1990,7 +1990,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(820.0)),
-            ..EngineConfig::new(Root::of::<DiffVirtualScrollHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<DiffVirtualScrollHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start diff virtual scroll harness");
         app.wait_for_within("1 shared base layer (4.0 KiB)", Duration::from_secs(3))
@@ -2025,7 +2025,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(1280.0), Points(900.0)),
-            ..EngineConfig::new(Root::of::<CrossArchParityHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<CrossArchParityHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start cross arch parity harness");
         app.wait_for_within(
@@ -2183,7 +2183,7 @@ mod tests {
             },
             viewport: Size::new(Points(1280.0), Points(900.0)),
             ..EngineConfig::new(
-                Root::of::<ConfigLocalizationAndTruncationHarness>().tokens(app_tokens()),
+                windowed_root::<ConfigLocalizationAndTruncationHarness>().tokens(app_tokens()),
             )
         };
         let mut app = Headless::start(config).expect("start config/truncation harness");

@@ -9,7 +9,7 @@ This file provides guidance to coding agents when working with code in this repo
 - **`diving-app`** (`crates/diving-app`, published internal helper crate): shared YAML `~/.diving/config.yml` loader, AI report generation, multi-channel outbound notifications (WeCom, Feishu, DingTalk, Slack, generic webhook), logging, and `Analyzer` factories.
 - **`diving`** (`crates/diving`, published binary): standalone terminal TUI (ratatui) and CLI / CI gate / `diving diff` tool. Compiles without Node/yarn or web assets.
 - **`diving-web`** (`crates/diving-web`, `publish = false`): standalone Axum HTTP server, embedded React SPA (`web/` -> `crates/diving-web/dist/`), MCP `/mcp` endpoint, and inbound `POST /api/webhook` runner packaged in the `vicanso/diving` Docker image.
-- **`nsh-app-diving`** (`app/`, excluded from root Cargo workspace): standalone native desktop app (**Diving Desktop**, built with `nsh 0.6.1`) backed directly by `diving-core` & `diving-app`.
+- **`nsh-app-diving`** (`app/`, excluded from root Cargo workspace): standalone native desktop app (**Diving Desktop**, built with `nsh 0.7.0`) backed directly by `diving-core` & `diving-app`.
 
 The core engine fetches image metadata from registries (Docker Hub, private registries with credentials), a local docker/podman client, or saved images (`docker save` tar, OCI archive tar, OCI layout directory), decompresses layers, and provides detailed file-level visibility into what's consuming space.
 
@@ -43,7 +43,7 @@ make dev                # Run CLI/TUI mode with test image (redis:alpine)
 make dev-docker         # Run with local docker client
 make dev-ci             # Run with CI mode enabled
 
-# Native Desktop App (Diving Desktop via nsh 0.6.1)
+# Native Desktop App (Diving Desktop via nsh 0.7.0)
 make dev-app            # Run Diving Desktop on macOS (nsh run --target macos)
 make test-app           # Run fmt/clippy/Rust tests + nsh check + nsh test in app/
 make build-app          # Build desktop nsh runtime artifacts
@@ -137,7 +137,7 @@ The workspace separates the reusable analysis engine (`diving-core`) from applic
   - `ai.rs`, `notify.rs`, `wecom.rs`, `summary.rs`, `logging.rs`, `env_util.rs`
 - **`crates/diving/`**: Standalone CLI / TUI / CI binary (`src/main.rs`, `src/cli.rs`, `src/ui/*`)
 - **`crates/diving-web/`**: Standalone HTTP / MCP / Webhook binary + React SPA embed (`build.rs`, `src/{main,lib,state,error,http_util,dist,middleware,controller,mcp,webhook}.rs`)
-- **`app/`**: Native Desktop app (`nsh 0.6.1`, `DESIGN.md`, `theme.json`, `nsh.json`):
+- **`app/`**: Native Desktop app (`nsh 0.7.0`, `DESIGN.md`, `theme.json`, `nsh.json`):
   - `src/domain/`: pure derivations (`model.rs`, `treemap.rs`), Tokio `DivingService` (`service.rs`), persistent reactive `AppState` (`state.rs`)
   - `src/ui/`: token-backed component library (`theme.rs`, `motion.rs`, `button.rs`, `controls.rs`, `data.rs`, `input.rs`, `overlay.rs`, `tabs.rs`, `code.rs`, `gallery.rs`)
   - `src/features/`: desktop views & overlays (`sidebar.rs`, `title_bar.rs`, `landing.rs`, `inspector/{mod,layer_timeline,file_tree,treemap,findings,dockerfile}.rs`, `diff.rs`, `local_picker.rs`, `file_preview_sheet.rs`, `command_palette.rs`, `menu_and_keys.rs`)

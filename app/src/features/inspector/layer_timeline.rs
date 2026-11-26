@@ -201,7 +201,9 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                     Some(IconName::Copy),
                                     None,
                                     false,
-                                    move || set_clipboard(cmd_for_copy.clone()),
+                                    move || {
+                                        drop(set_clipboard(cmd_for_copy.clone()));
+                                    },
                                 ))
                                 .child(ui_menu_item(
                                     move || {
@@ -212,7 +214,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                     digest_empty,
                                     move || {
                                         if !digest_for_copy.is_empty() {
-                                            set_clipboard(digest_for_copy.clone());
+                                            drop(set_clipboard(digest_for_copy.clone()));
                                         }
                                     },
                                 ))
@@ -228,8 +230,8 @@ mod tests {
     use std::time::Duration;
 
     use diving_core::{Analyzer, ImageLayer};
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
-    use nsh_testing::Headless;
+    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_testing::{Headless, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
@@ -267,7 +269,7 @@ mod tests {
                 ..Default::default()
             },
             viewport: Size::new(Points(960.0), Points(640.0)),
-            ..EngineConfig::new(Root::of::<LayerTimelineHarness>().tokens(app_tokens()))
+            ..EngineConfig::new(windowed_root::<LayerTimelineHarness>().tokens(app_tokens()))
         };
         let mut app = Headless::start(config).expect("start layer_timeline harness");
         app.wait_for_within("Layers", Duration::from_secs(2))
