@@ -1428,9 +1428,12 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
     let list_ref = element_ref();
     let copy_state = state.clone();
 
-    list_ref.on_focus_in(move || list_focused.set(true));
-    list_ref.on_focus_out(move || list_focused.set(false));
-    cleanup(move || list_focused.set(false));
+    list_ref.on_focus_in(move || {
+        let _ = list_focused.try_set(true);
+    });
+    list_ref.on_focus_out(move || {
+        let _ = list_focused.try_set(false);
+    });
 
     let active_state = state.clone();
     let list_active = computed(move || {

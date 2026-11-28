@@ -366,17 +366,22 @@ fn global_progress_strip(state: AppState) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::panic::{self, Location};
+    use std::sync::{Arc, Mutex, Once};
     use std::time::Duration;
 
-    use diving_core::Op;
+    use diving_core::{DockerAnalyzeResult, ImageDiff, ImageLayer, Op};
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Root, Size};
     use nsh_testing::{Headless, windowed_root};
     use tar::{Builder, EntryType, Header};
     use tempfile::Builder as TempBuilder;
 
     use super::*;
-    use crate::domain::{FileTreeRow, LARGE_LAYER_BYTES};
+    use crate::domain::{
+        FileTreeRow, FsNode, InspectorTab, LARGE_LAYER_BYTES, SharedRef, TreemapViewMode,
+    };
     use crate::i18n::UiLang;
     use crate::ui::app_tokens;
 
@@ -826,5 +831,297 @@ mod tests {
         app.press("Close").expect("dismiss floating status notice");
         app.wait_for_gone("Saved to /tmp/report.md.", Duration::from_secs(3))
             .expect("floating status notice dismissed");
+    }
+
+    #[test]
+    fn more_actions_menu_trigger_owns_press_popup_state_and_opens_in_sidebar_and_collapsed_header()
+    {
+        let mut app = start_headless();
+
+        let assert_trigger_contract = |app: &mut Headless, location: &str| {
+            let trigger_id = app
+                .screen()
+                .id("label:More actions")
+                .unwrap_or_else(|err| panic!("{location}: missing More actions trigger: {err}"));
+            assert_eq!(
+                app.screen().press_target("label:More actions"),
+                Ok(Some(trigger_id)),
+                "{location}: Menu on_press must attach directly to the More actions button node"
+            );
+            let closed_a11y = app
+                .screen()
+                .accessibility_state("label:More actions")
+                .unwrap_or_else(|err| panic!("{location}: closed a11y state: {err}"));
+            assert!(
+                closed_a11y.has_popup,
+                "{location}: More actions trigger must advertise has_popup"
+            );
+            assert_eq!(
+                closed_a11y.expanded,
+                Some(false),
+                "{location}: closed trigger must report expanded=false"
+            );
+
+            app.press("label:More actions")
+                .unwrap_or_else(|err| panic!("{location}: press More actions: {err}"));
+            app.wait_for_within("role:menuitem[Registries…]", Duration::from_secs(3))
+                .unwrap_or_else(|err| panic!("{location}: open More actions menu: {err}"));
+            assert!(app.shows("Open local file…"));
+            assert!(app.shows("Clear local cache"));
+
+            let open_a11y = app
+                .screen()
+                .accessibility_state("label:More actions")
+                .unwrap_or_else(|err| panic!("{location}: open a11y state: {err}"));
+            assert_eq!(
+                open_a11y.expanded,
+                Some(true),
+                "{location}: open trigger must report expanded=true"
+            );
+
+            app.press("role:menuitem[Registries…]")
+                .unwrap_or_else(|err| panic!("{location}: select Registries… item: {err}"));
+            app.wait_for_within("Private Registries", Duration::from_secs(3))
+                .unwrap_or_else(|err| {
+                    panic!("{location}: Private Registries dialog opened: {err}")
+                });
+            app.press_key("escape")
+                .unwrap_or_else(|err| panic!("{location}: close Private Registries dialog: {err}"));
+            app.wait_for_gone("Private Registries", Duration::from_secs(3))
+                .unwrap_or_else(|err| {
+                    panic!("{location}: Private Registries dialog closed: {err}")
+                });
+        };
+
+        // 1. Sidebar expanded: bottom-left sidebar footer `...` trigger.
+        app.wait_for_within("New Analysis", Duration::from_secs(3))
+            .expect("sidebar expanded initially");
+        assert_trigger_contract(&mut app, "sidebar_footer");
+
+        // 2. Sidebar collapsed: top-right header utility `...` trigger.
+        app.press("label:Toggle sidebar").expect("collapse sidebar");
+        app.wait_for_gone("New Analysis", Duration::from_secs(3))
+            .expect("sidebar collapsed");
+        assert_trigger_contract(&mut app, "collapsed_utilities");
+    }
+
+    static INSTALL_DISPOSED_HOOK: Once = Once::new();
+    static DISPOSED_PANIC_LOCATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn ensure_disposed_panic_observer() {
+        INSTALL_DISPOSED_HOOK.call_once(|| {
+            let prev = panic::take_hook();
+            panic::set_hook(Box::new(move |info| {
+                let msg = info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("");
+                if msg.contains("after its owner was disposed") {
+                    let loc = info.location().map_or_else(
+                        || "<unknown>".to_owned(),
+                        |l: &Location<'_>| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+                    );
+                    if let Ok(mut guard) = DISPOSED_PANIC_LOCATIONS.lock() {
+                        guard.push(format!("{loc}: {msg}"));
+                    }
+                }
+                prev(info);
+            }));
+        });
+    }
+
+    #[component]
+    fn UnmountCleanupHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        provide_context(state.clone());
+
+        let res = Arc::new(DockerAnalyzeResult {
+            layers: vec![ImageLayer {
+                digest: "sha256:aaa1".to_owned(),
+                size: 128,
+                unpack_size: 256,
+                cmd: "COPY a.txt /".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let summary = SharedRef::new(res.summary());
+        let mut children = BTreeMap::new();
+        children.insert(
+            "a.txt".to_owned(),
+            FsNode {
+                name: "a.txt".to_owned(),
+                path: "a.txt".to_owned(),
+                size: 256,
+                layer: Some(0),
+                children: BTreeMap::new(),
+            },
+        );
+        let root_node = FsNode {
+            name: "/".to_owned(),
+            path: String::new(),
+            size: 256,
+            layer: None,
+            children,
+        };
+
+        state.result.set(Some(res));
+        state.summary.set(Some(summary));
+        state.final_tree.set(Some(SharedRef::new(root_node)));
+        state
+            .diff_result
+            .set(Some(SharedRef::new(ImageDiff::default())));
+        state.active_tab.set(InspectorTab::Treemap);
+        state.treemap_mode.set(TreemapViewMode::Table);
+        state.route.set(AppRoute::Inspector);
+
+        let open_picker = state.clone();
+        let close_picker = state.clone();
+        let open_table = state.clone();
+        let to_map = state.clone();
+        let open_diff = state.clone();
+        let leave_diff = state.clone();
+
+        let picker_state = state.clone();
+        let inspector_state = state.clone();
+        let diff_state = state;
+
+        view()
+            .flex_1()
+            .flex_col()
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(ui_button(
+                        "OpenPicker",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || open_picker.local_picker_open.set(true),
+                    ))
+                    .child(ui_button(
+                        "ClosePicker",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || close_picker.local_picker_open.set(false),
+                    ))
+                    .child(ui_button(
+                        "ShowTreemapTable",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            open_table.route.set(AppRoute::Inspector);
+                            open_table.active_tab.set(InspectorTab::Treemap);
+                            open_table.treemap_mode.set(TreemapViewMode::Table);
+                        },
+                    ))
+                    .child(ui_button(
+                        "SwitchTreemapToMap",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || to_map.treemap_mode.set(TreemapViewMode::Map),
+                    ))
+                    .child(ui_button(
+                        "ShowDiff",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || open_diff.route.set(AppRoute::Diff),
+                    ))
+                    .child(ui_button(
+                        "LeaveDiff",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || leave_diff.route.set(AppRoute::Landing),
+                    )),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .flex_col()
+                    .child(when(
+                        move || inspector_state.route.get() == AppRoute::Inspector,
+                        move || inspector_workspace(inspector_state.clone()),
+                    ))
+                    .child(when(
+                        move || diff_state.route.get() == AppRoute::Diff,
+                        move || diff_workspace(diff_state.clone()),
+                    )),
+            )
+            .child(local_picker_dialog(picker_state))
+    }
+
+    #[test]
+    fn unmounting_dialogs_and_virtual_lists_never_panics_in_cleanup() {
+        ensure_disposed_panic_observer();
+        let baseline = DISPOSED_PANIC_LOCATIONS
+            .lock()
+            .expect("panic hook mutex")
+            .len();
+
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<UnmountCleanupHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start unmount cleanup harness");
+        app.set_viewport(Size::new(Points(1280.0), Points(820.0)))
+            .expect("set viewport");
+
+        // 1. Open and close Local Images picker dialog.
+        app.press("OpenPicker").expect("open picker");
+        app.wait_for_within("Local Images", Duration::from_secs(3))
+            .expect("picker rendered");
+        app.press("ClosePicker").expect("close picker");
+        app.wait_for_gone("Local Images", Duration::from_secs(3))
+            .expect("picker unmounted");
+
+        // 2. Unmount Treemap Table view when switching back to Map view.
+        app.press("ShowTreemapTable").expect("show treemap table");
+        app.wait_for_within("Share", Duration::from_secs(3))
+            .expect("treemap table rendered");
+        app.press("SwitchTreemapToMap")
+            .expect("switch treemap back to map");
+        app.wait_for_gone("Share", Duration::from_secs(3))
+            .expect("treemap table unmounted");
+
+        // 3. Unmount Diff file changes panel when leaving Diff route.
+        app.press("ShowDiff").expect("show diff workspace");
+        app.wait_for_within("File Changes (0)", Duration::from_secs(3))
+            .expect("diff workspace rendered");
+        app.press("LeaveDiff").expect("leave diff workspace");
+        app.wait_for_gone("File Changes (0)", Duration::from_secs(3))
+            .expect("diff workspace unmounted");
+
+        let recorded =
+            DISPOSED_PANIC_LOCATIONS.lock().expect("panic hook mutex")[baseline..].to_vec();
+        assert!(
+            recorded.is_empty(),
+            "disposed-signal panics during unmount: {recorded:?}"
+        );
     }
 }

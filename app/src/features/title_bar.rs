@@ -10,11 +10,10 @@ use crate::domain::{
 use crate::features::arch_select_items;
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{UiLang, t, tf};
-use crate::ui::ui_menu_separator;
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, SelectItem, TabOption, UiSize, radius_control, theme,
     ui_bare_input_with_ref, ui_borderless_select, ui_button, ui_icon_button, ui_image_pill_button,
-    ui_menu, ui_menu_item, ui_menu_trigger_icon, ui_segmented, ui_tabs,
+    ui_menu, ui_menu_item, ui_menu_separator, ui_menu_trigger_icon_with_dot, ui_segmented, ui_tabs,
 };
 
 fn appearance_icon(appearance: Appearance) -> IconName {
@@ -50,29 +49,15 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let reg_state = state.clone();
     let clean_state = state;
 
-    let trigger = view()
-        .relative()
-        .child(ui_menu_trigger_icon(
-            IconName::More,
-            "More actions",
-            Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
-            ButtonVariant::Ghost,
-            size,
-            false,
-        ))
-        .child(when(
-            move || has_pending_update_indicator(&update_phase.get()),
-            move || {
-                view()
-                    .absolute()
-                    .top(px(2.0))
-                    .right(px(2.0))
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(move || theme().primary)
-                    .accessibility_elements_hidden(true)
-            },
-        ));
+    let trigger = ui_menu_trigger_icon_with_dot(
+        IconName::More,
+        "More actions",
+        Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
+        ButtonVariant::Ghost,
+        size,
+        false,
+        move || has_pending_update_indicator(&update_phase.get()),
+    );
 
     let menu = ui_menu(trigger)
         .child(ui_menu_item(

@@ -241,8 +241,12 @@ pub fn ui_search_input_with_escape(
         monospace,
         on_submit,
     )
-    .on_focus(move || focused.set(true))
-    .on_blur(move || focused.set(false));
+    .on_focus(move || {
+        let _ = focused.try_set(true);
+    })
+    .on_blur(move || {
+        let _ = focused.try_set(false);
+    });
 
     let esc_cb = on_escape.map(Rc::new);
     effect(move || {

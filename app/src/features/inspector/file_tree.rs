@@ -685,11 +685,17 @@ fn virtual_tree(
 
     let list_ref = element_ref();
     let focus_in_state = state.clone();
-    list_ref.on_focus_in(move || focus_in_state.file_tree_focused.set(true));
+    list_ref.on_focus_in(move || {
+        let _ = focus_in_state.file_tree_focused.try_set(true);
+    });
     let focus_out_state = state.clone();
-    list_ref.on_focus_out(move || focus_out_state.file_tree_focused.set(false));
+    list_ref.on_focus_out(move || {
+        let _ = focus_out_state.file_tree_focused.try_set(false);
+    });
     let cleanup_state = state.clone();
-    cleanup(move || cleanup_state.file_tree_focused.set(false));
+    cleanup(move || {
+        let _ = cleanup_state.file_tree_focused.try_set(false);
+    });
 
     let active_state = state.clone();
     let tree_active = computed(move || {

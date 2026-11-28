@@ -587,9 +587,12 @@ fn treemap_table_list(
     let table_focused = signal(false);
     let list_ref = element_ref();
 
-    list_ref.on_focus_in(move || table_focused.set(true));
-    list_ref.on_focus_out(move || table_focused.set(false));
-    cleanup(move || table_focused.set(false));
+    list_ref.on_focus_in(move || {
+        let _ = table_focused.try_set(true);
+    });
+    list_ref.on_focus_out(move || {
+        let _ = table_focused.try_set(false);
+    });
 
     let active_state = state.clone();
     let table_active = computed(move || {

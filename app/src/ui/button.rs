@@ -526,11 +526,11 @@ fn attach_menu_trigger_tooltip(
     });
 
     el.on_press_down(move || {
-        press_suppressed.set(true);
-        tooltip_open.set(false);
+        let _ = press_suppressed.try_set(true);
+        let _ = tooltip_open.try_set(false);
     })
     .on_mouse_leave(move |_: &MouseEvent| {
-        press_suppressed.set(false);
+        let _ = press_suppressed.try_set(false);
     })
     .tooltip(
         ui_tooltip(hint)
@@ -538,28 +538,29 @@ fn attach_menu_trigger_tooltip(
             .open(move || Some(tooltip_open.get() && !tooltip_suppressed.get()))
             .on_open_change(move |event: &TooltipEvent| {
                 if let TooltipEvent::OpenChange(next, _) = event {
-                    tooltip_open.set(*next && !tooltip_suppressed.get_untracked());
+                    let suppressed = menu_open.try_get().unwrap_or(true)
+                        || press_suppressed.try_get().unwrap_or(true);
+                    let _ = tooltip_open.try_set(*next && !suppressed);
                 }
             }),
     )
 }
 
-/// Renders a square icon-only trigger compatible with `ui_menu` (`nsh_base::menu().trigger(...)`).
-///
-/// Unlike [`ui_icon_button`], this renders a press-neutral `view()` without an inner `button()`
-/// press handler so `nsh_base::menu`'s own trigger `on_press` receives clicks directly.
-pub fn ui_menu_trigger_icon(
+#[allow(clippy::too_many_arguments)]
+fn build_menu_trigger_icon(
     icon: IconName,
     accessibility_label: impl Into<SharedString>,
     tooltip_text: Option<impl IntoReactive<SharedString>>,
     variant: ButtonVariant,
     size: UiSize,
     disabled: impl IntoReactive<bool>,
+    badge_dot: Option<Reactive<bool>>,
 ) -> impl IntoElement {
     let disabled = disabled.into_reactive();
     let disabled_focus = disabled.clone();
     let frame = size.min_height();
     let base = view()
+        .relative()
         .role(AccessibilityRole::Button)
         .label(accessibility_label.into())
         .focusable(move || !disabled_focus.get())
@@ -575,13 +576,75 @@ pub fn ui_menu_trigger_icon(
         .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
         .disabled_style(|s| s.opacity(0.45));
 
-    let base = attach_menu_trigger_tooltip(base, tooltip_text).child(ui_icon(
-        icon,
-        size.icon_size(),
-        move || button_fg(variant),
-    ));
+    let base = attach_menu_trigger_tooltip(base, tooltip_text)
+        .child(ui_icon(icon, size.icon_size(), move || button_fg(variant)))
+        .when_some(badge_dot, |el, show_dot| {
+            // Keep the dot inside the same trigger node so `nsh_base::menu`'s `on_press` stays
+            // on this node alongside `on_press_down`; otherwise `pick_press` captures clicks on
+            // the inner node and drops `on_press`.
+            el.child(when(
+                move || show_dot.get(),
+                move || {
+                    view()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(2.0))
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(move || theme().primary)
+                        .pointer_events(PointerEvents::None)
+                        .accessibility_elements_hidden(true)
+                },
+            ))
+        });
 
     apply_variant_styles(base, variant, PRESS_ICON_SCALE)
+}
+
+/// Renders a square icon-only trigger compatible with `ui_menu` (`nsh_base::menu().trigger(...)`).
+///
+/// Pass the returned element directly as `ui_menu(trigger)` without wrapping it in an outer
+/// `view()`. `attach_menu_trigger_tooltip` attaches `on_press_down` to this node, so any outer
+/// wrapper receiving `on_press` would be shadowed by `pick_press` on pointer clicks.
+pub fn ui_menu_trigger_icon(
+    icon: IconName,
+    accessibility_label: impl Into<SharedString>,
+    tooltip_text: Option<impl IntoReactive<SharedString>>,
+    variant: ButtonVariant,
+    size: UiSize,
+    disabled: impl IntoReactive<bool>,
+) -> impl IntoElement {
+    build_menu_trigger_icon(
+        icon,
+        accessibility_label,
+        tooltip_text,
+        variant,
+        size,
+        disabled,
+        None,
+    )
+}
+
+/// Renders [`ui_menu_trigger_icon`] with a top-right indicator dot kept inside the same trigger
+/// node so pointer presses, keyboard activation, and accessibility state remain intact.
+pub fn ui_menu_trigger_icon_with_dot(
+    icon: IconName,
+    accessibility_label: impl Into<SharedString>,
+    tooltip_text: Option<impl IntoReactive<SharedString>>,
+    variant: ButtonVariant,
+    size: UiSize,
+    disabled: impl IntoReactive<bool>,
+    show_dot: impl IntoReactive<bool>,
+) -> impl IntoElement {
+    build_menu_trigger_icon(
+        icon,
+        accessibility_label,
+        tooltip_text,
+        variant,
+        size,
+        disabled,
+        Some(show_dot.into_reactive()),
+    )
 }
 
 /// Renders an external resource link (the only control allowed to use pointing-hand cursor).

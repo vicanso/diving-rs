@@ -78,13 +78,16 @@ fn picker_body(state: AppState) -> impl IntoElement {
     let filter_ref = element_ref();
     let list_ref = element_ref();
     let list_focused = signal(false);
-    list_ref.on_focus_in(move || list_focused.set(true));
-    list_ref.on_focus_out(move || list_focused.set(false));
+    list_ref.on_focus_in(move || {
+        let _ = list_focused.try_set(true);
+    });
+    list_ref.on_focus_out(move || {
+        let _ = list_focused.try_set(false);
+    });
     let focus_alive = Arc::new(AtomicBool::new(true));
     let focus_cleanup_alive = focus_alive.clone();
     cleanup(move || {
         focus_cleanup_alive.store(false, Ordering::SeqCst);
-        list_focused.set(false);
     });
 
     let focus_target = filter_ref;
