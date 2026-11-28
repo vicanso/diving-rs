@@ -15,7 +15,7 @@ use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, SegmentOption, UiSize, file_kind_icon, theme,
     ui_archive_viewer, ui_badge, ui_banner, ui_button, ui_code_viewer, ui_empty_state,
     ui_hex_viewer, ui_image_stage, ui_segmented, ui_separator, ui_sheet, ui_skeleton,
-    ui_structured_viewer,
+    ui_structured_viewer, ui_switch,
 };
 
 fn save_as_disabled(state: &AppState) -> bool {
@@ -28,7 +28,11 @@ fn save_as_disabled(state: &AppState) -> bool {
             .is_some_and(|target| target.mode.starts_with('l'))
 }
 
-fn copyable_payload(content: Option<&FilePreviewContent>, secondary_mode: bool) -> Option<String> {
+fn copyable_payload(
+    content: Option<&FilePreviewContent>,
+    secondary_mode: bool,
+    raw_svg_source: bool,
+) -> Option<String> {
     match content? {
         FilePreviewContent::Text {
             text,
@@ -41,7 +45,20 @@ fn copyable_payload(content: Option<&FilePreviewContent>, secondary_mode: bool) 
                 Some(text.clone())
             }
         }
-        FilePreviewContent::Svg { source, .. } => Some(source.clone()),
+        FilePreviewContent::Svg {
+            source,
+            formatted_source,
+            ..
+        } => {
+            if secondary_mode
+                && !raw_svg_source
+                && let Some(formatted) = formatted_source
+            {
+                Some(formatted.clone())
+            } else {
+                Some(source.clone())
+            }
+        }
         FilePreviewContent::Image { hex_dump, .. } => secondary_mode.then(|| hex_dump.clone()),
         FilePreviewContent::Archive {
             report_text,
@@ -172,6 +189,8 @@ fn sheet_body(state: AppState) -> impl IntoElement {
     let copied = signal(false);
     let copy_seq = signal(0_u64);
     let secondary_mode = signal(false);
+    let raw_svg_source = signal(false);
+    let soft_wrap = signal(true);
     let image_fit = signal(true);
 
     let header_state = state.clone();
@@ -185,6 +204,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
         copy_seq.set(copy_seq.get_untracked().wrapping_add(1));
         copied.set(false);
         secondary_mode.set(false);
+        raw_svg_source.set(false);
         image_fit.set(true);
     });
 
@@ -275,6 +295,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                     copyable_payload(
                                         btn_state.preview_content.get().as_ref(),
                                         secondary_mode.get(),
+                                        raw_svg_source.get(),
                                     )
                                     .is_none()
                                 },
@@ -283,6 +304,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                     let payload = copyable_payload(
                                         copy_action_state.preview_content.get_untracked().as_ref(),
                                         secondary_mode.get_untracked(),
+                                        raw_svg_source.get_untracked(),
                                     );
                                     if let Some(body) = payload {
                                         drop(set_clipboard(body));
@@ -318,9 +340,26 @@ fn sheet_body(state: AppState) -> impl IntoElement {
             let Some(preview_ref) = content.as_ref() else {
                 return view().into_element();
             };
-            let Some((primary_key, secondary_key)) = mode_labels(preview_ref) else {
-                return view().into_element();
+            let is_symlink = toolbar_state
+                .preview_target
+                .get()
+                .is_some_and(|t| t.mode.starts_with('l'));
+            let modes = mode_labels(preview_ref);
+            let show_wrap = match preview_ref {
+                FilePreviewContent::Text { .. } => !is_symlink,
+                FilePreviewContent::Svg { .. } => true,
+                _ => false,
             };
+            if modes.is_none() && !show_wrap {
+                return view().into_element();
+            }
+            let show_svg_format_toggle = matches!(
+                preview_ref,
+                FilePreviewContent::Svg {
+                    formatted_source: Some(_),
+                    ..
+                }
+            );
             let show_fit = match preview_ref {
                 FilePreviewContent::Image { meta, data_uri, .. } => {
                     data_uri.is_some() && meta.width.is_some() && meta.height.is_some()
@@ -337,41 +376,113 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(ui_segmented(
-                    vec![
-                        SegmentOption::new(false, move || {
-                            SharedString::from(t(lang.get(), primary_key))
-                        }),
-                        SegmentOption::new(true, move || {
-                            SharedString::from(t(lang.get(), secondary_key))
-                        }),
-                    ],
-                    secondary_mode,
-                    UiSize::Xs,
-                    "Switch preview display mode",
-                    move |mode| secondary_mode.set(mode),
-                ))
-                .when(show_fit, |row| {
-                    row.child(when(
-                        move || !secondary_mode.get(),
-                        move || {
-                            ui_segmented(
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .when_some(modes, |row, (primary_key, secondary_key)| {
+                            row.child(ui_segmented(
                                 vec![
-                                    SegmentOption::new(true, move || {
-                                        SharedString::from(t(lang.get(), "sheet.fit_window"))
-                                    }),
                                     SegmentOption::new(false, move || {
-                                        SharedString::from(t(lang.get(), "sheet.actual_size"))
+                                        SharedString::from(t(lang.get(), primary_key))
+                                    }),
+                                    SegmentOption::new(true, move || {
+                                        SharedString::from(t(lang.get(), secondary_key))
                                     }),
                                 ],
-                                image_fit,
+                                secondary_mode,
                                 UiSize::Xs,
-                                "Toggle image fit or actual size",
-                                move |fit| image_fit.set(fit),
-                            )
-                        },
-                    ))
-                })
+                                "Switch preview display mode",
+                                move |mode| secondary_mode.set(mode),
+                            ))
+                        })
+                        .when(show_svg_format_toggle, |row| {
+                            row.child(when(
+                                move || secondary_mode.get(),
+                                move || {
+                                    ui_segmented(
+                                        vec![
+                                            SegmentOption::new(false, move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "sheet.mode_formatted",
+                                                ))
+                                            }),
+                                            SegmentOption::new(true, move || {
+                                                SharedString::from(t(lang.get(), "sheet.mode_raw"))
+                                            }),
+                                        ],
+                                        raw_svg_source,
+                                        UiSize::Xs,
+                                        "Switch SVG source formatting mode",
+                                        move |raw| raw_svg_source.set(raw),
+                                    )
+                                },
+                            ))
+                        }),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .when(show_fit, |row| {
+                            row.child(when(
+                                move || !secondary_mode.get(),
+                                move || {
+                                    ui_segmented(
+                                        vec![
+                                            SegmentOption::new(true, move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "sheet.fit_window",
+                                                ))
+                                            }),
+                                            SegmentOption::new(false, move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "sheet.actual_size",
+                                                ))
+                                            }),
+                                        ],
+                                        image_fit,
+                                        UiSize::Xs,
+                                        "Toggle image fit or actual size",
+                                        move |fit| image_fit.set(fit),
+                                    )
+                                },
+                            ))
+                        })
+                        .when(show_wrap, |row| {
+                            if matches!(preview_ref, FilePreviewContent::Svg { .. }) {
+                                row.child(when(
+                                    move || secondary_mode.get(),
+                                    move || {
+                                        ui_switch(
+                                            move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "sheet.wrap_lines",
+                                                ))
+                                            },
+                                            soft_wrap,
+                                            false,
+                                            move |v| soft_wrap.set(v),
+                                        )
+                                    },
+                                ))
+                            } else {
+                                row.child(ui_switch(
+                                    move || SharedString::from(t(lang.get(), "sheet.wrap_lines")),
+                                    soft_wrap,
+                                    false,
+                                    move |v| soft_wrap.set(v),
+                                ))
+                            }
+                        }),
+                )
                 .into_element()
         }))
         .child(ui_separator())
@@ -453,6 +564,7 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                             total_size,
                             truncated,
                         }) => {
+                            let is_auto_formatted = !is_secondary && formatted_text.is_some();
                             let displayed = if !is_secondary && let Some(pretty) = formatted_text {
                                 pretty
                             } else {
@@ -494,23 +606,96 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                         None,
                                     ))
                                 })
+                                .when(is_auto_formatted, |col| {
+                                    col.child(ui_banner(
+                                        BannerTone::Info,
+                                        move || {
+                                            SharedString::from(t(
+                                                lang.get(),
+                                                "sheet.auto_formatted",
+                                            ))
+                                        },
+                                        Some(
+                                            ui_button(
+                                                move || {
+                                                    SharedString::from(t(
+                                                        lang.get(),
+                                                        "sheet.view_raw_data",
+                                                    ))
+                                                },
+                                                ButtonVariant::Outline,
+                                                UiSize::Xs,
+                                                None,
+                                                false,
+                                                false,
+                                                move || secondary_mode.set(true),
+                                            )
+                                            .into_element(),
+                                        ),
+                                    ))
+                                })
                                 .child(ui_code_viewer(
                                     Some(SharedString::from(displayed)),
                                     language.map(SharedString::from),
-                                    true,
+                                    soft_wrap,
                                     "File text content viewer",
                                 ))
                                 .into_element()
                         }
-                        Some(FilePreviewContent::Svg { meta, source, .. }) => {
+                        Some(FilePreviewContent::Svg {
+                            meta,
+                            source,
+                            formatted_source,
+                            ..
+                        }) => {
                             if is_secondary {
-                                ui_code_viewer(
-                                    Some(SharedString::from(source)),
-                                    Some(SharedString::from("xml")),
-                                    true,
-                                    "SVG XML source viewer",
-                                )
-                                .into_element()
+                                let is_raw = raw_svg_source.get();
+                                let is_auto_formatted = !is_raw && formatted_source.is_some();
+                                let displayed = if !is_raw && let Some(pretty) = formatted_source {
+                                    pretty
+                                } else {
+                                    source
+                                };
+                                view()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .flex_col()
+                                    .gap_2()
+                                    .when(is_auto_formatted, |col| {
+                                        col.child(ui_banner(
+                                            BannerTone::Info,
+                                            move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "sheet.auto_formatted",
+                                                ))
+                                            },
+                                            Some(
+                                                ui_button(
+                                                    move || {
+                                                        SharedString::from(t(
+                                                            lang.get(),
+                                                            "sheet.view_raw_data",
+                                                        ))
+                                                    },
+                                                    ButtonVariant::Outline,
+                                                    UiSize::Xs,
+                                                    None,
+                                                    false,
+                                                    false,
+                                                    move || raw_svg_source.set(true),
+                                                )
+                                                .into_element(),
+                                            ),
+                                        ))
+                                    })
+                                    .child(ui_code_viewer(
+                                        Some(SharedString::from(displayed)),
+                                        Some(SharedString::from("xml")),
+                                        soft_wrap,
+                                        "SVG XML source viewer",
+                                    ))
+                                    .into_element()
                             } else {
                                 let dim = meta.width.zip(meta.height);
                                 ui_image_stage(
@@ -1016,6 +1201,7 @@ mod tests {
 
         let s_svg = state.clone();
         let s_json = state.clone();
+        let s_js = state.clone();
         let s_elf = state.clone();
         let s_gz = state.clone();
         let s_tar = state.clone();
@@ -1080,6 +1266,33 @@ mod tests {
                                 "static/version.json",
                                 json_bytes,
                                 json_bytes.len() as u64,
+                            )));
+                        },
+                    ))
+                    .child(ui_button(
+                        "Load JS",
+                        ButtonVariant::Outline,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            let js_bytes = br#"import{a as b}from"./c.js";const run=(x)=>{const z=x*2;return z};for(let i=0;i<3;i++){console.log("step",i,run(i))}const extra={enabled:true,retries:3};export{run,extra};"#;
+                            s_js.preview_target.set(Some(PreviewTarget {
+                                image_ref: "demo:v1".to_owned(),
+                                layer_index: 0,
+                                layer_digest: "sha256:abc".to_owned(),
+                                media_type: String::new(),
+                                path: "static/account.module.js".to_owned(),
+                                size: js_bytes.len() as u64,
+                                mode: "-rw-r--r--".to_owned(),
+                                uid: 0,
+                                gid: 0,
+                            }));
+                            s_js.preview_content.set(Some(classify_file_preview(
+                                "static/account.module.js",
+                                js_bytes,
+                                js_bytes.len() as u64,
                             )));
                         },
                     ))
@@ -1256,6 +1469,27 @@ mod tests {
             Duration::from_secs(2),
         )
         .expect("raw JSON visible");
+
+        app.press("Load JS").expect("switch target to minified JS");
+        app.wait_until("auto-formatted notice", Duration::from_secs(2), |s| {
+            screen_contains(s, "Auto-formatted for readability")
+        })
+        .expect("minified JS auto-formatted banner visible");
+        assert!(screen_contains(app.screen(), "  const z=x*2;"));
+        app.press("View raw data")
+            .expect("switch minified JS to raw data");
+        app.wait_until("raw JS line", Duration::from_secs(2), |s| {
+            screen_contains(s, "const run=(x)=>{const z=x*2;return z};")
+        })
+        .expect("raw minified JS visible");
+        app.press("Copy").expect("copy raw JS");
+        assert!(
+            clipboard
+                .text()
+                .as_deref()
+                .unwrap_or_default()
+                .contains("const run=(x)=>{const z=x*2;return z};")
+        );
 
         app.press("Load ELF").expect("switch target to ELF binary");
         app.wait_for_within("x86_64 (AMD64)", Duration::from_secs(2))

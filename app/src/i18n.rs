@@ -343,6 +343,13 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("sheet.mode_source", "Source", "源码"),
     ("sheet.mode_formatted", "Formatted", "格式化"),
     ("sheet.mode_raw", "Raw", "原始"),
+    (
+        "sheet.auto_formatted",
+        "Auto-formatted for readability — switch to Raw to inspect exact file contents.",
+        "当前已自动格式化以便阅读 — 切换到「原始」可查看真实文件内容。",
+    ),
+    ("sheet.view_raw_data", "View raw data", "查看原始数据"),
+    ("sheet.wrap_lines", "Wrap", "自动换行"),
     ("sheet.mode_contents", "Contents", "目录内容"),
     ("sheet.mode_inspector", "Inspector", "结构信息"),
     ("sheet.fit_window", "Fit", "适应窗口"),

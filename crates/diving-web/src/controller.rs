@@ -343,6 +343,7 @@ fn build_preview_for_path(file_path: &str, head: &[u8], size: u64) -> FilePrevie
         InspectedPreview::Svg {
             meta,
             source,
+            formatted_source,
             truncated,
         } => FilePreview {
             size,
@@ -352,7 +353,7 @@ fn build_preview_for_path(file_path: &str, head: &[u8], size: u64) -> FilePrevie
             kind: FilePreviewKind::Svg,
             language: Some("xml"),
             compression: None,
-            formatted_content: None,
+            formatted_content: formatted_source,
             image: Some(meta),
             media: None,
             archive: None,
@@ -599,11 +600,28 @@ mod tests {
         assert_eq!(meta.width, Some(64));
         assert_eq!(meta.height, Some(32));
 
-        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24"/></svg>"#;
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none"><rect width="24" height="24"/><circle cx="12" cy="12" r="8"/></g></svg>"#;
         let svg_preview = build_preview_for_path("icons/box.svg", svg, svg.len() as u64);
         assert_eq!(svg_preview.kind, FilePreviewKind::Svg);
         assert_eq!(svg_preview.language, Some("xml"));
         assert!(!svg_preview.binary);
+        assert!(svg_preview
+            .formatted_content
+            .as_deref()
+            .unwrap()
+            .contains("\n  <g fill=\"none\">"));
+
+        let min_js = br#"import{a as b}from"./c.js";const run=(x)=>{const z=x*2;return z};for(let i=0;i<3;i++){console.log("step",i,run(i))}const extra={enabled:true,retries:3};export{run,extra};"#;
+        let js_preview =
+            build_preview_for_path("static/app.module.js", min_js, min_js.len() as u64);
+        assert_eq!(js_preview.kind, FilePreviewKind::Text);
+        assert_eq!(js_preview.language, Some("javascript"));
+        assert_eq!(js_preview.content.as_bytes(), min_js);
+        assert!(js_preview
+            .formatted_content
+            .as_deref()
+            .unwrap()
+            .contains('\n'));
 
         let json_bytes = br#"{"name":"diving","version":"0.12.3"}"#;
         let json_preview =

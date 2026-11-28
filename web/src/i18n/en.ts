@@ -64,6 +64,9 @@ export default {
   previewModeSource: "Source",
   previewModeFormatted: "Formatted",
   previewModeRaw: "Raw",
+  previewAutoFormatted:
+    "Auto-formatted for readability — switch to Raw to inspect exact file contents.",
+  previewViewRawAction: "View raw data",
   previewModeContents: "Contents",
   previewModeInspector: "Inspector",
   previewDecompressed: "Decompressed from {codec} archive stream.",

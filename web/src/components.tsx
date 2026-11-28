@@ -257,6 +257,7 @@ const FilePreviewModal = ({
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [error, setError] = useState("");
   const [mode, setMode] = useState<"primary" | "secondary">("primary");
+  const [rawSvgSource, setRawSvgSource] = useState(false);
   const [wrapText, setWrapText] = useState(true);
   const [copied, setCopied] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
@@ -270,6 +271,7 @@ const FilePreviewModal = ({
     setPreview(null);
     setError("");
     setMode("primary");
+    setRawSvgSource(false);
     setCopied(false);
     setMediaUrl(null);
     setMediaError("");
@@ -363,6 +365,11 @@ const FilePreviewModal = ({
     ? preview.kind ?? (preview.binary ? "binary" : "text")
     : undefined;
   const hasFormattedText = kind === "text" && !!preview?.formattedContent;
+  const hasFormattedSvgSource =
+    kind === "svg" && mode === "secondary" && !!preview?.formattedContent;
+  const isShowingAutoFormatted =
+    (hasFormattedText && mode === "primary") ||
+    (hasFormattedSvgSource && !rawSvgSource);
   const isTextView =
     kind === "text" || (kind === "svg" && mode === "secondary");
   const isHexView =
@@ -424,7 +431,10 @@ const FilePreviewModal = ({
           ? preview.formattedContent
           : preview.content;
     } else if (kind === "svg" && mode === "secondary") {
-      copyPayload = preview.content;
+      copyPayload =
+        !rawSvgSource && preview.formattedContent
+          ? preview.formattedContent
+          : preview.content;
     } else if (kind === "archive") {
       copyPayload = formatArchiveText(preview.archive);
     } else if (kind === "structured") {
@@ -448,7 +458,9 @@ const FilePreviewModal = ({
       ? mode === "primary" && preview?.formattedContent
         ? preview.formattedContent
         : preview?.content ?? ""
-      : preview?.content ?? "";
+      : kind === "svg" && mode === "secondary" && !rawSvgSource && preview?.formattedContent
+        ? preview.formattedContent
+        : preview?.content ?? "";
 
   return (
     <Modal
@@ -511,6 +523,17 @@ const FilePreviewModal = ({
             />
           )}
           <div className="filePreviewToolbarActions">
+            {hasFormattedSvgSource && (
+              <Segmented
+                size="small"
+                value={rawSvgSource ? "raw" : "formatted"}
+                options={[
+                  { label: i18nGet("previewModeFormatted"), value: "formatted" },
+                  { label: i18nGet("previewModeRaw"), value: "raw" },
+                ]}
+                onChange={(val) => setRawSvgSource(val === "raw")}
+              />
+            )}
             {isTextView && (
               <Checkbox
                 checked={wrapText}
@@ -530,6 +553,24 @@ const FilePreviewModal = ({
       {error && <Alert type="error" showIcon title={error} />}
       {!preview && !error && <Spin />}
       {notice && <p className="filePreviewNotice">{notice}</p>}
+      {isShowingAutoFormatted && (
+        <div className="filePreviewAutoFormatNotice">
+          <span>{i18nGet("previewAutoFormatted")}</span>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => {
+              if (kind === "svg") {
+                setRawSvgSource(true);
+              } else {
+                setMode("secondary");
+              }
+            }}
+          >
+            {i18nGet("previewViewRawAction")}
+          </Button>
+        </div>
+      )}
       {preview && kind === "empty" && (
         <p className="filePreviewNotice">{i18nGet("previewEmpty")}</p>
       )}

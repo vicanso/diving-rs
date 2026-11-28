@@ -65,6 +65,9 @@ export default {
   previewModeSource: "源码",
   previewModeFormatted: "格式化",
   previewModeRaw: "原始",
+  previewAutoFormatted:
+    "当前已自动格式化以便阅读 — 切换到「原始」可查看真实文件内容。",
+  previewViewRawAction: "查看原始数据",
   previewModeContents: "目录内容",
   previewModeInspector: "结构信息",
   previewDecompressed: "已自动解压 {codec} 内容进行预览。",

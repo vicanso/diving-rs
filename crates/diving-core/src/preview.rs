@@ -32,6 +32,8 @@ pub const PREVIEW_TEXT_LIMIT: u64 = 256 * 1024;
 pub const PREVIEW_RICH_LIMIT: u64 = 16 * 1024 * 1024;
 /// Maximum bytes decompressed when previewing `.gz` / `.zst` single files.
 pub const PREVIEW_DECOMPRESSED_TEXT_LIMIT: usize = 256 * 1024;
+/// Maximum text bytes eligible for lexical JS/CSS/markup beautification.
+const MAX_BEAUTIFY_CODE_BYTES: usize = 512 * 1024;
 /// Maximum archive entries returned by inline TAR/ZIP inspection.
 pub const PREVIEW_ARCHIVE_MAX_ENTRIES: usize = 500;
 /// Maximum compressed/tar stream bytes scanned during nested archive listing.
@@ -130,6 +132,7 @@ pub enum InspectedPreview {
     Svg {
         meta: ImagePreviewMeta,
         source: String,
+        formatted_source: Option<String>,
         truncated: bool,
     },
     Media {
@@ -436,19 +439,21 @@ fn classify_utf8_text(
 ) -> InspectedPreview {
     if !truncated && looks_like_svg(path, &text) {
         let meta = parse_svg_meta(&text);
+        let formatted_source = if text.len() <= MAX_BEAUTIFY_CODE_BYTES && looks_minified(&text) {
+            beautify_markup(&text)
+        } else {
+            None
+        };
         return InspectedPreview::Svg {
             meta,
             source: text,
+            formatted_source,
             truncated: false,
         };
     }
 
     let language = detect_code_language(path);
-    let formatted_text = if !truncated && language == Some("json") && text.len() <= 1_048_576 {
-        pretty_json(&text)
-    } else {
-        None
-    };
+    let formatted_text = format_minified_text(language, &text, truncated);
     let shown_bytes = text.len() as u64;
 
     InspectedPreview::Text {
@@ -469,6 +474,830 @@ fn pretty_json(text: &str) -> Option<String> {
         None
     } else {
         Some(pretty)
+    }
+}
+
+fn looks_minified(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.len() < 120 {
+        return false;
+    }
+    let mut non_empty_lines = 0_usize;
+    let mut total_bytes = 0_usize;
+    let mut long_line_bytes = 0_usize;
+    for line in trimmed.lines() {
+        let line_trimmed = line.trim();
+        if line_trimmed.is_empty() {
+            continue;
+        }
+        non_empty_lines += 1;
+        let len = line.len();
+        total_bytes += len;
+        if len > 180 {
+            long_line_bytes += len;
+        }
+    }
+    if non_empty_lines == 0 {
+        return false;
+    }
+    if non_empty_lines <= 3 && trimmed.len() >= 140 {
+        return true;
+    }
+    if total_bytes / non_empty_lines > 160 {
+        return true;
+    }
+    long_line_bytes.saturating_mul(100) / total_bytes.max(1) >= 65
+}
+
+fn format_minified_text(language: Option<&str>, text: &str, truncated: bool) -> Option<String> {
+    match language {
+        Some("json") if !truncated && text.len() <= 1_048_576 => pretty_json(text),
+        Some("javascript" | "typescript" | "jsx" | "tsx")
+            if text.len() <= MAX_BEAUTIFY_CODE_BYTES && looks_minified(text) =>
+        {
+            beautify_js_like(text)
+        }
+        Some("css") if text.len() <= MAX_BEAUTIFY_CODE_BYTES && looks_minified(text) => {
+            beautify_css(text)
+        }
+        Some("xml" | "html")
+            if !truncated && text.len() <= MAX_BEAUTIFY_CODE_BYTES && looks_minified(text) =>
+        {
+            beautify_markup(text)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BraceFrame {
+    Block(usize),
+    TemplateExpr,
+}
+
+fn push_indent(out: &mut String, depth: usize) {
+    for _ in 0..depth.min(24) {
+        out.push_str("  ");
+    }
+}
+
+fn next_non_space(chars: &[char], mut idx: usize) -> Option<(usize, char)> {
+    while let Some(&ch) = chars.get(idx) {
+        if !matches!(ch, ' ' | '\t') {
+            return Some((idx, ch));
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn next_non_ws(chars: &[char], mut idx: usize) -> Option<(usize, char)> {
+    while let Some(&ch) = chars.get(idx) {
+        if !ch.is_whitespace() {
+            return Some((idx, ch));
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn ends_with_space_or_opener(out: &str) -> bool {
+    matches!(
+        out.chars().next_back(),
+        None | Some(' ' | '\t' | '\n' | '(' | '[' | '{')
+    )
+}
+
+fn allows_regex_after(prev_sig: Option<char>, prev_was_inc_dec: bool, last_word: &str) -> bool {
+    if prev_was_inc_dec {
+        return false;
+    }
+    if let Some(ch) = prev_sig {
+        if matches!(
+            ch,
+            '(' | '['
+                | '{'
+                | ','
+                | ';'
+                | ':'
+                | '='
+                | '!'
+                | '&'
+                | '|'
+                | '?'
+                | '+'
+                | '-'
+                | '*'
+                | '%'
+                | '^'
+                | '~'
+                | '<'
+                | '>'
+                | '/'
+        ) {
+            return true;
+        }
+    } else {
+        return true;
+    }
+    matches!(
+        last_word,
+        "return"
+            | "typeof"
+            | "void"
+            | "delete"
+            | "throw"
+            | "case"
+            | "in"
+            | "of"
+            | "instanceof"
+            | "new"
+            | "yield"
+            | "await"
+            | "else"
+            | "do"
+    )
+}
+
+fn scan_regex_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut in_class = false;
+    let mut has_body = false;
+    while let Some(&ch) = chars.get(i) {
+        if ch == '\n' || ch == '\r' {
+            return None;
+        }
+        if ch == '\\' {
+            has_body = true;
+            i += 2;
+            continue;
+        }
+        if ch == '[' {
+            in_class = true;
+            has_body = true;
+        } else if ch == ']' && in_class {
+            in_class = false;
+        } else if ch == '/' && !in_class {
+            if !has_body {
+                return None;
+            }
+            let mut end = i + 1;
+            while let Some(&flag) = chars.get(end) {
+                if flag.is_ascii_alphabetic() {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            return Some(end);
+        } else {
+            has_body = true;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
+}
+
+fn scan_template_segment(
+    chars: &[char],
+    mut i: usize,
+    out: &mut String,
+    max_out: usize,
+) -> (usize, bool) {
+    while let Some(&ch) = chars.get(i) {
+        if out.len() > max_out {
+            return (i, false);
+        }
+        if ch == '\\' {
+            out.push(ch);
+            if let Some(&esc) = chars.get(i + 1) {
+                out.push(esc);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '$' && chars.get(i + 1) == Some(&'{') {
+            out.push_str("${");
+            return (i + 2, true);
+        }
+        out.push(ch);
+        i += 1;
+        if ch == '`' {
+            return (i, false);
+        }
+    }
+    (i, false)
+}
+
+fn beautify_js_like(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let max_out = (text.len().saturating_mul(4) + 4096).min(2 * 1024 * 1024);
+    let mut out = String::with_capacity(text.len().saturating_mul(2).min(max_out));
+    let mut i = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_stack: Vec<BraceFrame> = Vec::new();
+    let mut at_line_start = true;
+    let mut prev_sig: Option<char> = None;
+    let mut prev_was_inc_dec = false;
+    let mut last_word = String::new();
+
+    let block_depth = |stack: &[BraceFrame]| -> usize {
+        stack
+            .iter()
+            .filter(|f| matches!(f, BraceFrame::Block(_)))
+            .count()
+    };
+
+    while let Some(&ch) = chars.get(i) {
+        if out.len() > max_out || brace_stack.len() > 128 {
+            return None;
+        }
+
+        if ch == '\r' || ch == '\n' {
+            if !at_line_start {
+                out.push('\n');
+                at_line_start = true;
+            }
+            if ch == '\r' && chars.get(i + 1) == Some(&'\n') {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if matches!(ch, ' ' | '\t') {
+            if !at_line_start && !ends_with_space_or_opener(&out) {
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+
+        if at_line_start && ch != '}' {
+            push_indent(&mut out, block_depth(&brace_stack));
+            at_line_start = false;
+        }
+
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            out.push(ch);
+            i += 1;
+            while let Some(&qch) = chars.get(i) {
+                out.push(qch);
+                i += 1;
+                if qch == '\\' {
+                    if let Some(&esc) = chars.get(i) {
+                        out.push(esc);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if qch == quote {
+                    break;
+                }
+            }
+            prev_sig = Some(quote);
+            prev_was_inc_dec = false;
+            last_word.clear();
+            continue;
+        }
+
+        if ch == '`' {
+            out.push('`');
+            i += 1;
+            let (next_i, entered_expr) = scan_template_segment(&chars, i, &mut out, max_out);
+            i = next_i;
+            if entered_expr {
+                brace_stack.push(BraceFrame::TemplateExpr);
+                prev_sig = Some('{');
+            } else {
+                prev_sig = Some('`');
+            }
+            prev_was_inc_dec = false;
+            last_word.clear();
+            continue;
+        }
+
+        if ch == '/' && chars.get(i + 1) == Some(&'/') {
+            while let Some(&cch) = chars.get(i) {
+                if cch == '\r' || cch == '\n' {
+                    break;
+                }
+                out.push(cch);
+                i += 1;
+            }
+            out.push('\n');
+            at_line_start = true;
+            if let Some(&nl) = chars.get(i) {
+                if nl == '\r' && chars.get(i + 1) == Some(&'\n') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        if ch == '/' && chars.get(i + 1) == Some(&'*') {
+            out.push_str("/*");
+            i += 2;
+            let mut has_newline = false;
+            while let Some(&cch) = chars.get(i) {
+                if cch == '\n' {
+                    has_newline = true;
+                }
+                out.push(cch);
+                if cch == '*' && chars.get(i + 1) == Some(&'/') {
+                    out.push('/');
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            if has_newline {
+                out.push('\n');
+                at_line_start = true;
+            }
+            continue;
+        }
+
+        if ch == '/' && allows_regex_after(prev_sig, prev_was_inc_dec, &last_word) {
+            if let Some(end) = scan_regex_end(&chars, i) {
+                for &rch in &chars[i..end] {
+                    out.push(rch);
+                }
+                i = end;
+                prev_sig = Some('/');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                continue;
+            }
+        }
+
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                out.push('(');
+                prev_sig = Some('(');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push(')');
+                prev_sig = Some(')');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+            }
+            '{' => {
+                if let Some((close_idx, '}')) = next_non_ws(&chars, i + 1) {
+                    if !ends_with_space_or_opener(&out) && prev_sig != Some('{') {
+                        out.push(' ');
+                    }
+                    out.push_str("{}");
+                    prev_sig = Some('}');
+                    prev_was_inc_dec = false;
+                    last_word.clear();
+                    i = close_idx + 1;
+                    continue;
+                }
+                if !ends_with_space_or_opener(&out) {
+                    out.push(' ');
+                }
+                out.push_str("{\n");
+                brace_stack.push(BraceFrame::Block(paren_depth));
+                at_line_start = true;
+                prev_sig = Some('{');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+            }
+            '}' => {
+                if matches!(brace_stack.last(), Some(BraceFrame::TemplateExpr)) {
+                    brace_stack.pop();
+                    if out.ends_with(' ') {
+                        out.pop();
+                    }
+                    out.push('}');
+                    let (next_i, entered_expr) =
+                        scan_template_segment(&chars, i + 1, &mut out, max_out);
+                    i = next_i;
+                    if entered_expr {
+                        brace_stack.push(BraceFrame::TemplateExpr);
+                        prev_sig = Some('{');
+                    } else {
+                        prev_sig = Some('`');
+                    }
+                    prev_was_inc_dec = false;
+                    last_word.clear();
+                    continue;
+                }
+
+                if matches!(brace_stack.last(), Some(BraceFrame::Block(_))) {
+                    brace_stack.pop();
+                }
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                let depth = block_depth(&brace_stack);
+                if !at_line_start && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                push_indent(&mut out, depth);
+                out.push('}');
+                at_line_start = false;
+                prev_sig = Some('}');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+
+                let next_char = next_non_ws(&chars, i).map(|(_, c)| c);
+                if matches!(next_char, Some(';' | ',' | ')' | ']')) {
+                    if next_char == Some(',') {
+                        // Keep `},` compact inside calls/arrays.
+                    }
+                } else if next_char.is_some() {
+                    out.push('\n');
+                    at_line_start = true;
+                }
+            }
+            ';' => {
+                let top_block_paren = brace_stack
+                    .iter()
+                    .rev()
+                    .find_map(|f| match f {
+                        BraceFrame::Block(d) => Some(*d),
+                        BraceFrame::TemplateExpr => None,
+                    })
+                    .unwrap_or(0);
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                if paren_depth > top_block_paren {
+                    out.push(';');
+                    if let Some((_, next_c)) = next_non_space(&chars, i + 1) {
+                        if next_c != ')' {
+                            out.push(' ');
+                        }
+                    }
+                } else {
+                    out.push(';');
+                    if next_non_ws(&chars, i + 1).is_some() {
+                        out.push('\n');
+                        at_line_start = true;
+                    }
+                }
+                prev_sig = Some(';');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+            }
+            ',' => {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push(',');
+                if let Some((_, next_c)) = next_non_space(&chars, i + 1) {
+                    if !matches!(next_c, ')' | ']' | '}' | '\n' | '\r') {
+                        out.push(' ');
+                    }
+                }
+                prev_sig = Some(',');
+                prev_was_inc_dec = false;
+                last_word.clear();
+                i += 1;
+            }
+            _ => {
+                prev_was_inc_dec =
+                    (ch == '+' && prev_sig == Some('+')) || (ch == '-' && prev_sig == Some('-'));
+                if is_ident_char(ch) {
+                    if !prev_sig.is_some_and(is_ident_char) {
+                        last_word.clear();
+                    }
+                    if last_word.len() < 32 {
+                        last_word.push(ch);
+                    }
+                } else {
+                    last_word.clear();
+                }
+                out.push(ch);
+                prev_sig = Some(ch);
+                i += 1;
+            }
+        }
+    }
+
+    let trimmed_out = out.trim_end();
+    if trimmed_out == text.trim() || trimmed_out.lines().count() <= text.lines().count() {
+        None
+    } else {
+        let mut owned = trimmed_out.to_owned();
+        owned.push('\n');
+        Some(owned)
+    }
+}
+
+fn beautify_css(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let max_out = (text.len().saturating_mul(4) + 4096).min(2 * 1024 * 1024);
+    let mut out = String::with_capacity(text.len().saturating_mul(2).min(max_out));
+    let mut i = 0_usize;
+    let mut indent = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut at_line_start = true;
+
+    while let Some(&ch) = chars.get(i) {
+        if out.len() > max_out {
+            return None;
+        }
+        if ch == '\r' || ch == '\n' {
+            if !at_line_start {
+                out.push('\n');
+                at_line_start = true;
+            }
+            if ch == '\r' && chars.get(i + 1) == Some(&'\n') {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if matches!(ch, ' ' | '\t') {
+            if !at_line_start && !ends_with_space_or_opener(&out) {
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+
+        if at_line_start && ch != '}' {
+            push_indent(&mut out, indent);
+            at_line_start = false;
+        }
+
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            out.push(ch);
+            i += 1;
+            while let Some(&qch) = chars.get(i) {
+                out.push(qch);
+                i += 1;
+                if qch == '\\' {
+                    if let Some(&esc) = chars.get(i) {
+                        out.push(esc);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if qch == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if ch == '/' && chars.get(i + 1) == Some(&'*') {
+            out.push_str("/*");
+            i += 2;
+            while let Some(&cch) = chars.get(i) {
+                out.push(cch);
+                if cch == '*' && chars.get(i + 1) == Some(&'/') {
+                    out.push('/');
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            if next_non_ws(&chars, i).is_some() {
+                out.push('\n');
+                at_line_start = true;
+            }
+            continue;
+        }
+
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                out.push('(');
+                i += 1;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push(')');
+                i += 1;
+            }
+            '{' => {
+                if !ends_with_space_or_opener(&out) {
+                    out.push(' ');
+                }
+                out.push_str("{\n");
+                indent += 1;
+                at_line_start = true;
+                i += 1;
+            }
+            '}' => {
+                indent = indent.saturating_sub(1);
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                if !at_line_start && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                push_indent(&mut out, indent);
+                out.push('}');
+                at_line_start = false;
+                i += 1;
+                if next_non_ws(&chars, i).is_some() {
+                    out.push('\n');
+                    at_line_start = true;
+                }
+            }
+            ';' if paren_depth == 0 => {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push(';');
+                i += 1;
+                if next_non_ws(&chars, i).is_some() {
+                    out.push('\n');
+                    at_line_start = true;
+                }
+            }
+            ':' if paren_depth == 0 && indent > 0 => {
+                out.push(':');
+                if let Some((_, next_c)) = next_non_space(&chars, i + 1) {
+                    if next_c != ':' && next_c != '\n' {
+                        out.push(' ');
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+
+    let trimmed_out = out.trim_end();
+    if trimmed_out == text.trim() || trimmed_out.lines().count() <= text.lines().count() {
+        None
+    } else {
+        let mut owned = trimmed_out.to_owned();
+        owned.push('\n');
+        Some(owned)
+    }
+}
+
+fn is_html_void_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name.to_ascii_lowercase().as_str(),
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+fn find_closing_tag_bracket(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = start;
+    let mut quote: Option<u8> = None;
+    while let Some(&b) = bytes.get(i) {
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'>' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_tag_name(tag: &str) -> &str {
+    let inner = tag
+        .strip_prefix("</")
+        .or_else(|| tag.strip_prefix('<'))
+        .unwrap_or(tag)
+        .trim_start();
+    inner
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+        .next()
+        .unwrap_or("")
+}
+
+fn beautify_markup(text: &str) -> Option<String> {
+    let max_out = (text.len().saturating_mul(3) + 4096).min(2 * 1024 * 1024);
+    let mut out = String::with_capacity(text.len().saturating_mul(2).min(max_out));
+    let mut pos = 0_usize;
+    let mut indent = 0_usize;
+    let mut prev_ended_gt = false;
+
+    while pos < text.len() {
+        if out.len() > max_out {
+            return None;
+        }
+        if let Some(rel) = text[pos..].find('<') {
+            let tag_start = pos + rel;
+            let between = &text[pos..tag_start];
+            let has_text = !between.trim().is_empty();
+            if has_text {
+                out.push_str(between);
+                prev_ended_gt = false;
+            }
+
+            let tag_end = if text[tag_start..].starts_with("<!--") {
+                match text[tag_start + 4..].find("-->") {
+                    Some(end) => tag_start + 4 + end + 2,
+                    None => text.len() - 1,
+                }
+            } else if text[tag_start..].starts_with("<![CDATA[") {
+                match text[tag_start + 9..].find("]]>") {
+                    Some(end) => tag_start + 9 + end + 2,
+                    None => text.len() - 1,
+                }
+            } else {
+                find_closing_tag_bracket(text, tag_start + 1).unwrap_or(text.len() - 1)
+            };
+
+            let tag = &text[tag_start..=tag_end];
+            let is_closing = tag.starts_with("</");
+            let is_special = tag.starts_with("<?") || tag.starts_with("<!");
+            let is_self_closing = tag.ends_with("/>");
+            let tag_name = extract_tag_name(tag);
+
+            if is_closing {
+                indent = indent.saturating_sub(1);
+            }
+            if prev_ended_gt && !has_text {
+                out.push('\n');
+                push_indent(&mut out, indent);
+            }
+            out.push_str(tag);
+            prev_ended_gt = true;
+
+            pos = tag_end + 1;
+            if !is_closing && !is_special && !is_self_closing && !is_html_void_tag(tag_name) {
+                if tag_name.eq_ignore_ascii_case("script") || tag_name.eq_ignore_ascii_case("style")
+                {
+                    let end_pat = if tag_name.eq_ignore_ascii_case("script") {
+                        "</script>"
+                    } else {
+                        "</style>"
+                    };
+                    if let Some(close_rel) = text[pos..].to_ascii_lowercase().find(end_pat) {
+                        let raw_body = &text[pos..pos + close_rel];
+                        out.push_str(raw_body);
+                        pos += close_rel;
+                        prev_ended_gt = !raw_body.trim().is_empty();
+                        indent += 1;
+                        continue;
+                    }
+                }
+                indent += 1;
+            }
+        } else {
+            out.push_str(&text[pos..]);
+            break;
+        }
+    }
+
+    let trimmed_out = out.trim();
+    if trimmed_out == text.trim() || trimmed_out.lines().count() <= text.lines().count() {
+        None
+    } else {
+        let mut owned = trimmed_out.to_owned();
+        owned.push('\n');
+        Some(owned)
     }
 }
 
@@ -2121,6 +2950,76 @@ mod tests {
                 assert_eq!(meta.mime, "audio/mpeg");
             }
             other => panic!("expected MP3 media preview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beautifies_minified_js_css_and_svg_while_preserving_normal_code() {
+        let min_js = br#"import{a as b}from"./c.js";const pat=/https?:\/\/a;b\/c/g;const tpl=`x=${({k:1})};`;for(let i=0;i<3;i++){console.log("{;}",pat,tpl)}const arr=[1,2].map(x=>{const y=x*2;return y});export{arr};"#;
+        match inspect_file_preview("static/account.module.hash.js", min_js, min_js.len() as u64) {
+            InspectedPreview::Text {
+                text,
+                formatted_text,
+                language,
+                ..
+            } => {
+                assert_eq!(language, Some("javascript"));
+                assert_eq!(text.as_bytes(), min_js);
+                let formatted = formatted_text.expect("minified JS must auto-format");
+                assert!(formatted.contains('\n'));
+                assert!(formatted.contains("/https?:\\/\\/a;b\\/c/g"));
+                assert!(formatted.contains("`x=${"));
+                assert!(
+                    formatted.contains("for(let i=0; i<3; i++) {")
+                        || formatted.contains("for (let i=0")
+                        || formatted.contains("for(let i=0;")
+                );
+                assert!(formatted.contains("\n  const y=x*2;"));
+            }
+            other => panic!("expected minified JS Text preview, got {other:?}"),
+        }
+
+        let normal_js =
+            b"export function greet(name) {\n  const msg = `Hello, ${name}`;\n  return msg;\n}\n";
+        match inspect_file_preview("src/greet.js", normal_js, normal_js.len() as u64) {
+            InspectedPreview::Text { formatted_text, .. } => {
+                assert_eq!(formatted_text, None);
+            }
+            other => panic!("expected normal JS Text preview, got {other:?}"),
+        }
+
+        let min_css = br#".card{display:flex;background:url(data:image/png;base64,iVBOR;w0KGgo);color:#fff}@media(min-width:768px){.card{padding:12px 16px;margin:0 auto}}.btn:hover{opacity:.85}"#;
+        match inspect_file_preview("static/styles/main.css", min_css, min_css.len() as u64) {
+            InspectedPreview::Text {
+                text,
+                formatted_text,
+                language,
+                ..
+            } => {
+                assert_eq!(language, Some("css"));
+                assert_eq!(text.as_bytes(), min_css);
+                let formatted = formatted_text.expect("minified CSS must auto-format");
+                assert!(formatted.contains("url(data:image/png;base64,iVBOR;w0KGgo);"));
+                assert!(formatted.contains("  display: flex;"));
+                assert!(formatted.contains("\n    padding: 12px 16px;"));
+                assert!(formatted.contains("\n  }\n}"));
+            }
+            other => panic!("expected minified CSS Text preview, got {other:?}"),
+        }
+
+        let min_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none"><rect width="24" height="24"/><circle cx="12" cy="12" r="8"/><text x="2" y="2">OK</text></g></svg>"#;
+        match inspect_file_preview("static/assets/badge.svg", min_svg, min_svg.len() as u64) {
+            InspectedPreview::Svg {
+                source,
+                formatted_source,
+                ..
+            } => {
+                assert_eq!(source.as_bytes(), min_svg);
+                let formatted = formatted_source.expect("minified SVG must auto-format");
+                assert!(formatted.contains("\n  <g fill=\"none\">"));
+                assert!(formatted.contains("<text x=\"2\" y=\"2\">OK</text>"));
+            }
+            other => panic!("expected minified SVG preview, got {other:?}"),
         }
     }
 }

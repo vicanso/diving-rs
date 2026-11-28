@@ -814,6 +814,7 @@ pub enum FilePreviewContent {
     Svg {
         meta: ImagePreviewMeta,
         source: String,
+        formatted_source: Option<String>,
         total_size: u64,
     },
     Archive {
@@ -939,9 +940,15 @@ pub fn classify_file_preview(path: &str, bytes: &[u8], total_size: u64) -> FileP
                 truncated,
             }
         }
-        InspectedPreview::Svg { meta, source, .. } => FilePreviewContent::Svg {
+        InspectedPreview::Svg {
             meta,
             source,
+            formatted_source,
+            ..
+        } => FilePreviewContent::Svg {
+            meta,
+            source,
+            formatted_source,
             total_size,
         },
         InspectedPreview::Archive { meta } => {
@@ -1514,14 +1521,40 @@ mod tests {
             other => panic!("expected Image preview, got {other:?}"),
         }
 
-        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><circle cx="10" cy="10" r="8"/></svg>"#;
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20"><g fill="none"><circle cx="10" cy="10" r="8"/><rect x="20" y="2" width="12" height="12"/></g></svg>"#;
         match classify_file_preview("assets/badge.svg", svg, svg.len() as u64) {
-            FilePreviewContent::Svg { meta, source, .. } => {
+            FilePreviewContent::Svg {
+                meta,
+                source,
+                formatted_source,
+                ..
+            } => {
                 assert_eq!(meta.format, "SVG");
                 assert_eq!(meta.width, Some(40));
                 assert!(source.contains("<circle"));
+                assert!(
+                    formatted_source
+                        .as_deref()
+                        .unwrap()
+                        .contains("\n  <g fill=\"none\">")
+                );
             }
             other => panic!("expected Svg preview, got {other:?}"),
+        }
+
+        let min_js = br#"import{a as b}from"./c.js";const run=(x)=>{const z=x*2;return z};for(let i=0;i<3;i++){console.log("step",i,run(i))}const extra={enabled:true,retries:3};export{run,extra};"#;
+        match classify_file_preview("static/app.module.js", min_js, min_js.len() as u64) {
+            FilePreviewContent::Text {
+                text,
+                formatted_text,
+                language,
+                ..
+            } => {
+                assert_eq!(language, Some("javascript"));
+                assert_eq!(text.as_bytes(), min_js);
+                assert!(formatted_text.as_deref().unwrap().contains('\n'));
+            }
+            other => panic!("expected minified JS preview, got {other:?}"),
         }
 
         let min_json = br#"{"a":1,"b":"ok"}"#;
