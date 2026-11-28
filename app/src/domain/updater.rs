@@ -36,8 +36,11 @@ use tokio::time::sleep;
 #[cfg(any(target_os = "windows", test))]
 use zip::ZipArchive;
 
-/// Running Diving Desktop semantic version compiled into this binary.
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Running Diving Desktop semantic version compiled into this binary (preferring `DIVING_APP_VERSION` on nightly/CI builds).
+pub const CURRENT_VERSION: &str = match option_env!("DIVING_APP_VERSION") {
+    Some(ver) if !ver.is_empty() => ver,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 /// GitHub repository slug hosting Diving Desktop releases.
 pub const REPO_SLUG: &str = "vicanso/diving";

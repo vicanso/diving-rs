@@ -1,6 +1,8 @@
 name: "nightly"
 
 on:
+  push:
+    tags: ["nightly"]
   schedule:
     # Run once a day at 19:00 UTC (03:00 CST).
     - cron: "0 19 * * *"
@@ -10,14 +12,14 @@ on:
         description: "Force rebuild even if main has not changed since the last nightly"
         required: false
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
   group: nightly
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,12 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
 
       - name: Check for changes since last nightly
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
           FORCE_REBUILD: ${{ inputs.force == true }}
         run: |
           set -euo pipefail
@@ -65,12 +68,22 @@ jobs:
           direct="$(git ls-remote --tags origin 'refs/tags/nightly' | awk '{print $1}')"
           nightly_sha="${peeled:-$direct}"
 
+          release_target=""
           release_exists="false"
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" >/dev/null 2>&1; then
+          if release_target="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" -q '.target_commitish' 2>/dev/null)"; then
             release_exists="true"
           fi
 
-          if [ "$FORCE_REBUILD" = "true" ]; then
+          previous_sha="$nightly_sha"
+          if [ "$EVENT_NAME" = "push" ]; then
+            should_build="true"
+            reason="triggered by nightly tag push (${short_sha})"
+            if [[ "$release_target" =~ ^[0-9a-fA-F]{40}$ ]] && [ "$release_target" != "$head_sha" ]; then
+              previous_sha="$release_target"
+            else
+              previous_sha=""
+            fi
+          elif [ "$FORCE_REBUILD" = "true" ]; then
             should_build="true"
             reason="forced via workflow_dispatch"
           elif [ -z "$nightly_sha" ]; then
@@ -91,7 +104,7 @@ jobs:
             echo "should_build=${should_build}"
             echo "head_sha=${head_sha}"
             echo "short_sha=${short_sha}"
-            echo "previous_sha=${nightly_sha}"
+            echo "previous_sha=${previous_sha}"
             echo "build_date=${build_date}"
             echo "build_stamp=${build_stamp}"
             echo "app_version=${app_version}"
@@ -102,9 +115,9 @@ jobs:
             echo "### Nightly build check"
             echo ""
             echo "- **Build:** \`${should_build}\` (${reason})"
-            echo "- **main HEAD:** \`${short_sha}\` (\`${head_sha}\`)"
-            if [ -n "$nightly_sha" ]; then
-              echo "- **Previous nightly:** \`${nightly_sha:0:7}\` (\`${nightly_sha}\`)"
+            echo "- **Target HEAD:** \`${short_sha}\` (\`${head_sha}\`)"
+            if [ -n "$previous_sha" ]; then
+              echo "- **Previous nightly:** \`${previous_sha:0:7}\` (\`${previous_sha}\`)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -743,8 +756,8 @@ jobs:
         run: |
           set -euo pipefail
           {
-            printf "Automated rolling nightly build from \`main\`.\n\n"
-            printf "> **Note:** This pre-release is overwritten daily whenever \`main\` has new commits.\n\n"
+            printf "Automated rolling nightly build triggered via \`make nightly\` or \`main\` schedule.\n\n"
+            printf "> **Note:** This pre-release is overwritten on each nightly build.\n\n"
             printf -- '- **Build date (UTC):** %s\n' "$BUILD_DATE"
             printf -- "- **Commit:** \`%s\` (%s)\n" "$SHORT_SHA" "$HEAD_SHA"
             printf -- "- **Desktop version:** \`%s\` (build \`%s\`)\n" "$APP_VERSION" "$GITHUB_RUN_NUMBER"
@@ -767,6 +780,7 @@ jobs:
       - name: Publish rolling nightly Pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
           HEAD_SHA: ${{ needs.check.outputs.head_sha }}
           SHORT_SHA: ${{ needs.check.outputs.short_sha }}
           BUILD_DATE: ${{ needs.check.outputs.build_date }}
@@ -783,7 +797,9 @@ jobs:
               fi
             done <<< "$existing_assets"
             # Advance the nightly tag only after all uploads succeed so failed runs re-trigger next day.
-            git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            if [ "$EVENT_NAME" != "push" ]; then
+              git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            fi
             gh release edit nightly -R "$GITHUB_REPOSITORY" \
               --prerelease \
               --latest=false \
@@ -791,7 +807,9 @@ jobs:
               --title "Nightly (${BUILD_DATE} · ${SHORT_SHA})" \
               --notes-file "${RUNNER_TEMP}/release-notes.md"
           else
-            git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            if [ "$EVENT_NAME" != "push" ]; then
+              git push origin "${HEAD_SHA}:refs/tags/nightly" --force
+            fi
             gh release create nightly release-assets/* -R "$GITHUB_REPOSITORY" \
               --prerelease \
               --latest=false \

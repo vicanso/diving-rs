@@ -55,6 +55,7 @@ make fmt                # Format workspace with cargo fmt --all
 make test               # Run cargo test --workspace
 make release            # Build both diving and diving-web release binaries
 make publish            # Publish diving-core -> diving-app -> diving
+make nightly            # Move and push `nightly` tag to trigger rolling pre-release
 
 # Pre-commit setup
 make hooks              # Install git hooks (runs fmt + lint before commits)
@@ -257,7 +258,7 @@ CI/CD via GitHub Actions (`.github/workflows/publish.yml`):
 - **macOS (`x86_64`, `aarch64`)**: Native Rust targets (`diving` CLI)
 - **Windows (`x86_64`)**: Native build (`diving` CLI)
 - **Docker**: Multi-arch `diving-web` image (`linux/amd64`, `linux/arm64`) pushed to Docker Hub (`vicanso/diving`)
-- **Nightly** (`.github/workflows/nightly.yml`): Daily scheduled (plus manual `workflow_dispatch`) change-gated rolling `nightly` pre-release publishing CLI binaries, Diving Desktop packages (macOS universal, Linux `x86_64`/`aarch64`, Windows `x86_64`), and multi-arch `vicanso/diving:nightly` whenever `main` advances past the `nightly` tag
+- **Nightly** (`.github/workflows/nightly.yml`): Triggered locally via `make nightly` (pushes `nightly` tag), daily scheduled, or via manual `workflow_dispatch`; publishes rolling `nightly` CLI binaries, Diving Desktop packages (macOS universal, Linux `x86_64`/`aarch64`, Windows `x86_64`/`aarch64`), `SHA256SUMS.txt`, and multi-arch `vicanso/diving:nightly`
 
 Only Docker web builds (`diving-web`) run `make build-web`.
 

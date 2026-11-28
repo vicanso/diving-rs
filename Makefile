@@ -117,7 +117,7 @@ define bump_version
 	&& echo "Bumped to $$NEXT (tag v$$NEXT). Run 'git push && git push --tags' to publish."
 endef
 
-.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish hooks dev-app test-app build-app package-macos package-macos-universal
+.PHONY: version-patch version-minor version-major lint fmt test build-web build-lib build-bin build-web-bin release-web release publish nightly hooks dev-app test-app build-app package-macos package-macos-universal
 
 version-patch:
 	$(call bump_version,patch)
@@ -127,3 +127,19 @@ version-minor:
 
 version-major:
 	$(call bump_version,major)
+
+nightly:
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "Error: working tree is not clean; commit or stash changes before make nightly." >&2; \
+		exit 1; \
+	fi
+	git tag -f nightly HEAD
+	@peeled=$$(git ls-remote --tags origin 'refs/tags/nightly^{}' | awk '{print $$1}'); \
+	direct=$$(git ls-remote --tags origin 'refs/tags/nightly' | awk '{print $$1}'); \
+	remote_sha="$${peeled:-$$direct}"; \
+	head_sha=$$(git rev-parse HEAD); \
+	if [ "$$remote_sha" = "$$head_sha" ]; then \
+		git push origin :refs/tags/nightly; \
+	fi
+	git push -f origin refs/tags/nightly
+	@echo "Triggered nightly build for $$(git rev-parse --short=7 HEAD)"
