@@ -9,8 +9,8 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppRoute, AppState, FileTreeFilter, FileTreeRow, IndexedTree, InspectorTab, SharedRef,
-    build_indexed_tree, count_layer_file_ops, flatten_indexed_tree, format_bytes,
+    AppRoute, AppState, FileKind, FileTreeFilter, FileTreeRow, IndexedTree, InspectorTab,
+    SharedRef, build_indexed_tree, count_layer_file_ops, flatten_indexed_tree, format_bytes,
     parse_layer_command,
 };
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
@@ -18,7 +18,7 @@ use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SelectItem, UiSize, font_mono_family, radius_inset,
     surface_active, text_tertiary, theme, ui_badge, ui_button, ui_checkbox, ui_context_menu,
-    ui_empty_state, ui_icon, ui_icon_button, ui_menu_item, ui_opcode_pill,
+    ui_empty_state, ui_file_icon, ui_icon, ui_icon_button, ui_menu_item, ui_opcode_pill,
     ui_search_input_with_escape, ui_select, ui_size_bar, ui_status_badge,
 };
 
@@ -893,7 +893,7 @@ fn virtual_tree(
                         .child(dynamic(move || {
                             let meta = rows.with(|r| {
                                 r.get(at.index())
-                                    .map(|row| (row.is_dir, row.expanded, !row.link.is_empty()))
+                                    .map(|row| (row.is_dir, row.expanded, row.file_kind()))
                             });
                             match meta {
                                 Some((true, expanded, _)) => view()
@@ -919,16 +919,10 @@ fn virtual_tree(
                                         move || theme().primary,
                                     ))
                                     .into_element(),
-                                Some((false, _, true)) => {
-                                    ui_icon(IconName::Link, px(14.0), move || {
-                                        theme().muted_foreground
-                                    })
-                                    .into_element()
+                                Some((false, _, kind)) => {
+                                    ui_file_icon(kind, px(14.0)).into_element()
                                 }
-                                _ => ui_icon(IconName::File, px(14.0), move || {
-                                    theme().muted_foreground
-                                })
-                                .into_element(),
+                                None => ui_file_icon(FileKind::Generic, px(14.0)).into_element(),
                             }
                         }))
                         .child(

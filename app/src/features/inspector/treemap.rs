@@ -8,16 +8,16 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppRoute, AppState, FileTreeRow, FsNode, InspectorTab, SharedRef, TreemapHoverInfo,
-    TreemapTile, TreemapViewMode, dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles,
-    slot_for_layer, top_three_layers,
+    AppRoute, AppState, FileKind, FileTreeRow, FsNode, InspectorTab, SharedRef, TreemapHoverInfo,
+    TreemapTile, TreemapViewMode, classify_file_kind, dominant_layer, find_fs_node, format_bytes,
+    layout_treemap_tiles, slot_for_layer, top_three_layers,
 };
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_control,
     radius_inset, surface_active, theme, treemap_ink, treemap_slot, ui_badge, ui_button,
-    ui_empty_state, ui_icon, ui_segmented, ui_spinner, ui_treemap_size_bar,
+    ui_empty_state, ui_file_icon, ui_icon, ui_segmented, ui_spinner, ui_treemap_size_bar,
 };
 
 const MIN_LABEL_W: f32 = 56.0;
@@ -790,25 +790,25 @@ fn treemap_table_list(
                                 .items_center()
                                 .gap_2()
                                 .child(dynamic(move || {
-                                    let is_dir = rows.with(|list| {
-                                        list.get(at.index()).is_some_and(|e| e.is_dir)
+                                    let meta = rows.with(|list| {
+                                        list.get(at.index()).map(|e| {
+                                            (e.is_dir, classify_file_kind(&e.name, "", false))
+                                        })
                                     });
-                                    ui_icon(
-                                        if is_dir {
-                                            IconName::Folder
-                                        } else {
-                                            IconName::File
-                                        },
-                                        px(14.0),
-                                        move || {
-                                            if is_dir {
+                                    match meta {
+                                        Some((true, _)) => {
+                                            ui_icon(IconName::Folder, px(14.0), move || {
                                                 theme().primary
-                                            } else {
-                                                theme().muted_foreground
-                                            }
-                                        },
-                                    )
-                                    .into_element()
+                                            })
+                                            .into_element()
+                                        }
+                                        Some((false, kind)) => {
+                                            ui_file_icon(kind, px(14.0)).into_element()
+                                        }
+                                        None => {
+                                            ui_file_icon(FileKind::Generic, px(14.0)).into_element()
+                                        }
+                                    }
                                 }))
                                 .child(
                                     text(move || {

@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, FilePreviewContent, format_bytes};
+use crate::domain::{AppState, FileKind, FilePreviewContent, classify_file_kind, format_bytes};
 use crate::i18n::{format_user_error, t, tf};
 use crate::status_notice_banner;
 use crate::ui::{
-    BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, theme, ui_badge, ui_banner, ui_button,
-    ui_code_viewer, ui_empty_state, ui_hex_viewer, ui_separator, ui_sheet, ui_skeleton,
+    BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, file_kind_icon, theme, ui_badge,
+    ui_banner, ui_button, ui_code_viewer, ui_empty_state, ui_hex_viewer, ui_separator, ui_sheet,
+    ui_skeleton,
 };
 
 fn save_as_disabled(state: &AppState) -> bool {
@@ -222,13 +223,16 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                         )
                         .into_element();
                     }
-                    let is_symlink = content_state
-                        .preview_target
-                        .get()
+                    let target_info = content_state.preview_target.get();
+                    let is_symlink = target_info
+                        .as_ref()
                         .is_some_and(|target| target.mode.starts_with('l'));
+                    let file_kind = target_info.map_or(FileKind::Generic, |target| {
+                        classify_file_kind(&target.path, &target.mode, is_symlink)
+                    });
                     match content_state.preview_content.get() {
                         Some(FilePreviewContent::Empty) => ui_empty_state(
-                            IconName::File,
+                            file_kind_icon(file_kind),
                             move || SharedString::from(t(lang.get(), "sheet.empty")),
                             "",
                             None,

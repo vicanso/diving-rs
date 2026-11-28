@@ -188,6 +188,183 @@ pub fn format_command_lines(raw_cmd: &str) -> Vec<String> {
     parse_layer_command(raw_cmd).formatted_lines
 }
 
+/// Semantic file-type category used to select an icon and color token in file views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Symlink,
+    Image,
+    Audio,
+    Video,
+    Font,
+    Code,
+    Config,
+    Text,
+    Archive,
+    Script,
+    Binary,
+    Key,
+    Database,
+    Dockerfile,
+    Generic,
+}
+
+fn is_versioned_shared_lib(lower_name: &str) -> bool {
+    let Some((_, ver)) = lower_name.split_once(".so.") else {
+        return false;
+    };
+    !ver.is_empty() && ver.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+
+/// Classifies a file entry into a [`FileKind`] by symlink status, filename, extension, or mode.
+pub fn classify_file_kind(name: &str, mode: &str, is_symlink: bool) -> FileKind {
+    if is_symlink || mode.starts_with('l') {
+        return FileKind::Symlink;
+    }
+
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+
+    if lower == "dockerfile"
+        || lower == "containerfile"
+        || lower.starts_with("dockerfile.")
+        || lower.starts_with("containerfile.")
+        || matches!(
+            lower.as_str(),
+            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+        )
+    {
+        return FileKind::Dockerfile;
+    }
+
+    if matches!(
+        lower.as_str(),
+        "id_rsa" | "id_ed25519" | "id_ecdsa" | "id_dsa" | "authorized_keys" | "known_hosts"
+    ) {
+        return FileKind::Key;
+    }
+
+    if matches!(
+        lower.as_str(),
+        ".bashrc"
+            | ".bash_profile"
+            | ".bash_logout"
+            | ".profile"
+            | ".zshrc"
+            | ".zprofile"
+            | ".ashrc"
+            | "entrypoint"
+    ) {
+        return FileKind::Script;
+    }
+
+    if matches!(
+        lower.as_str(),
+        "makefile"
+            | "gnumakefile"
+            | "cmakelists.txt"
+            | "justfile"
+            | "procfile"
+            | "gemfile"
+            | "rakefile"
+            | "caddyfile"
+            | "vagrantfile"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".dockerignore"
+            | ".npmrc"
+            | ".yarnrc"
+            | ".nvmrc"
+            | ".editorconfig"
+            | ".prettierrc"
+            | ".eslintrc"
+            | ".babelrc"
+            | ".env"
+    ) || lower.starts_with(".env.")
+    {
+        return FileKind::Config;
+    }
+
+    if matches!(
+        lower.as_str(),
+        "license"
+            | "licence"
+            | "copying"
+            | "notice"
+            | "readme"
+            | "changelog"
+            | "changes"
+            | "authors"
+            | "contributors"
+            | "3rdpartylicenses.txt"
+    ) || lower.starts_with("license.")
+        || lower.starts_with("license-")
+        || lower.starts_with("licence.")
+        || lower.starts_with("readme.")
+        || lower.starts_with("changelog.")
+    {
+        return FileKind::Text;
+    }
+
+    if is_versioned_shared_lib(&lower) {
+        return FileKind::Binary;
+    }
+
+    let trimmed = lower.strip_prefix('.').unwrap_or(&lower);
+    if let Some((_, ext)) = trimmed.rsplit_once('.') {
+        match ext {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "bmp" | "avif" | "tif"
+            | "tiff" | "heic" | "heif" | "icns" | "cur" => return FileKind::Image,
+            "mp3" | "wav" | "ogg" | "oga" | "flac" | "m4a" | "aac" | "opus" | "wma" | "mid"
+            | "midi" => return FileKind::Audio,
+            "mp4" | "m4v" | "webm" | "mkv" | "mov" | "avi" | "flv" | "wmv" | "ogv" | "3gp" => {
+                return FileKind::Video;
+            }
+            "woff" | "woff2" | "ttf" | "otf" | "eot" | "ttc" => return FileKind::Font,
+            "dockerfile" | "containerfile" => return FileKind::Dockerfile,
+            "tar" | "gz" | "tgz" | "bz2" | "tbz" | "tbz2" | "xz" | "txz" | "zst" | "tzst"
+            | "lz4" | "lzma" | "br" | "zip" | "7z" | "rar" | "deb" | "udeb" | "rpm" | "apk"
+            | "jar" | "war" | "ear" | "whl" | "gem" | "nupkg" | "crate" | "cab" | "iso" | "dmg"
+            | "pkg" | "layer" => return FileKind::Archive,
+            "pem" | "crt" | "cer" | "der" | "key" | "pub" | "p12" | "pfx" | "jks" | "keystore"
+            | "truststore" | "kdbx" | "csr" | "crl" | "gpg" | "asc" | "age" => {
+                return FileKind::Key;
+            }
+            "db" | "sqlite" | "sqlite3" | "db3" | "rdb" | "mdb" | "ldb" | "parquet" | "duckdb" => {
+                return FileKind::Database;
+            }
+            "sh" | "bash" | "zsh" | "fish" | "ash" | "dash" | "ksh" | "csh" | "ps1" | "psm1"
+            | "bat" | "cmd" => return FileKind::Script,
+            "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg"
+            | "cnf" | "config" | "xml" | "plist" | "env" | "properties" | "lock" | "hcl" | "tf"
+            | "tfvars" | "nix" | "gradle" | "props" | "targets" | "service" | "socket"
+            | "timer" | "map" => return FileKind::Config,
+            "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" | "vue" | "svelte"
+            | "astro" | "html" | "htm" | "xhtml" | "css" | "scss" | "sass" | "less" | "py"
+            | "pyi" | "rs" | "go" | "java" | "kt" | "kts" | "scala" | "groovy" | "c" | "h"
+            | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "cs" | "fs" | "vb" | "rb" | "erb" | "php"
+            | "swift" | "m" | "mm" | "lua" | "pl" | "pm" | "r" | "jl" | "ex" | "exs" | "erl"
+            | "hrl" | "hs" | "ml" | "mli" | "clj" | "dart" | "zig" | "nim" | "sol" | "proto"
+            | "graphql" | "gql" | "sql" => return FileKind::Code,
+            "txt" | "md" | "markdown" | "mdx" | "rst" | "adoc" | "asciidoc" | "org" | "tex"
+            | "log" | "out" | "csv" | "tsv" | "pdf" | "doc" | "docx" | "rtf" | "man" => {
+                return FileKind::Text;
+            }
+            "so" | "dylib" | "dll" | "exe" | "bin" | "elf" | "wasm" | "o" | "a" | "lib" | "ko"
+            | "pyc" | "pyo" | "pyd" | "class" | "beam" | "rlib" | "rmeta" => {
+                return FileKind::Binary;
+            }
+            _ => {}
+        }
+    }
+
+    if !mode.starts_with('d') && !mode.starts_with('l') && mode.contains('x') {
+        return FileKind::Binary;
+    }
+
+    FileKind::Generic
+}
+
 /// Active filter options applied to a single layer's `FileTreeItem` slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileTreeFilter {
@@ -246,6 +423,11 @@ impl FileTreeRow {
     /// Whether this row represents a symbolic link rather than a regular file.
     pub fn is_symlink(&self) -> bool {
         !self.is_dir && (self.mode.starts_with('l') || !self.link.is_empty())
+    }
+
+    /// Semantic icon/color category derived from file name, mode, and symlink status.
+    pub fn file_kind(&self) -> FileKind {
+        classify_file_kind(&self.name, &self.mode, self.is_symlink())
     }
 }
 
@@ -1195,5 +1377,112 @@ mod tests {
         assert!(zh.contains("需要 2.38"));
         assert!(zh.contains("宿主 2.36"));
         assert!(zh.contains("宿主 glibc 过低"));
+    }
+
+    #[test]
+    fn classify_file_kind_covers_media_code_container_and_edge_cases() {
+        // Filenames visible in the Inspector FileTree screenshot.
+        assert_eq!(
+            classify_file_kind("3rdpartylicenses.txt", "-rw-r--r--", false),
+            FileKind::Text
+        );
+        assert_eq!(
+            classify_file_kind("account-active.module.d5371b561e3.js", "-rw-r--r--", false),
+            FileKind::Code
+        );
+        for img in ["icon-fail.png", "point.png", "right.png", "HERO.WEBP"] {
+            assert_eq!(
+                classify_file_kind(img, "-rw-r--r--", false),
+                FileKind::Image
+            );
+        }
+        for audio in ["beijiaosuo.mp3", "rzrq.mp3", "xinsanbannewv4.mp3"] {
+            assert_eq!(
+                classify_file_kind(audio, "-rw-r--r--", false),
+                FileKind::Audio
+            );
+        }
+        assert_eq!(
+            classify_file_kind("version.json", "-rw-r--r--", false),
+            FileKind::Config
+        );
+
+        // Symlinks win regardless of target filename extension.
+        assert_eq!(
+            classify_file_kind("python3.py", "lrwxrwxrwx", false),
+            FileKind::Symlink
+        );
+        assert_eq!(
+            classify_file_kind("python3.py", "", true),
+            FileKind::Symlink
+        );
+
+        // Container runtime, binaries, and versioned shared objects.
+        assert_eq!(
+            classify_file_kind("/lib/x86_64-linux-gnu/libc.so.6", "-rwxr-xr-x", false),
+            FileKind::Binary
+        );
+        assert_eq!(
+            classify_file_kind("/usr/lib/libssl.so.3", "-rw-r--r--", false),
+            FileKind::Binary
+        );
+        assert_eq!(
+            classify_file_kind("/usr/lib/libstdc++.so.6.0.32", "-rw-r--r--", false),
+            FileKind::Binary
+        );
+        assert_eq!(
+            classify_file_kind("/usr/local/bin/redis-server", "-rwxr-xr-x", false),
+            FileKind::Binary
+        );
+        // Extension beats executable fallback so chmod +x assets keep their type icon.
+        assert_eq!(
+            classify_file_kind("icon-fail.png", "-rwxr-xr-x", false),
+            FileKind::Image
+        );
+
+        // Archives, scripts, keys, databases, fonts, video, Dockerfiles, configs, generic.
+        for arch in ["layer.tar.gz", "alpine-keys.apk", "app.jar", "pkg.whl"] {
+            assert_eq!(
+                classify_file_kind(arch, "-rw-r--r--", false),
+                FileKind::Archive
+            );
+        }
+        for script in ["docker-entrypoint.sh", ".bashrc", "entrypoint"] {
+            assert_eq!(
+                classify_file_kind(script, "-rwxr-xr-x", false),
+                FileKind::Script
+            );
+        }
+        for key in ["ca-certificates.crt", "server.key", "id_ed25519"] {
+            assert_eq!(classify_file_kind(key, "-rw-------", false), FileKind::Key);
+        }
+        for db in ["data.sqlite3", "dump.rdb"] {
+            assert_eq!(
+                classify_file_kind(db, "-rw-r--r--", false),
+                FileKind::Database
+            );
+        }
+        assert_eq!(
+            classify_file_kind("inter.woff2", "-rw-r--r--", false),
+            FileKind::Font
+        );
+        assert_eq!(
+            classify_file_kind("demo.mp4", "-rw-r--r--", false),
+            FileKind::Video
+        );
+        for df in ["Dockerfile", "Dockerfile.dev", "compose.yaml"] {
+            assert_eq!(
+                classify_file_kind(df, "-rw-r--r--", false),
+                FileKind::Dockerfile
+            );
+        }
+        assert_eq!(
+            classify_file_kind(".env.production", "-rw-r--r--", false),
+            FileKind::Config
+        );
+        assert_eq!(
+            classify_file_kind("UNKNOWN_DATA", "-rw-r--r--", false),
+            FileKind::Generic
+        );
     }
 }

@@ -3,14 +3,15 @@
 use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
+use crate::domain::FileKind;
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, FileOpKind, IconName, LayerOpcodeKind, SegmentOption,
-    SelectItem, TabOption, UiSize, register_fonts, theme, ui_badge, ui_banner, ui_button,
-    ui_checkbox, ui_code_viewer, ui_context_menu, ui_dialog, ui_diff_viewer, ui_empty_state,
-    ui_field, ui_icon, ui_icon_button, ui_input, ui_link, ui_menu, ui_menu_item, ui_menu_separator,
-    ui_menu_trigger_icon, ui_opcode_pill, ui_panel, ui_popover, ui_progress_bar,
-    ui_resizable_split, ui_search_input, ui_segmented, ui_select, ui_separator, ui_sheet,
-    ui_size_bar, ui_skeleton, ui_status_badge, ui_switch, ui_tabs,
+    SelectItem, TabOption, UiSize, font_mono_family, register_fonts, theme, ui_badge, ui_banner,
+    ui_button, ui_checkbox, ui_code_viewer, ui_context_menu, ui_dialog, ui_diff_viewer,
+    ui_empty_state, ui_field, ui_file_icon, ui_icon, ui_icon_button, ui_input, ui_link, ui_menu,
+    ui_menu_item, ui_menu_separator, ui_menu_trigger_icon, ui_opcode_pill, ui_panel, ui_popover,
+    ui_progress_bar, ui_resizable_split, ui_search_input, ui_segmented, ui_select, ui_separator,
+    ui_sheet, ui_size_bar, ui_skeleton, ui_status_badge, ui_switch, ui_tabs,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,6 +706,41 @@ fn data_section(active_tab: Signal<GalleryTab>) -> impl IntoElement {
                     .child(ui_status_badge(FileOpKind::Modified))
                     .child(ui_status_badge(FileOpKind::Removed)),
             )
+            .child({
+                let mut row = view().flex_row().flex_wrap().items_center().gap_3();
+                for (kind, label) in [
+                    (FileKind::Image, "png"),
+                    (FileKind::Audio, "mp3"),
+                    (FileKind::Video, "mp4"),
+                    (FileKind::Code, "js"),
+                    (FileKind::Config, "json"),
+                    (FileKind::Text, "txt"),
+                    (FileKind::Archive, "tar.gz"),
+                    (FileKind::Script, "sh"),
+                    (FileKind::Binary, "elf"),
+                    (FileKind::Key, "pem"),
+                    (FileKind::Database, "db"),
+                    (FileKind::Font, "woff2"),
+                    (FileKind::Dockerfile, "Dockerfile"),
+                    (FileKind::Symlink, "symlink"),
+                    (FileKind::Generic, "file"),
+                ] {
+                    row = row.child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(ui_file_icon(kind, px(16.0)))
+                            .child(
+                                text(label)
+                                    .text_xs()
+                                    .font_family(font_mono_family())
+                                    .text_color(move || theme().muted_foreground),
+                            ),
+                    );
+                }
+                row
+            })
             .child(
                 view()
                     .flex_row()

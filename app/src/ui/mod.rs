@@ -31,7 +31,7 @@ pub use data::{
 };
 #[cfg(debug_assertions)]
 pub use gallery::{UiGallery, ui_gallery};
-pub use icons::{IconName, ui_icon, ui_spinner};
+pub use icons::{IconName, file_kind_icon, ui_file_icon, ui_icon, ui_spinner};
 pub use input::{
     InputEscape, InputSubmit, ui_bare_input_with_ref, ui_field, ui_input, ui_input_with_ref,
     ui_search_input, ui_search_input_with_escape,
@@ -43,8 +43,8 @@ pub use overlay::{
 };
 pub use tabs::{TabOption, ui_tabs};
 pub use theme::{
-    app_tokens, border_strong, danger, danger_soft, diverge_down, diverge_up, font_mono_family,
-    info, info_soft, radius_control, radius_inset, radius_lg, register_fonts, success,
-    success_soft, surface_active, surface_elevated, switch_thumb, switch_track, text_tertiary,
-    treemap_ink, treemap_slot, warning, warning_soft,
+    app_tokens, border_strong, danger, danger_soft, diverge_down, diverge_up, file_kind_color,
+    font_mono_family, info, info_soft, radius_control, radius_inset, radius_lg, register_fonts,
+    success, success_soft, surface_active, surface_elevated, switch_thumb, switch_track,
+    text_tertiary, treemap_ink, treemap_slot, warning, warning_soft,
 };

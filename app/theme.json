@@ -87,7 +87,15 @@
       "chart-2": "#e06332",
       "chart-3": "#169c6f",
       "chart-4": "#4f46e5",
-      "chart-5": "#d97706"
+      "chart-5": "#d97706",
+      "file-image": "#0f766e",
+      "file-media": "#7c3aed",
+      "file-code": "#0369a1",
+      "file-config": "#a14d04",
+      "file-archive": "#b83b0a",
+      "file-script": "#117034",
+      "file-binary": "#4338ca",
+      "file-key": "#be123c"
     },
     "dark": {
       "background": "#111214",
@@ -169,7 +177,15 @@
       "chart-2": "#e06636",
       "chart-3": "#16a374",
       "chart-4": "#818cf8",
-      "chart-5": "#fbbf24"
+      "chart-5": "#fbbf24",
+      "file-image": "#2dd4bf",
+      "file-media": "#a78bfa",
+      "file-code": "#38bdf8",
+      "file-config": "#fbbf24",
+      "file-archive": "#fb923c",
+      "file-script": "#4ade80",
+      "file-binary": "#818cf8",
+      "file-key": "#fb7185"
     }
   }
 }

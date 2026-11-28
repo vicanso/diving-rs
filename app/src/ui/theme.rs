@@ -3,7 +3,7 @@
 use nsh_base::{Theme, theme, tokens_of};
 use nsh_core::prelude::*;
 
-use crate::domain::AppState;
+use crate::domain::{AppState, FileKind};
 use crate::i18n::UiLang;
 use crate::ui::data::{FileOpKind, LayerOpcodeKind};
 
@@ -247,6 +247,23 @@ pub fn diverge_down() -> AdaptiveColor {
     color_token("diverge-down", |t| t.primary)
 }
 
+/// Theme-adaptive icon tint for a semantic [`FileKind`] category.
+pub fn file_kind_color(kind: FileKind) -> AdaptiveColor {
+    match kind {
+        FileKind::Symlink | FileKind::Text | FileKind::Generic => theme().muted_foreground,
+        FileKind::Image => color_token("file-image", |t| t.primary),
+        FileKind::Audio | FileKind::Video | FileKind::Font => {
+            color_token("file-media", |t| t.primary)
+        }
+        FileKind::Code | FileKind::Dockerfile => color_token("file-code", |t| t.primary),
+        FileKind::Config => color_token("file-config", |t| t.muted_foreground),
+        FileKind::Archive => color_token("file-archive", |t| t.muted_foreground),
+        FileKind::Script => color_token("file-script", |t| t.primary),
+        FileKind::Binary | FileKind::Database => color_token("file-binary", |t| t.muted_foreground),
+        FileKind::Key => color_token("file-key", |t| t.destructive),
+    }
+}
+
 /// Modal backdrop scrim computed cleanly over `black()` without raw hex literals.
 pub fn backdrop_scrim() -> Hsla {
     black().opacity(0.45)
@@ -410,6 +427,41 @@ mod tests {
                 contrast_ratio(fg.dark, dark_soft_on_muted) >= 4.5,
                 "dark {fg_key} on {soft_key}/muted < 4.5"
             );
+        }
+    }
+
+    #[test]
+    fn file_kind_tokens_meet_contrast_in_light_and_dark() {
+        let (parsed, ignored) = Theme::from_json_lenient(THEME_JSON).expect("valid JSON");
+        assert!(ignored.is_empty(), "ignored theme tokens: {ignored:?}");
+        let color = |key: &str| parsed.color(key).expect(key);
+        let bg = color("background");
+        let card = color("card");
+        let muted = color("muted");
+
+        for token_key in [
+            "file-image",
+            "file-media",
+            "file-code",
+            "file-config",
+            "file-archive",
+            "file-script",
+            "file-binary",
+            "file-key",
+        ] {
+            let fg = color(token_key);
+            for (surface_key, surface) in [("background", bg), ("card", card), ("muted", muted)] {
+                let light_ratio = contrast_ratio(fg.light, surface.light);
+                let dark_ratio = contrast_ratio(fg.dark, surface.dark);
+                assert!(
+                    light_ratio >= 3.5,
+                    "light {token_key} on {surface_key} contrast {light_ratio:.2} < 3.5"
+                );
+                assert!(
+                    dark_ratio >= 3.5,
+                    "dark {token_key} on {surface_key} contrast {dark_ratio:.2} < 3.5"
+                );
+            }
         }
     }
 }
