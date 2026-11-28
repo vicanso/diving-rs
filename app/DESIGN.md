@@ -361,7 +361,7 @@
   - Centered `Dialog`（宽 `640pt`，最大高 `520pt`）。
   - 顶部栏：`Docker` / `Podman` / `Container` 运行时 `SegmentedControl`（**已安装的 CLI 排在前面、未安装排在后面但仍可点击**；若尚未保存有效运行时偏好，默认自动选中第一个已安装的运行时）+ 实时关键词过滤框（打开自动聚焦）+ 刷新按钮。
   - 失败反馈带（条件出现）：当删除单个镜像失败时，在表格顶部展示带关闭按钮的 `BannerTone::Danger` 提示，不清空已有列表。
-  - 中部 4 列表头 + `virtual_list`：对齐脊线 `Repository:Tag`（加粗） | `Image ID`（短 12 位 Mono 徽章） | `Created` | `Size`（右对齐 Mono `tabular_nums`） + 右侧固定 `26pt` 行删除动作列。4 个表头均支持点击切换排序并展示 `↑` / `↓` 指示（`Size` 与 `Created` 默认先降序、再升序、第三次恢复默认序，分别按精确字节数与解析后的时间戳排序；`Repository:Tag` 与 `Image ID` 默认先升序、再降序、第三次恢复默认序），排序/过滤期间通过镜像引用（Domain Identity）保持选中行不变。键盘 `↑` / `↓` 移动选中行、`Enter` / `Space` 分析所选镜像、`Backspace` / `Delete` 触发删除确认。
+  - 中部 4 列表头 + `virtual_list`：对齐脊线 `Repository:Tag`（加粗，列宽截断时悬停显示完整名称 Tooltip） | `Image ID`（短 12 位 Mono 徽章） | `Created` | `Size`（右对齐 Mono `tabular_nums`） + 右侧固定 `26pt` 行删除动作列。4 个表头均支持点击切换排序并展示 `↑` / `↓` 指示（`Size` 与 `Created` 默认先降序、再升序、第三次恢复默认序，分别按精确字节数与解析后的时间戳排序；`Repository:Tag` 与 `Image ID` 默认先升序、再降序、第三次恢复默认序），排序/过滤期间通过镜像引用（Domain Identity）保持选中行不变。键盘 `↑` / `↓` 移动选中行、`Enter` / `Space` 分析所选镜像、`Backspace` / `Delete` 触发删除确认。
   - 底部：提示说明（调用本地 CLI 导出分析）+ `Delete…`（未选中行或正在删除时禁用）+ `Cancel` + `Analyze selected`（唯一主按钮，未选中行或正在删除时禁用）。
   - 单镜像删除与强制删除恢复：点击行末垃圾桶按钮、右键 `ContextMenu`（分析镜像 / 复制镜像引用 / 删除镜像…）、底部 `Delete…` 按钮或列表聚焦按 `Backspace` / `Delete` 后，弹出原生 `AlertDialog` 二次确认（`Delete “…”?`）；若运行时报错镜像正被容器占用或存在多标签引用冲突（如 `docker` / `podman` / `container`），自动二次弹窗提示并确认后以 `--force` 强制删除。
   - **异常处理**：若检测到所选运行时未安装或未启动守护进程，不显示空白列表——立即渲染清晰恢复向导（提示启动 daemon、按已安装优先顺序提供另外两个运行时的快捷切换按钮，或直接跳转打开本地归档/目录）。

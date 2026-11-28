@@ -78,16 +78,21 @@ pub(crate) fn subscribe_any_menu_open() -> Signal<bool> {
     open
 }
 
-/// Styled anchored menu built over `nsh_base::menu`.
-pub fn ui_menu(trigger: impl IntoElement) -> MenuElement {
+fn track_menu_open_state() -> Rc<dyn Fn(bool)> {
     let is_open = Rc::new(Cell::new(false));
-    let sync_open = Rc::new(move |next: bool| {
+    let sync_open: Rc<dyn Fn(bool)> = Rc::new(move |next: bool| {
         if is_open.replace(next) != next {
             adjust_open_menu_count(if next { 1 } else { -1 });
         }
     });
     let cleanup_sync = sync_open.clone();
     cleanup(move || cleanup_sync(false));
+    sync_open
+}
+
+/// Styled anchored menu built over `nsh_base::menu`.
+pub fn ui_menu(trigger: impl IntoElement) -> MenuElement {
+    let sync_open = track_menu_open_state();
     let on_change_sync = sync_open.clone();
     let on_open_sync = sync_open.clone();
     let on_close_sync = sync_open;
@@ -112,11 +117,23 @@ pub fn ui_context_menu(
     trigger: impl IntoElement,
     on_open_change: impl Fn(&ContextMenuEvents) + 'static,
 ) -> ContextMenuElement {
+    let sync_open = track_menu_open_state();
+    let on_change_sync = sync_open.clone();
+    let on_open_sync = sync_open.clone();
+    let on_close_sync = sync_open;
+
     context_menu()
         .popup_style(popup_surface)
         .popup_starting_style(|s| s.opacity(0.0).scale(0.97))
         .popup_ending_style(|s| s.opacity(0.0).scale(0.97))
-        .on_open_change(on_open_change)
+        .on_open_change(move |event: &ContextMenuEvents| {
+            if let ContextMenuEvents::OpenChange(next, _) = event {
+                on_change_sync(*next);
+            }
+            on_open_change(event);
+        })
+        .on_open(move || on_open_sync(true))
+        .on_close(move || on_close_sync(false))
         .trigger(trigger)
 }
 
@@ -230,6 +247,7 @@ pub fn ui_popover(
 pub fn ui_tooltip(label: impl IntoReactive<SharedString>) -> TooltipElement {
     let label = label.into_reactive();
     tooltip()
+        .max_w(px(520.0))
         .px_2()
         .py_1()
         .rounded(radius_inset)
@@ -242,6 +260,18 @@ pub fn ui_tooltip(label: impl IntoReactive<SharedString>) -> TooltipElement {
                 .text_xs()
                 .text_color(move || theme().popover_foreground),
         )
+}
+
+/// Styled left-aligned tooltip shown only when `enabled` is true and no menu or context menu is open.
+pub fn ui_conditional_tooltip(
+    label: impl IntoReactive<SharedString>,
+    enabled: impl IntoReactive<bool>,
+) -> TooltipElement {
+    let enabled = enabled.into_reactive();
+    let menu_open = subscribe_any_menu_open();
+    ui_tooltip(label)
+        .align(Align::Start)
+        .disabled(move || !enabled.get() || menu_open.get())
 }
 
 /// Centered desktop modal dialog with scrim, Escape handling, header, body, and footer.

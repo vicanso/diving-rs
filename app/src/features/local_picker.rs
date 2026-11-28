@@ -15,8 +15,8 @@ use crate::domain::{
 use crate::i18n::{format_user_error, t};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family,
-    radius_inset, surface_active, theme, ui_badge, ui_banner, ui_button, ui_context_menu,
-    ui_dialog, ui_empty_state, ui_icon_button, ui_menu_item, ui_menu_separator,
+    radius_inset, surface_active, theme, ui_badge, ui_banner, ui_button, ui_conditional_tooltip,
+    ui_context_menu, ui_dialog, ui_empty_state, ui_icon_button, ui_menu_item, ui_menu_separator,
     ui_search_input_with_escape, ui_segmented, ui_skeleton, ui_spinner, ui_table_sort_header,
 };
 
@@ -46,6 +46,11 @@ fn other_runtimes(current: LocalRuntime, order: [LocalRuntime; 3]) -> [LocalRunt
 fn column_sort_asc(sort: Option<LocalImageSort>, field: LocalImageSortField) -> Option<bool> {
     let active = sort?;
     (active.field == field).then_some(active.dir == SortDirection::Asc)
+}
+
+fn repo_column_available_width(viewport_width: Points) -> Points {
+    let dialog_w = (viewport_width - px(48.0)).min(px(640.0));
+    (dialog_w - px(426.0)).max(px(40.0))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,20 +701,56 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                 }
                                             })
                                             .child(
-                                                text(move || {
-                                                    filtered_rows.with(|r| {
-                                                        r.get(at.index()).map_or_else(
-                                                            String::new,
-                                                            LocalContainerImage::display_name,
-                                                        )
-                                                    })
-                                                })
-                                                .flex_1()
-                                                .min_w(px(0.0))
-                                                .text_xs()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .number_of_lines(1)
-                                                .text_color(move || theme().foreground),
+                                                view()
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .h_full()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .tooltip(ui_conditional_tooltip(
+                                                        move || {
+                                                            SharedString::from(filtered_rows.with(
+                                                                |r| {
+                                                                    r.get(at.index()).map_or_else(
+                                                                        String::new,
+                                                                        LocalContainerImage::display_name,
+                                                                    )
+                                                                },
+                                                            ))
+                                                        },
+                                                        move || {
+                                                            let avail = repo_column_available_width(
+                                                                window().width,
+                                                            );
+                                                            filtered_rows.with(|r| {
+                                                                r.get(at.index()).is_some_and(
+                                                                    |img| {
+                                                                        let name =
+                                                                            img.display_name();
+                                                                        measure_text(
+                                                                            "500 12px system-ui",
+                                                                            &name,
+                                                                        ) > avail
+                                                                    },
+                                                                )
+                                                            })
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        text(move || {
+                                                            filtered_rows.with(|r| {
+                                                                r.get(at.index()).map_or_else(
+                                                                    String::new,
+                                                                    LocalContainerImage::display_name,
+                                                                )
+                                                            })
+                                                        })
+                                                        .w_full()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .number_of_lines(1)
+                                                        .text_color(move || theme().foreground),
+                                                    ),
                                             )
                                             .child(
                                                 view()
@@ -981,9 +1022,9 @@ fn picker_footer(state: AppState) -> impl IntoElement {
 mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
-    use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
+    use nsh_engine::{Clock, EngineConfig, Environment, Idiom, Os, Points, Size};
     use nsh_testing::{DialogAnswer, Headless, Screen, windowed_root};
 
     use super::*;
@@ -1617,5 +1658,93 @@ mod tests {
             Duration::from_secs(3),
         )
         .expect("force delete call recorded");
+    }
+
+    #[component]
+    fn LocalPickerTooltipHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.local_runtime.set(LocalRuntime::Container);
+        state.local_images.set(vec![
+            LocalContainerImage {
+                runtime: LocalRuntime::Container,
+                repository: "docker.dragonflydb.io/dragonflydb/dragonfly".to_owned(),
+                tag: "v1.26.0".to_owned(),
+                id: "061f00b201b5".to_owned(),
+                created: "2026-10-07 21:48".to_owned(),
+                size: "46.4 MiB".to_owned(),
+                size_bytes: Some(48_653_926),
+                created_at: None,
+            },
+            LocalContainerImage {
+                runtime: LocalRuntime::Container,
+                repository: "redis".to_owned(),
+                tag: "7".to_owned(),
+                id: "71da9275c5f3".to_owned(),
+                created: "2026-08-25 00:46".to_owned(),
+                size: "41.5 MiB".to_owned(),
+                size_bytes: Some(43_515_904),
+                created_at: None,
+            },
+        ]);
+        state.local_loading.set(false);
+        state.local_error.set(None);
+        state.local_picker_open.set(true);
+
+        local_picker_dialog(state)
+    }
+
+    #[test]
+    fn local_picker_shows_hover_tooltip_only_for_truncated_repo_names() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            clock: Clock::manual(SystemTime::UNIX_EPOCH),
+            ..EngineConfig::new(windowed_root::<LocalPickerTooltipHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start local picker tooltip harness");
+        app.first_render().expect("initial render");
+        app.wait_for_within("text:redis:7", Duration::from_secs(3))
+            .expect("rows visible");
+
+        let long_name = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.26.0";
+        let long_selector = format!("text:{long_name}");
+        assert_eq!(app.screen().count(&long_selector), Ok(1));
+
+        // Hovering a truncated Repository:Tag cell mounts the tooltip with the full reference.
+        app.hover(&long_selector)
+            .expect("hover truncated repository name");
+        app.fast_forward(Duration::from_millis(600))
+            .expect("advance past tooltip hover delay");
+        app.wait_until(
+            "full repository tooltip appears on hover",
+            Duration::from_secs(2),
+            |s| s.count(&long_selector) == Ok(2),
+        )
+        .expect("full repository tooltip shown");
+
+        // Opening the row context menu dismisses/suppresses the tooltip so overlays do not stack.
+        app.right_click("role:button[/dragonfly/]")
+            .expect("right click row with tooltip open");
+        app.wait_for("role:menuitem[Analyze image]")
+            .expect("row context menu opened");
+        app.wait_until(
+            "tooltip hidden while context menu is open",
+            Duration::from_secs(2),
+            |s| s.count(&long_selector) == Ok(1),
+        )
+        .expect("tooltip hidden when context menu opens");
+        app.press_key("escape").expect("dismiss context menu");
+        app.wait_for_gone("role:menuitem[Analyze image]", Duration::from_secs(2))
+            .expect("row context menu closed");
+
+        // Hovering a short Repository:Tag name does not display a redundant tooltip.
+        app.hover("text:redis:7").expect("hover short repo name");
+        app.fast_forward(Duration::from_millis(600))
+            .expect("wait past tooltip hover delay on short repo");
+        assert_eq!(app.screen().count("text:redis:7"), Ok(1));
     }
 }

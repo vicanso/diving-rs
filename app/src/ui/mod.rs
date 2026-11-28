@@ -44,8 +44,8 @@ pub use motion::animate_layout_fast;
 pub use nsh_base::{SelectItem, theme};
 pub use overlay::{
     BannerTone, CommandItem, format_shortcut_hint, ui_banner, ui_command_palette,
-    ui_confirm_destructive, ui_context_menu, ui_dialog, ui_menu, ui_menu_item, ui_menu_separator,
-    ui_popover, ui_sheet, ui_tooltip,
+    ui_conditional_tooltip, ui_confirm_destructive, ui_context_menu, ui_dialog, ui_menu,
+    ui_menu_item, ui_menu_separator, ui_popover, ui_sheet, ui_tooltip,
 };
 pub use tabs::{TabOption, ui_tabs};
 pub use theme::{
