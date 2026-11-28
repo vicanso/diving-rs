@@ -1,11 +1,15 @@
-use super::elf::{analyze_runtime_compat, find_unstripped_binaries};
+use super::elf::{
+    analyze_runtime_compat, check_unstripped_binary, sort_unstripped_binaries,
+    unstripped_candidates, UnstrippedBinary, MAX_STRIP_CANDIDATE_BYTES,
+};
 use super::image_ref::{
     is_local_registry, normalize_arch, repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER,
     REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
+use super::layer::{is_os_release_entry, scan_blob_targets};
 use super::local::save_local_image_to_file;
 use super::model::{DockerAnalyzeResult, ImagePreview};
-use super::oci_image::detect_cross_layer_duplicates;
+use super::oci_image::{plan_cross_layer_duplicates, DuplicateGroup, FileTreeItem, ImageLayer};
 use super::registry::{
     resolve_layer_concurrency, DockerImageParams, RegistryCaches, RegistryClient,
 };
@@ -20,11 +24,17 @@ use crate::i18n::Lang;
 use crate::progress::{emit_progress, ProgressCallback, ProgressEvent};
 use crate::recommend::build_recommendations;
 use crate::sensitive::SensitivePatterns;
-use crate::store::{read_analysis, read_last_known, remember_digest, write_analysis, CacheStore};
+use crate::store::{
+    read_analysis, read_last_known, remember_digest, touch_blob_times, write_analysis, CacheStore,
+};
 use crate::tl_info;
 use chrono::DateTime;
 use snafu::ResultExt;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tempfile::{Builder as TempBuilder, NamedTempFile};
@@ -71,6 +81,89 @@ fn new_client_with_local_cache(
         local_index: Arc::new(TokioOnceCell::new()),
         cache_local_blobs,
     }
+}
+
+fn scan_unstripped_and_duplicates(
+    layers: &[ImageLayer],
+    file_tree_list: &[Vec<FileTreeItem>],
+    store: &CacheStore,
+    concurrency: usize,
+    verify_dup: bool,
+) -> (Vec<DuplicateGroup>, Vec<UnstrippedBinary>) {
+    let strip_by_layer = unstripped_candidates(file_tree_list);
+    let dup_plan = verify_dup
+        .then(|| plan_cross_layer_duplicates(file_tree_list))
+        .flatten();
+    let mut job_set: BTreeSet<usize> = strip_by_layer.keys().copied().collect();
+    if let Some(plan) = &dup_plan {
+        job_set.extend(plan.by_layer.keys().copied());
+    }
+    let jobs: Vec<usize> = job_set.into_iter().collect();
+    if jobs.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let workers = concurrency.max(1).min(jobs.len());
+    let next_job = AtomicUsize::new(0);
+    let empty_set = HashSet::new();
+    let found_strip = Mutex::new(Vec::new());
+    let found_hashes = Mutex::new(HashMap::new());
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut local_strip = Vec::new();
+                let mut local_hashes = Vec::new();
+                while let Some(&layer_idx) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
+                    let Some(layer) = layers.get(layer_idx) else {
+                        continue;
+                    };
+                    let blob = store.blob_path(&layer.digest);
+                    let Ok(file) = File::open(&blob) else {
+                        continue;
+                    };
+                    touch_blob_times(&blob);
+                    let strip_targets = strip_by_layer.get(&layer_idx).unwrap_or(&empty_set);
+                    let dup_targets = dup_plan
+                        .as_ref()
+                        .and_then(|p| p.by_layer.get(&layer_idx))
+                        .unwrap_or(&empty_set);
+                    if let Ok(hashes) = scan_blob_targets(
+                        BufReader::new(file),
+                        &layer.media_type,
+                        strip_targets,
+                        dup_targets,
+                        MAX_STRIP_CANDIDATE_BYTES,
+                        |path, bytes| {
+                            if let Some(entry) = check_unstripped_binary(layer_idx, path, bytes) {
+                                local_strip.push(entry);
+                            }
+                        },
+                    ) {
+                        local_hashes.extend(hashes.into_iter().map(|(p, h)| ((layer_idx, p), h)));
+                    }
+                }
+                if !local_strip.is_empty() {
+                    if let Ok(mut guard) = found_strip.lock() {
+                        guard.extend(local_strip);
+                    }
+                }
+                if !local_hashes.is_empty() {
+                    if let Ok(mut guard) = found_hashes.lock() {
+                        guard.extend(local_hashes);
+                    }
+                }
+            });
+        }
+    });
+
+    let mut unstripped = found_strip.into_inner().unwrap_or_default();
+    sort_unstripped_binaries(&mut unstripped);
+    let dup = match dup_plan {
+        Some(plan) => plan.finish(&found_hashes.into_inner().unwrap_or_default()),
+        None => vec![],
+    };
+    (dup, unstripped)
 }
 
 fn normalize_supported_archs(archs: &[String]) -> Vec<String> {
@@ -158,7 +251,6 @@ async fn analyze_client(
     let (entrypoint, cmd, working_dir) = extract_image_exec_meta(&config);
     let (has_healthcheck, exposed_ports) = extract_health_and_ports(&config);
 
-    let is_local = client.is_local();
     let verify_dup = params.verify_dup;
     let store_for_probe = ctx.store.clone();
     let sensitive_patterns = ctx.sensitive_patterns.clone();
@@ -181,16 +273,26 @@ async fn analyze_client(
         let scan = scan_layers(&config, &manifest.layers, &info_list, &sensitive_patterns);
         let base_os = if let Some(found) = extract_base_os_from_layers(&info_list) {
             found
-        } else if !is_local {
-            let base_os = probe_base_os(&manifest, &store_for_probe);
-            if base_os.is_empty() {
+        } else {
+            let needs_probe = info_list.iter().take(3).any(|info| {
+                info.os_release.is_none()
+                    && info.files.iter().any(|f| {
+                        f.is_whiteout.is_none()
+                            && is_os_release_entry(&f.path).is_some()
+                            && f.size > 0
+                    })
+            });
+            let probed = if needs_probe {
+                probe_base_os(&manifest, &store_for_probe)
+            } else {
+                String::new()
+            };
+            if probed.is_empty() {
                 detect_os_from_history(&scan.layers)
                     .unwrap_or_else(|| "Scratch / Distroless (no OS identifier found)".to_string())
             } else {
-                base_os
+                probed
             }
-        } else {
-            detect_os_from_history(&scan.layers).unwrap_or_default()
         };
         let tags = build_risk_tags(&scan, &run_user);
         let LayerScan {
@@ -205,46 +307,20 @@ async fn analyze_client(
         } = scan;
 
         let concurrency = resolve_layer_concurrency(configured_concurrency, layers.len());
-        let (strip_concurrency, dup_concurrency) = if verify_dup {
-            let half = concurrency.div_ceil(2).max(1);
-            (half, half)
-        } else {
-            (concurrency, 0)
-        };
-        let (dup, unstripped) = thread::scope(|scope| {
-            let strip = scope.spawn(|| {
-                let started = Instant::now();
-                let found = find_unstripped_binaries(
-                    &layers,
-                    &file_tree_list,
-                    &store_for_probe,
-                    strip_concurrency,
-                );
-                tl_info!(
-                    found = found.len(),
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "unstripped binary scan done"
-                );
-                found
-            });
-            let started = Instant::now();
-            let dup = if verify_dup {
-                detect_cross_layer_duplicates(
-                    &layers,
-                    &file_tree_list,
-                    &store_for_probe,
-                    dup_concurrency,
-                )
-            } else {
-                vec![]
-            };
-            tl_info!(
-                groups = dup.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "duplicate scan done"
-            );
-            (dup, strip.join().unwrap_or_default())
-        });
+        let started = Instant::now();
+        let (dup, unstripped) = scan_unstripped_and_duplicates(
+            &layers,
+            &file_tree_list,
+            &store_for_probe,
+            concurrency,
+            verify_dup,
+        );
+        tl_info!(
+            groups = dup.len(),
+            unstripped = unstripped.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "post-scan probes done"
+        );
         let rc = analyze_runtime_compat(
             &config,
             &layers,
@@ -383,7 +459,8 @@ pub(crate) async fn analyze_once(
         save_local_image_to_file(cli, &image_info.name, tmpfile.path()).await?;
         analyze_saved_tar(ctx, tmpfile, opts).await
     } else {
-        let client = new_client(ctx, &image_info.registry);
+        let cache_local = image_info.registry == REGISTRY_LOCAL_FILE;
+        let client = new_client_with_local_cache(ctx, &image_info.registry, cache_local);
         let mut params = DockerImageParams {
             user: image_info.user,
             img: image_info.name,

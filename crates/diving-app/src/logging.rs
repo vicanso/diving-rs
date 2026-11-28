@@ -1,5 +1,6 @@
 use rustls::crypto::{ring::default_provider, CryptoProvider};
 use std::env;
+use std::io::stderr;
 use std::str::FromStr;
 use time::format_description::well_known::Rfc3339;
 use time::UtcOffset;
@@ -45,6 +46,7 @@ pub fn init_logger(terminal_mode: bool) {
         .with_max_level(level)
         .with_timer(timer)
         .with_ansi(rust_env != "production")
+        .with_writer(stderr)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 }

@@ -13,7 +13,7 @@ inputs:
     required: false
     default: ""
   version:
-    description: "diving release to use, e.g. v0.12.0, or latest"
+    description: "diving release to use, e.g. v0.12.3, or latest"
     required: false
     default: "latest"
   config:
@@ -51,11 +51,20 @@ runs:
         DIVING_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
+        bin_name=diving
         case "$(uname -s)-$(uname -m)" in
           Linux-x86_64) asset=diving-linux-x86_64 ;;
           Linux-aarch64 | Linux-arm64) asset=diving-linux-aarch64 ;;
-          Darwin-arm64) asset=diving-darwin-aarch64 ;;
+          Darwin-aarch64 | Darwin-arm64) asset=diving-darwin-aarch64 ;;
           Darwin-x86_64) asset=diving-darwin-x86_64 ;;
+          MINGW*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
+            asset=diving-windows.exe
+            bin_name=diving.exe
+            ;;
+          MINGW*-aarch64 | MINGW*-arm64 | MSYS*-aarch64 | MSYS*-arm64 | CYGWIN*-aarch64 | CYGWIN*-arm64)
+            asset=diving-windows-aarch64.exe
+            bin_name=diving.exe
+            ;;
           *) echo "::error::diving action: unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
         esac
         if [ "$DIVING_VERSION" = "latest" ]; then
@@ -65,10 +74,10 @@ runs:
         fi
         bin_dir="${RUNNER_TEMP}/diving-bin"
         mkdir -p "$bin_dir"
-        curl -fsSL --retry 3 "$url" -o "${bin_dir}/diving"
-        chmod +x "${bin_dir}/diving"
+        curl -fsSL --retry 3 "$url" -o "${bin_dir}/${bin_name}"
+        chmod +x "${bin_dir}/${bin_name}"
         echo "$bin_dir" >> "$GITHUB_PATH"
-        "${bin_dir}/diving" --version
+        "${bin_dir}/${bin_name}" --version
 
     - name: Analyze image
       id: analyze

@@ -13,13 +13,13 @@
 //! collection.
 
 use crate::i18n::{self, Lang};
-use crate::image::{DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
+use crate::image::{is_root_user, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, Op};
 use crate::sensitive::{is_dev_artifact, is_pkg_cache, MIN_PKG_CACHE_BYTES};
 use bytesize::ByteSize;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const CATEGORY_SIZE: &str = "size";
 pub const CATEGORY_NECESSITY: &str = "necessity";
@@ -1176,12 +1176,23 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
     }
 
     // Secret files that are world-readable (others can read them).
-    {
+    if !result.sensitive_files.is_empty() {
+        let wanted: HashSet<&str> = result
+            .sensitive_files
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        let mut leaf_modes: HashMap<&str, &str> = HashMap::with_capacity(wanted.len());
+        for l in &leaves {
+            if wanted.contains(l.path.as_str()) {
+                leaf_modes.entry(l.path.as_str()).or_insert(l.mode.as_str());
+            }
+        }
         let mut wr: Vec<String> = Vec::new();
         for s in &result.sensitive_files {
-            if let Some(l) = leaves.iter().find(|l| l.path == s.path) {
-                if is_world_readable(&l.mode) {
-                    wr.push(format!("{} ({}, {})", s.path, s.reason, l.mode));
+            if let Some(&mode) = leaf_modes.get(s.path.as_str()) {
+                if is_world_readable(mode) {
+                    wr.push(format!("{} ({}, {})", s.path, s.reason, mode));
                 }
             }
         }
@@ -1201,7 +1212,7 @@ pub fn build_recommendations(result: &DockerAnalyzeResult, lang: Lang) -> Vec<Re
         }
     }
 
-    if result.user.is_empty() || result.user == "root" || result.user == "0" {
+    if is_root_user(&result.user) {
         out.push(Recommendation {
             category: CATEGORY_SECURITY.into(),
             severity: SEVERITY_MEDIUM.into(),
@@ -1721,5 +1732,46 @@ mod tests {
         // Outside known bin roots — never flag.
         assert!(!is_toolchain_binary("opt/myapp/gcc"));
         assert!(!is_toolchain_binary("home/dev/local/bin/gcc"));
+    }
+
+    #[test]
+    fn root_user_formats_and_world_readable_secrets_are_detected() {
+        use crate::image::SensitiveFileInfo;
+
+        for user in ["", "0", "0:0", "root:root", "0:*", "root:*"] {
+            let result = DockerAnalyzeResult {
+                user: user.to_string(),
+                ..Default::default()
+            };
+            let recs = build_recommendations(&result, Lang::En);
+            assert!(
+                recs.iter().any(|r| r.id == "runasroot"),
+                "expected runasroot for USER={user:?}"
+            );
+        }
+
+        let non_root = DockerAnalyzeResult {
+            user: "1000:1000".to_string(),
+            file_tree_list: vec![vec![FileTreeItem {
+                name: "app".into(),
+                children: vec![FileTreeItem {
+                    name: ".env".into(),
+                    mode: "-rw-r--r--".into(),
+                    size: 64,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]],
+            sensitive_files: vec![SensitiveFileInfo {
+                path: "app/.env".into(),
+                reason: "dotenv".into(),
+                layer_index: 0,
+                size: 64,
+            }],
+            ..Default::default()
+        };
+        let recs = build_recommendations(&non_root, Lang::En);
+        assert!(!recs.iter().any(|r| r.id == "runasroot"));
+        assert!(recs.iter().any(|r| r.id == "worldread"));
     }
 }

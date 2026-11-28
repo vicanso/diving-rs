@@ -3,18 +3,21 @@
 use std::sync::Arc;
 
 use diving_core::{DockerAnalyzeResult, FileTreeItem};
+use nsh_core::AccessibilityState;
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, FileTreeRow, FsNode, SharedRef, TreemapHoverInfo, TreemapTile, TreemapViewMode,
-    dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles, top_three_layers,
+    AppRoute, AppState, FileTreeRow, FsNode, InspectorTab, SharedRef, TreemapHoverInfo,
+    TreemapTile, TreemapViewMode, dominant_layer, find_fs_node, format_bytes, layout_treemap_tiles,
+    slot_for_layer, top_three_layers,
 };
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_control,
-    radius_inset, theme, treemap_ink, treemap_slot, ui_badge, ui_button, ui_empty_state, ui_icon,
-    ui_segmented, ui_size_bar, ui_spinner,
+    radius_inset, surface_active, theme, treemap_ink, treemap_slot, ui_badge, ui_button,
+    ui_empty_state, ui_icon, ui_segmented, ui_spinner, ui_treemap_size_bar,
 };
 
 const MIN_LABEL_W: f32 = 56.0;
@@ -283,7 +286,8 @@ fn treemap_body(
                         .into_element()
                 }
                 TreemapViewMode::Table => {
-                    treemap_table_view(state.clone(), res.clone(), current).into_element()
+                    treemap_table_view(state.clone(), res.clone(), current, &top_layer_ids)
+                        .into_element()
                 }
             }
         }))
@@ -476,9 +480,10 @@ struct TreemapTableRow {
     is_dir: bool,
     layer: Option<usize>,
     share: f32,
+    color_slot: usize,
 }
 
-fn treemap_table_rows(node: &FsNode) -> Arc<Vec<TreemapTableRow>> {
+fn treemap_table_rows(node: &FsNode, top_layer_ids: &[usize]) -> Arc<Vec<TreemapTableRow>> {
     let total_size = node.size.max(1);
     let mut children: Vec<&FsNode> = node.children.values().filter(|c| c.size > 0).collect();
     children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
@@ -488,6 +493,7 @@ fn treemap_table_rows(node: &FsNode) -> Arc<Vec<TreemapTableRow>> {
             let dom = dominant_layer(entry);
             let layer = dom.map(|(l, _)| l).or(entry.layer);
             let share = (entry.size as f64 / total_size as f64) as f32;
+            let color_slot = slot_for_layer(layer, top_layer_ids);
             TreemapTableRow {
                 name: entry.name.clone(),
                 path: entry.path.clone(),
@@ -495,6 +501,7 @@ fn treemap_table_rows(node: &FsNode) -> Arc<Vec<TreemapTableRow>> {
                 is_dir: entry.is_dir(),
                 layer,
                 share,
+                color_slot,
             }
         })
         .collect();
@@ -505,9 +512,69 @@ fn treemap_table_view(
     state: AppState,
     res: Arc<DockerAnalyzeResult>,
     node: &FsNode,
+    top_layer_ids: &[usize],
 ) -> impl IntoElement {
-    let items = treemap_table_rows(node);
+    let items = treemap_table_rows(node, top_layer_ids);
     treemap_table_list(state, res, signal(items))
+}
+
+fn step_treemap_table_selection(
+    rows: Signal<Arc<Vec<TreemapTableRow>>>,
+    selected_path: Signal<Option<String>>,
+    state: &AppState,
+    list_ref: &ElementRef,
+    delta: isize,
+) {
+    rows.with_untracked(|list| {
+        if list.is_empty() {
+            return;
+        }
+        let cur_pos = selected_path
+            .get_untracked()
+            .and_then(|sel| list.iter().position(|row| row.path == sel));
+        let next_pos = match cur_pos {
+            Some(pos) => (pos as isize + delta).clamp(0, (list.len() - 1) as isize) as usize,
+            None if delta >= 0 => 0,
+            None => list.len() - 1,
+        };
+        if let Some(entry) = list.get(next_pos) {
+            selected_path.set(Some(entry.path.clone()));
+            state.treemap_hovered.set(Some(TreemapHoverInfo {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+                size: entry.size,
+                layer: entry.layer,
+                share: entry.share,
+            }));
+            list_ref.scroll_to_index(next_pos as u32, Percentage(0.5), px(0.0), false);
+        }
+    });
+}
+
+fn activate_treemap_table_row(
+    rows: Signal<Arc<Vec<TreemapTableRow>>>,
+    selected_path: Signal<Option<String>>,
+    state: &AppState,
+    res: &Arc<DockerAnalyzeResult>,
+    fallback_idx: Option<usize>,
+) {
+    let entry = rows.with_untracked(|list| {
+        if let Some(sel) = selected_path.get_untracked()
+            && let Some(active) = list.iter().find(|r| r.path == sel)
+        {
+            return Some(active.clone());
+        }
+        fallback_idx.and_then(|idx| list.get(idx).cloned())
+    });
+    let Some(entry) = entry else {
+        return;
+    };
+    if entry.is_dir {
+        state.treemap_path.set(split_segments(&entry.path));
+        state.treemap_hovered.set(None);
+    } else {
+        open_treemap_file(state, res, &entry.path, entry.layer);
+    }
 }
 
 fn treemap_table_list(
@@ -516,6 +583,60 @@ fn treemap_table_list(
     rows: Signal<Arc<Vec<TreemapTableRow>>>,
 ) -> impl IntoElement {
     let lang = state.lang;
+    let selected_path = signal(None::<String>);
+    let table_focused = signal(false);
+    let list_ref = element_ref();
+
+    list_ref.on_focus_in(move || table_focused.set(true));
+    list_ref.on_focus_out(move || table_focused.set(false));
+    cleanup(move || table_focused.set(false));
+
+    let active_state = state.clone();
+    let table_active = computed(move || {
+        table_focused.get()
+            && !active_state.any_overlay_open()
+            && active_state.route.get() == AppRoute::Inspector
+            && active_state.active_tab.get() == InspectorTab::Treemap
+    });
+    let nav_state = state.clone();
+    let nav_res = res.clone();
+    effect(move || {
+        if !table_active.get() {
+            return;
+        }
+        let nav_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: true,
+            for_focus: true,
+            ..Default::default()
+        };
+        let up_state = nav_state.clone();
+        let up_list = list_ref;
+        on_key_with("up", nav_opts, move |_| {
+            step_treemap_table_selection(rows, selected_path, &up_state, &up_list, -1);
+        });
+        let down_state = nav_state.clone();
+        let down_list = list_ref;
+        on_key_with("down", nav_opts, move |_| {
+            step_treemap_table_selection(rows, selected_path, &down_state, &down_list, 1);
+        });
+        let act_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: false,
+            for_focus: true,
+            ..Default::default()
+        };
+        let enter_state = nav_state.clone();
+        let enter_res = nav_res.clone();
+        on_key_with("enter", act_opts, move |_| {
+            activate_treemap_table_row(rows, selected_path, &enter_state, &enter_res, None);
+        });
+        let space_state = nav_state.clone();
+        let space_res = nav_res.clone();
+        on_key_with("space", act_opts, move |_| {
+            activate_treemap_table_row(rows, selected_path, &space_state, &space_res, None);
+        });
+    });
 
     view()
         .flex_1()
@@ -572,6 +693,7 @@ fn treemap_table_list(
                 move |at| {
                     let click_state = state.clone();
                     let click_res = res.clone();
+                    let focus_state = state.clone();
                     let key_state = state.clone();
                     let key_res = res.clone();
                     let hover_state = state.clone();
@@ -587,8 +709,41 @@ fn treemap_table_list(
                         .border_color(move || theme().border.opacity(0.45))
                         .role(AccessibilityRole::Button)
                         .focusable(true)
+                        .accessibility_state(move || {
+                            let cur =
+                                rows.with(|list| list.get(at.index()).map(|e| e.path.clone()));
+                            let is_sel = cur.is_some() && cur == selected_path.get();
+                            AccessibilityState {
+                                selected: is_sel,
+                                ..AccessibilityState::default()
+                            }
+                        })
+                        .selected(|s| s.bg(surface_active))
+                        .bg(move || {
+                            let cur =
+                                rows.with(|list| list.get(at.index()).map(|e| e.path.clone()));
+                            if cur.is_some() && cur == selected_path.get() {
+                                surface_active()
+                            } else {
+                                theme().background
+                            }
+                        })
                         .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
                         .hover(|s| s.bg(move || theme().accent))
+                        .on_focus(move || {
+                            if let Some(entry) =
+                                rows.with_untracked(|list| list.get(at.index()).cloned())
+                            {
+                                selected_path.set(Some(entry.path.clone()));
+                                focus_state.treemap_hovered.set(Some(TreemapHoverInfo {
+                                    name: entry.name,
+                                    path: entry.path,
+                                    size: entry.size,
+                                    layer: entry.layer,
+                                    share: entry.share,
+                                }));
+                            }
+                        })
                         .on_mouse_enter(move |_: &MouseEvent| {
                             if let Some(entry) = rows.with(|list| list.get(at.index()).cloned()) {
                                 hover_state.treemap_hovered.set(Some(TreemapHoverInfo {
@@ -601,24 +756,19 @@ fn treemap_table_list(
                             }
                         })
                         .on_key_down(move |ev: &KeyEvent| {
-                            if matches!(ev.key.as_str(), "Enter" | " ")
-                                && let Some(entry) = rows.with(|list| list.get(at.index()).cloned())
-                            {
-                                if entry.is_dir {
-                                    key_state.treemap_path.set(split_segments(&entry.path));
-                                    key_state.treemap_hovered.set(None);
-                                } else {
-                                    open_treemap_file(
-                                        &key_state,
-                                        &key_res,
-                                        &entry.path,
-                                        entry.layer,
-                                    );
-                                }
+                            if matches!(ev.key.as_str(), "Enter" | "Space" | " ") {
+                                activate_treemap_table_row(
+                                    rows,
+                                    selected_path,
+                                    &key_state,
+                                    &key_res,
+                                    Some(at.index()),
+                                );
                             }
                         })
                         .on_press(move || {
                             if let Some(entry) = rows.with(|list| list.get(at.index()).cloned()) {
+                                selected_path.set(Some(entry.path.clone()));
                                 if entry.is_dir {
                                     click_state.treemap_path.set(split_segments(&entry.path));
                                     click_state.treemap_hovered.set(None);
@@ -695,9 +845,11 @@ fn treemap_table_list(
                                 .justify_end()
                                 .gap_2()
                                 .child(dynamic(move || {
-                                    let share = rows
-                                        .with(|list| list.get(at.index()).map_or(0.0, |e| e.share));
-                                    ui_size_bar(share, px(54.0)).into_element()
+                                    let (share, color_slot) = rows.with(|list| {
+                                        list.get(at.index())
+                                            .map_or((0.0, 0), |e| (e.share, e.color_slot))
+                                    });
+                                    ui_treemap_size_bar(share, px(54.0), color_slot).into_element()
                                 }))
                                 .child(
                                     text(move || {
@@ -732,6 +884,7 @@ fn treemap_table_list(
                         )
                 },
             )
+            .element_ref(&list_ref)
             .flex_1()
             .min_h(px(0.0))
             .estimated_item_size(px(32.0))
@@ -914,6 +1067,8 @@ mod tests {
         let state = AppState::new(DivingService::with_analyzer(analyzer));
         provide_context(state.clone());
         let res = large_treemap_result(90);
+        state.route.set(AppRoute::Inspector);
+        state.active_tab.set(InspectorTab::Treemap);
         state.result.set(Some(res.clone()));
 
         let load_state = state.clone();
@@ -1011,6 +1166,7 @@ mod tests {
                 is_dir: false,
                 layer: Some(0),
                 share: 1.0 / 90.0,
+                color_slot: 1,
             })
             .collect();
         let rows = signal(Arc::new(initial));
@@ -1058,5 +1214,85 @@ mod tests {
             .expect("shrink list while scrolled must not panic on out-of-bounds index");
         app.wait_for_gone("item-89.dat", Duration::from_secs(2))
             .expect("shrunk list rendered safely");
+    }
+
+    #[test]
+    fn treemap_table_preserves_layer_slot_colors_and_navigates_with_arrow_keys() {
+        use std::collections::BTreeMap;
+
+        let top_layers = vec![2_usize, 0, 5];
+        let inner = FsNode {
+            name: "bin".to_owned(),
+            path: "app/bin".to_owned(),
+            size: 600,
+            layer: Some(2),
+            children: BTreeMap::new(),
+        };
+        let mut dir_children = BTreeMap::new();
+        dir_children.insert("bin".to_owned(), inner);
+        let dir_child = FsNode {
+            name: "app".to_owned(),
+            path: "app".to_owned(),
+            size: 600,
+            layer: Some(2),
+            children: dir_children,
+        };
+        let other_file = FsNode {
+            name: "extra.dat".to_owned(),
+            path: "extra.dat".to_owned(),
+            size: 400,
+            layer: Some(9),
+            children: BTreeMap::new(),
+        };
+        let mut root_children = BTreeMap::new();
+        root_children.insert("app".to_owned(), dir_child);
+        root_children.insert("extra.dat".to_owned(), other_file);
+        let root = FsNode {
+            name: String::new(),
+            path: String::new(),
+            size: 1000,
+            layer: None,
+            children: root_children,
+        };
+
+        let table_rows = treemap_table_rows(&root, &top_layers);
+        assert_eq!(table_rows[0].color_slot, 1);
+        assert_eq!(table_rows[1].color_slot, 0);
+
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<TreemapAsyncAndTableHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start treemap table keyboard harness");
+        app.wait_for_within("Analyzing…", Duration::from_secs(2))
+            .expect("initial loading indicator visible");
+        app.press("Resolve tree").expect("resolve tree");
+        app.wait_for_within("Root", Duration::from_secs(2))
+            .expect("toolbar visible");
+        app.press("Table").expect("switch to Table view");
+        app.wait_for_within("item-00.dat", Duration::from_secs(2))
+            .expect("table rows rendered");
+
+        // Tab to row 0, then step Down with arrow key and confirm selected state updates.
+        for _ in 0..16 {
+            app.press_key("tab").expect("tab into treemap table");
+            if app.screen().selected("role:button[/item-00\\.dat/]") == Ok(true) {
+                break;
+            }
+        }
+        assert_eq!(
+            app.screen().selected("role:button[/item-00\\.dat/]"),
+            Ok(true)
+        );
+        app.press_key("down").expect("arrow down in treemap table");
+        app.wait_until("second treemap row selected", Duration::from_secs(2), |s| {
+            s.selected("role:button[/item-01\\.dat/]") == Ok(true)
+        })
+        .expect("item-01.dat selected via Down key");
     }
 }

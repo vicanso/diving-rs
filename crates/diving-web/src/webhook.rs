@@ -7,6 +7,7 @@
 
 use axum::body::to_bytes;
 use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -29,7 +30,7 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 use crate::error::HTTPError;
-use crate::http_util::{digests_equal, token_fingerprint};
+use crate::http_util::{digests_equal, extract_bearer_token, has_bearer_scheme, token_fingerprint};
 use crate::state::{with_arch, WebState};
 
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
@@ -143,8 +144,9 @@ fn verify_token_or_hmac(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
-        let token = auth.strip_prefix("Bearer ").unwrap_or(auth);
-        if matches_secret(token) {
+        let token =
+            extract_bearer_token(auth).or_else(|| (!has_bearer_scheme(auth)).then_some(auth));
+        if token.is_some_and(matches_secret) {
             return true;
         }
     }
@@ -206,28 +208,28 @@ fn verify_private_source(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool 
     true
 }
 
+/// Infer the server's HTTP base URL strictly from the request's `Host` header.
+///
+/// Forwarded headers (`X-Forwarded-Host` / `X-Forwarded-Proto`) are ignored
+/// because untrusted callers can spoof them; deployments behind a reverse
+/// proxy should configure `public_url` (`--public-url` / `$DIVING_PUBLIC_URL`).
 fn infer_report_base_url(headers: &HeaderMap) -> Option<String> {
-    let host_raw = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|v| v.to_str().ok())?;
-    let host = host_raw.split(',').next()?.trim();
+    let raw = headers.get(header::HOST).and_then(|v| v.to_str().ok())?;
+    let host = raw.trim();
     if host.is_empty()
+        || host.contains(',')
+        || host.contains('@')
         || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
     {
         return None;
     }
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|p| p.eq_ignore_ascii_case("http") || p.eq_ignore_ascii_case("https"))
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "http".to_string());
-    Some(format!("{proto}://{host}"))
+    let authority = host.parse::<Authority>().ok()?;
+    if authority.as_str() != host {
+        return None;
+    }
+    Some(format!("http://{host}"))
 }
 
 async fn handle_webhook(
@@ -253,10 +255,18 @@ async fn handle_webhook(
     let body = match to_bytes(req.into_body(), MAX_WEBHOOK_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("length limit exceeded") {
+                return json_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    &format!("webhook body exceeds {MAX_WEBHOOK_BODY_BYTES} bytes limit"),
+                );
+            }
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid",
-                &format!("failed to read webhook body: {e}"),
+                &format!("failed to read webhook body: {msg}"),
             );
         }
     };
@@ -905,6 +915,29 @@ mod tests {
         );
         assert!(verify_token_or_hmac(secret, &fp, &h_bearer, None, body));
 
+        let mut h_bearer_lower = HeaderMap::new();
+        h_bearer_lower.insert(
+            header::AUTHORIZATION,
+            "bearer whsec_demo123".parse().unwrap(),
+        );
+        assert!(verify_token_or_hmac(
+            secret,
+            &fp,
+            &h_bearer_lower,
+            None,
+            body
+        ));
+
+        let mut h_bearer_empty = HeaderMap::new();
+        h_bearer_empty.insert(header::AUTHORIZATION, "Bearer ".parse().unwrap());
+        assert!(!verify_token_or_hmac(
+            "Bearer",
+            &token_fingerprint("Bearer"),
+            &h_bearer_empty,
+            None,
+            body
+        ));
+
         let mut h_raw = HeaderMap::new();
         h_raw.insert(header::AUTHORIZATION, "whsec_demo123".parse().unwrap());
         assert!(verify_token_or_hmac(secret, &fp, &h_raw, None, body));
@@ -933,5 +966,27 @@ mod tests {
             Some("wrong"),
             body
         ));
+    }
+
+    #[test]
+    fn infer_report_base_url_ignores_forwarded_headers_and_validates_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert_eq!(infer_report_base_url(&headers), None);
+
+        headers.insert(header::HOST, "diving.internal:7001".parse().unwrap());
+        assert_eq!(
+            infer_report_base_url(&headers).as_deref(),
+            Some("http://diving.internal:7001")
+        );
+
+        let mut bad_host = HeaderMap::new();
+        bad_host.insert(header::HOST, "a.com, evil.com".parse().unwrap());
+        assert_eq!(infer_report_base_url(&bad_host), None);
+
+        let mut userinfo_host = HeaderMap::new();
+        userinfo_host.insert(header::HOST, "user@evil.com".parse().unwrap());
+        assert_eq!(infer_report_base_url(&userinfo_host), None);
     }
 }

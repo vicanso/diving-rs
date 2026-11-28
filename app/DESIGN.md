@@ -4,7 +4,7 @@
 
 ---
 
-## 1. 文档定位、目标平台与 NSH 0.6.1 工程前提
+## 1. 文档定位、目标平台与 NSH 0.7.0 工程前提
 
 ### 1.1 产品定位与架构前提
 
@@ -22,16 +22,16 @@
 | 窗口最小尺寸 | `960 × 640 pt` | 在最小尺寸下仍须保持主任务完整可用，禁止横向溢出与文字截断死锁 |
 | 响应式断点 | `1100 pt` | `>= 1100 pt` 为标准工作台模式；`960–1099 pt` 进入紧凑工作台模式 |
 
-### 1.3 NSH 0.6.1 强制约束清单
+### 1.3 NSH 0.7.0 强制约束清单
 
-在 `0.6.1` 版本的工具链与运行机制下，设计阶段必须纳入以下硬性工程约束：
+在 `0.7.0` 版本的工具链与运行机制下，设计阶段必须纳入以下硬性工程约束：
 
 1. **桌面自绘融合标题栏（#2348）**：隐藏操作系统默认标题栏（`TitleBarStyle::Hidden`），应用首行直接作为融合标题栏；通过 `title_bar()` 动态读取标题栏高度与原生窗口按钮占位（macOS 左侧红绿灯、Windows/Linux 右侧窗口按钮），禁止写死左侧 padding。
 2. **Capabilities 显式授权（0.6.0 #1499）**：`app/nsh.json` 若声明 `capabilities`，必须显式包含 `application: true`（主窗口、应用菜单、全局快捷键、退出与重启控制）与 `homeDir: true`（读取 `~/.diving/` 配置与缓存目录），并按需声明 `picker: true`（本地文件选择 `pick_paths` / `pick_save_path`）、`clipboard: true` 与 `openUrl`。
 3. **SVG 静态资源特性门控（0.6.1 #2615）**：通过 `asset!` / `assets!` 打包静态 SVG 图标时，必须在各桌面平台依赖（`nsh-platform-macos`、`nsh-platform-linux`、`nsh-platform-windows`）显式启用 `svg` feature，避免构建期报错。
 4. **右键上下文菜单事件类型（0.6.0 #2202）**：Rust 侧 `ContextMenu` 监听签名使用 `ContextMenuEvents`（而非旧版 `MenuEvent`）。
 5. **原生 Spring 过渡动画（0.6.0 #2259）**：`Transition` 为 `#[non_exhaustive]` 且原生支持 `spring` 曲线，用于侧抽屉、面板展开与物理复位。
-6. **Updater 命名通道与退出安装（0.6.0/0.6.1 #2249 / #2263）**：`app/nsh.json` 的 `updater` 必须声明专属桌面发布通道（例如 `desktop`）并启用 `installOnQuit`，防止仅发布 `diving` CLI 版本时误触发桌面客户端更新提示。
+6. **GitHub Releases 自更新器与平台包规范**：`app/Cargo.toml` 不启用 `nsh-platform-*` 的 `updater` / `shader` / `plot` 特性，更新流程由 `app/src/domain/updater.rs` 自主驱动：查询 `https://api.github.com/repos/vicanso/diving/releases/latest`，记录 48 小时检查节流与跳过版本号至 `~/.diving/update-check.json`，按平台下载 `Diving-macos-universal.dmg` / `Diving-linux-{x86_64,aarch64}.tar.gz` / `Diving-windows-{x86_64,aarch64}.zip` 并严格校验 `SHA256SUMS.txt`（回退 `SHA256SUMS`）；macOS 通过 `hdiutil` 静默挂载、校验 `CFBundleIdentifier = "io.github.vicanso.diving"` 与 `ditto` 替换 `Diving.app` 并自动重启（权限受限时回退至 Finder 挂载交付），启动时清扫遗留安装包挂载卷，在测试/无头环境下禁用后台自动检查。
 7. **指针光标礼仪（0.6.0 #2224）**：按钮、标签页、下拉选择器、列表行等应用内交互控件一律使用系统默认箭头光标；**仅外链（`link()`，`role="link"`）使用 `cursor_pointer()`**；拖拽分割条按实际方向使用 resize 光标。
 
 ---
@@ -187,11 +187,11 @@
 
 ---
 
-## 4. 桌面应用壳层与自绘标题栏（NSH 0.6.1 v2 工作台）
+## 4. 桌面应用壳层与自绘标题栏（NSH 0.7.0 工作台）
 
 ### 4.1 全高可折叠侧边栏 + 一体化 48pt 内容顶栏
 
-依据 NSH `0.6.1` 设计规范（#2348）与 macOS 原生多栏工具范式（对标 OrbStack / Linear），桌面窗口启用 `TitleBarStyle::Hidden`，由全高可折叠 `App Sidebar`（`208pt`）与右侧 `Content Header Bar`（`48pt`）共同构成原生顶通窗口：
+依据 NSH `0.7.0` 设计规范（#2348）与 macOS 原生多栏工具范式（对标 OrbStack / Linear），桌面窗口启用 `TitleBarStyle::Hidden`，由全高可折叠 `App Sidebar`（`208pt`）与右侧 `Content Header Bar`（`48pt`）共同构成原生顶通窗口：
 
 ```text
 +-----------------------+---------------------------------------------------------------------+
@@ -411,6 +411,7 @@
 | 5. 浮层开关 | `Menu`、`ContextMenu`、`Select`、`Popover` | `popup_starting_style` / `popup_ending_style`：从锚点角 `scale(0.97)` + `8pt` 偏移 + 透明度淡入（开 `BASE`/`EASE_OUT`，关 `FAST`/`EASE_IN`） | 立即出现/关闭 |
 | 5. 浮层开关 | `Dialog`（对比/本地镜像选择器）、`CommandPalette` | `motion()`：backdrop 淡入 + 内容区上浮 `12pt` 与 `scale(0.97)`（`SLOW`, `EASE_OUT`）；退出用 `FAST`, `EASE_IN` | 立即显示/消失 |
 | 8. 加载与进度 | 顶部异步分析进度条、按钮提交 Spinner | 确定进度：宽度由 `AnimatedValue` 平滑插值 (`FAST`)；未知等待：细微脉冲透明度 | 确定进度直接跳转；静止占位图标不旋转脉冲 |
+| 8. 加载与进度 | 应用内更新状态提示与菜单进度 | 检查/下载/校验/安装状态在 `⋯` 菜单与右上角 Status Toast 就地反馈，下载失败给出重试入口 | 直接更新文本提示与状态徽标 |
 | 9. 持续或实时状态 | 未触发交互的静置工具栏与数据面板 | **无动效**（克制专业工作台，静止区域绝不做呼吸、光晕或漂浮装饰） | 同上 |
 
 #### 7.2.2 Landing（首页）与渐进分析预览（Progressive Preview）
@@ -440,7 +441,7 @@
 
 | 状态变化类型 | 具体场景 | NSH 实现工具与 Tokens | 减弱动态效果 (`reduce_motion`) |
 | --- | --- | --- | --- |
-| 5. 浮层开关 | `FilePreviewSheet` 右侧滑入与关闭 | NSH `0.6.0` `Transition::spring(spring::PANEL)` 从右侧边缘滑入，背景遮罩淡入 (`BASE`)；支持关闭中途再选中另一文件直接替换内容而**不闪关抽屉** | 立即显现/关闭 |
+| `5. 浮层开关` | `FilePreviewSheet` 右侧滑入与关闭 | NSH `0.7.0` `Transition::spring(spring::PANEL)` 从右侧边缘滑入，背景遮罩淡入 (`BASE`)；支持关闭中途再选中另一文件直接替换内容而**不闪关抽屉** | 立即显现/关闭 |
 | 7. 拖拽与释放 | 若支持抽屉左边界调宽拖拽 | 拖拽跟随鼠标 1:1 变更宽度，松手吸附或保留当前宽度 | 1:1 跟随 |
 | 3. 选中项移动 | Diff View 顶部 `Added / Removed / Resized` 子 Tab 切换 | 与全局 `Tabs` 共用单一 `AnimatedValue` 滑块 (`BASE`, `EASE_IN_OUT`) | 立即跳切 |
 | 4. 内容到达/离开 | 点击 Diff View 的 `Swap`（交换 Base/Target） | 双侧标题栏与指标数据轻量交叉淡入 (`FAST`)，明确反馈已对调 | 立即刷新 |
@@ -469,6 +470,9 @@
 | `action_compare` | `Compare with…` | `对比…` | 唤起基准镜像选择弹窗（带 `…`） |
 | `action_save_as` | `Save as…` | `另存为…` | 预览抽屉导出单个文件到本地磁盘 |
 | `action_export_md` | `Export Markdown…` | `导出 Markdown…` | 导出分析或对比 Markdown 报告 |
+| `action_check_updates` | `Check for updates…` | `检查更新…` | 手动触发 GitHub Releases 更新检查 |
+| `action_update_restart` | `Update & restart` | `更新并重启` | 发现新版本或就绪后立即下载安装并重启 |
+| `action_skip_version` | `Skip this version` | `跳过此版本` | 跳过当前可用版本，不再主动提醒 |
 | `action_copy` / `copied` | `Copy` / `Copied` | `复制` / `已复制` | 立即动作，变更标签无需弹窗 |
 | `action_swap` | `Swap` | `交换基准` | 对调 Diff 两侧镜像 |
 | `tab_files` | `File Tree` | `文件树` | Inspector 主 Tab 1 |
@@ -530,7 +534,7 @@
 
 ### 10.2 执行级 Finishing Checklist（逐项核查，未核即未过）
 
-#### 桌面自绘标题栏（NSH 0.6.1 新增阻塞项）
+#### 桌面自绘标题栏（NSH 0.7.0 工作台规范）
 - [ ] 系统标题栏已隐藏（`TitleBarStyle::Hidden`），应用上方无系统灰/白原生标题横条。
 - [ ] 原生窗口按钮安全空间（macOS 红绿灯 `left`、Win/Linux 窗口控制按钮 `right`）直接读取自 `title_bar()`，窗口首行直接承载品牌/搜索/操作而非空条。
 - [ ] 标题栏空白背景支持拖拽窗口与双击缩放，交互按钮/输入框标记 `.window_drag(false)` 不抢拖拽事件。

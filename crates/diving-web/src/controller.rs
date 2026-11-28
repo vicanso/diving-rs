@@ -6,8 +6,9 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
 use diving_core::{
-    resolve_explicit_credentials, to_diff_markdown, to_markdown, to_summary_markdown,
-    AnalyzeOptions, Error as CoreError, ImagePreview, Lang, PreviewOptions,
+    is_safe_blob_id, parse_image_info, resolve_explicit_credentials, to_diff_markdown, to_markdown,
+    to_summary_markdown, AnalyzeOptions, Error as CoreError, ImagePreview, Lang, PreviewOptions,
+    REGISTRY_LOCAL_FILE,
 };
 use futures::stream;
 use http::{header, StatusCode, Uri};
@@ -17,7 +18,7 @@ use tower_http::compression::CompressionLayer;
 
 use crate::dist::{get_static_file, StaticFile};
 use crate::error::{HTTPError, HTTPResult};
-use crate::http_util::{digests_equal, token_fingerprint};
+use crate::http_util::{digests_equal, extract_bearer_token, token_fingerprint};
 use crate::state::{parse_diff_options, McpStatus, WebState};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,10 +56,7 @@ async fn require_api_token(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
-        })
+        .and_then(extract_bearer_token)
         .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -215,6 +213,16 @@ struct GetFileParams {
     digest: String,
     media_type: String,
     file: String,
+    image: Option<String>,
+}
+
+fn local_file_archive(image: Option<&str>) -> Option<String> {
+    let raw = image?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let info = parse_image_info(raw);
+    (info.registry == REGISTRY_LOCAL_FILE).then_some(info.name)
 }
 
 /// Text shown by the web preview; longer files are cut, not refused.
@@ -294,9 +302,19 @@ async fn preview_file(
     let digest = params.digest;
     let media_type = params.media_type;
     let file_path = params.file;
+    let use_cached = is_safe_blob_id(&digest) && analyzer.has_layer_blob(&digest);
+    let local_archive = local_file_archive(params.image.as_deref());
     let preview = tokio::task::spawn_blocking(move || -> HTTPResult<FilePreview> {
-        let (head, size) =
-            analyzer.read_file_head(&digest, &media_type, &file_path, PREVIEW_TEXT_BYTES)?;
+        let (head, size) = match (use_cached, local_archive) {
+            (false, Some(archive_path)) => analyzer.read_local_file_head(
+                &archive_path,
+                &digest,
+                &media_type,
+                &file_path,
+                PREVIEW_TEXT_BYTES,
+            )?,
+            _ => analyzer.read_file_head(&digest, &media_type, &file_path, PREVIEW_TEXT_BYTES)?,
+        };
         Ok(build_preview(&head, size))
     })
     .await
@@ -313,6 +331,8 @@ async fn get_file(
     let digest = params.digest;
     let media_type = params.media_type;
     let file_path = params.file;
+    let use_cached = is_safe_blob_id(&digest) && analyzer.has_layer_blob(&digest);
+    let local_archive = local_file_archive(params.image.as_deref());
     let raw_name = file_path.split('/').next_back().unwrap_or_default();
     // Strip characters that would break the Content-Disposition header value
     let name: String = raw_name
@@ -324,12 +344,25 @@ async fn get_file(
     // downloads (up to 100 MiB) never buffer the whole payload in RAM.
     let (tx, mut rx) = mpsc::channel::<Result<Bytes, CoreError>>(8);
     tokio::task::spawn_blocking(move || {
-        let res = analyzer.stream_file(&digest, &media_type, &file_path, max_bytes, |chunk| {
-            tx.blocking_send(Ok(Bytes::copy_from_slice(chunk)))
-                .map_err(|_| CoreError::Other {
-                    message: "download client disconnected".to_string(),
-                })
-        });
+        let res = match (use_cached, local_archive) {
+            (false, Some(archive_path)) => analyzer
+                .read_local_file(&archive_path, &digest, &media_type, &file_path, max_bytes)
+                .and_then(|bytes| {
+                    for chunk in bytes.chunks(64 * 1024) {
+                        tx.blocking_send(Ok(Bytes::copy_from_slice(chunk)))
+                            .map_err(|_| CoreError::Other {
+                                message: "download client disconnected".to_string(),
+                            })?;
+                    }
+                    Ok(())
+                }),
+            _ => analyzer.stream_file(&digest, &media_type, &file_path, max_bytes, |chunk| {
+                tx.blocking_send(Ok(Bytes::copy_from_slice(chunk)))
+                    .map_err(|_| CoreError::Other {
+                        message: "download client disconnected".to_string(),
+                    })
+            }),
+        };
         if let Err(err) = res {
             let _ = tx.blocking_send(Err(err));
         }
@@ -438,19 +471,25 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        // /api/* with Bearer token -> 200
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/latest-images")
-                    .header(header::AUTHORIZATION, "Bearer super-secret-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        // /api/* with Bearer token (case-insensitive scheme) -> 200
+        for auth in [
+            "Bearer super-secret-token",
+            "bearer super-secret-token",
+            "BEARER super-secret-token",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/latest-images")
+                        .header(header::AUTHORIZATION, auth)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{auth}");
+        }
 
         // /api/* with X-API-Key -> 200
         let resp = app

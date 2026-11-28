@@ -1,8 +1,11 @@
 //! Local Docker / Podman container image picker dialog with daemon failure recovery.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use diving_core::{LocalContainerImage, LocalRuntime};
+use nsh_core::AccessibilityState;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
@@ -74,9 +77,21 @@ fn picker_body(state: AppState) -> impl IntoElement {
 
     let filter_ref = element_ref();
     let list_ref = element_ref();
+    let list_focused = signal(false);
+    list_ref.on_focus_in(move || list_focused.set(true));
+    list_ref.on_focus_out(move || list_focused.set(false));
+    let focus_alive = Arc::new(AtomicBool::new(true));
+    let focus_cleanup_alive = focus_alive.clone();
+    cleanup(move || {
+        focus_cleanup_alive.store(false, Ordering::SeqCst);
+        list_focused.set(false);
+    });
+
     let focus_target = filter_ref;
     set_timeout(Duration::from_millis(20), move || {
-        focus_target.focus();
+        if focus_alive.load(Ordering::SeqCst) {
+            focus_target.focus();
+        }
     });
 
     let filter_sig = state.local_filter;
@@ -137,6 +152,33 @@ fn picker_body(state: AppState) -> impl IntoElement {
     let down_list = list_ref;
     on_key_with("down", nav_options, move |_| {
         step_local_selection(&down_rows, &down_state, &down_list, 1);
+    });
+
+    let active_state = state.clone();
+    let list_active = computed(move || {
+        list_focused.get()
+            && active_state.local_picker_open.get()
+            && !active_state.command_palette_open.get()
+    });
+    let act_state = state.clone();
+    effect(move || {
+        if !list_active.get() {
+            return;
+        }
+        let act_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: false,
+            for_focus: true,
+            ..Default::default()
+        };
+        let enter_state = act_state.clone();
+        on_key_with("enter", act_opts, move |_| {
+            enter_state.analyze_selected_local_image();
+        });
+        let space_state = act_state.clone();
+        on_key_with("space", act_opts, move |_| {
+            space_state.analyze_selected_local_image();
+        });
     });
 
     let list_state = state;
@@ -432,6 +474,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                     move || filtered_rows.with(|r| r.len()),
                                     move |at| {
                                         let click_state = row_state.clone();
+                                        let focus_state = row_state.clone();
                                         let key_state = row_state.clone();
 
                                         view()
@@ -443,6 +486,19 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                             .gap_2()
                                             .role(AccessibilityRole::Button)
                                             .focusable(true)
+                                            .accessibility_state(move || {
+                                                let row_ref = filtered_rows.with(|r| {
+                                                    r.get(at.index())
+                                                        .map(LocalContainerImage::reference)
+                                                });
+                                                let is_selected = row_ref.is_some()
+                                                    && row_ref == selected_ref.get();
+                                                AccessibilityState {
+                                                    selected: is_selected,
+                                                    ..AccessibilityState::default()
+                                                }
+                                            })
+                                            .selected(|s| s.bg(surface_active))
                                             .focus_visible(|s| {
                                                 s.outline(px(2.0))
                                                     .outline_color(move || theme().ring)
@@ -463,20 +519,39 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                 }
                                             })
                                             .hover(|s| s.bg(move || theme().accent))
-                                            .on_key_down(move |ev: &KeyEvent| {
-                                                if matches!(ev.key.as_str(), "Enter" | " ")
-                                                    && let Some(reference) =
-                                                        filtered_rows.with(|r| {
-                                                            r.get(at.index())
-                                                                .map(LocalContainerImage::reference)
-                                                        })
+                                            .on_focus(move || {
+                                                if let Some(reference) = filtered_rows
+                                                    .with_untracked(|r| {
+                                                        r.get(at.index())
+                                                            .map(LocalContainerImage::reference)
+                                                    })
                                                 {
-                                                    key_state
+                                                    focus_state
                                                         .local_selected_ref
                                                         .set(Some(reference));
-                                                    if ev.key.as_str() == "Enter" {
-                                                        key_state.analyze_selected_local_image();
+                                                }
+                                            })
+                                            .on_key_down(move |ev: &KeyEvent| {
+                                                if matches!(
+                                                    ev.key.as_str(),
+                                                    "Enter" | "Space" | " "
+                                                ) {
+                                                    if key_state
+                                                        .local_selected_ref
+                                                        .get_untracked()
+                                                        .is_none()
+                                                        && let Some(reference) =
+                                                            filtered_rows.with(|r| {
+                                                                r.get(at.index()).map(
+                                                                    LocalContainerImage::reference,
+                                                                )
+                                                            })
+                                                    {
+                                                        key_state
+                                                            .local_selected_ref
+                                                            .set(Some(reference));
                                                     }
+                                                    key_state.analyze_selected_local_image();
                                                 }
                                             })
                                             .on_press(move || {
@@ -629,6 +704,7 @@ fn picker_footer(state: AppState) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
     use std::time::Duration;
 
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
@@ -709,5 +785,103 @@ mod tests {
             .expect("second Esc on empty filter closes Local Images dialog");
         app.wait_for_gone("Analyze selected", Duration::from_secs(3))
             .expect("Local Images dialog closed");
+    }
+
+    #[component]
+    fn LocalPickerKeyboardActivationHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        let images: Vec<LocalContainerImage> = (0..5)
+            .map(|i| LocalContainerImage {
+                runtime: LocalRuntime::Docker,
+                repository: format!("repo/item-{i:02}"),
+                tag: "latest".to_owned(),
+                id: format!("def{i:09}"),
+                created: "today".to_owned(),
+                size: "12 MB".to_owned(),
+            })
+            .collect();
+        state.local_images.set(images);
+        state
+            .local_selected_ref
+            .set(Some("docker://repo/item-02:latest".to_owned()));
+        state.local_loading.set(false);
+        state.local_error.set(None);
+        state.local_picker_open.set(true);
+
+        let pending = state.pending_image;
+        let sel = state.local_selected_ref;
+        view()
+            .flex_col()
+            .child(text(move || {
+                format!(
+                    "sel={};analyzed={}",
+                    sel.get().unwrap_or_default(),
+                    pending.get().unwrap_or_default()
+                )
+            }))
+            .child(local_picker_dialog(state))
+    }
+
+    #[test]
+    fn local_picker_arrow_plus_space_or_enter_acts_on_active_selection_and_sets_selected_state() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(
+                windowed_root::<LocalPickerKeyboardActivationHarness>().tokens(app_tokens()),
+            )
+        };
+        let mut app = Headless::start(config).expect("start local picker keyboard harness");
+        app.wait_for_within("repo/item-00:latest", Duration::from_secs(3))
+            .expect("rows visible");
+        thread::sleep(Duration::from_millis(35));
+
+        // Tab until focus enters row 0 (repo/item-00:latest), overriding item-02 via row on_focus.
+        for _ in 0..24 {
+            app.press_key("tab").expect("tab forward");
+            if app
+                .screen()
+                .selected("role:button[/repo\\/item-00:latest/]")
+                == Ok(true)
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            app.screen()
+                .selected("role:button[/repo\\/item-00:latest/]"),
+            Ok(true)
+        );
+
+        // Press Down so active selection moves to item-01 while focus stays on row 0, then Space activates item-01.
+        app.press_key("down").expect("arrow down to item-01");
+        app.wait_until(
+            "active selection moved to item-01",
+            Duration::from_secs(2),
+            |s| s.selected("role:button[/repo\\/item-01:latest/]") == Ok(true),
+        )
+        .expect("active selection moved to item-01");
+        assert_eq!(
+            app.screen()
+                .selected("role:button[/repo\\/item-00:latest/]"),
+            Ok(false)
+        );
+        assert_eq!(
+            app.screen()
+                .selected("role:button[/repo\\/item-01:latest/]"),
+            Ok(true)
+        );
+
+        app.press_key("space")
+            .expect("space activates active item-01 rather than stale focused row 0");
+        app.wait_for_within(
+            "sel=docker://repo/item-01:latest;analyzed=docker://repo/item-01:latest",
+            Duration::from_secs(2),
+        )
+        .expect("Space analyzed active item-01");
     }
 }

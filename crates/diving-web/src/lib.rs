@@ -192,13 +192,13 @@ pub fn build_app_router(
     }
     Router::new()
         .merge(routes)
-        .layer(from_fn(entry))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_error))
                 .timeout(Duration::from_secs(10 * 60)),
         )
         .layer(from_fn(access_log))
+        .layer(from_fn(entry))
 }
 
 pub async fn run(args: WebArgs, loaded: LoadedConfig, analyzer: Analyzer, http_client: Client) {
@@ -305,6 +305,76 @@ pub async fn run(args: WebArgs, loaded: LoadedConfig, analyzer: Analyzer, http_c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use diving_core::GateConfig;
+    use http::{Request, StatusCode};
+    use std::fmt::Debug;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+    use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber;
+    use tracing::{span, Dispatch, Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct AccessLogCapture {
+        trace_ids: Mutex<Vec<String>>,
+    }
+
+    #[derive(Default)]
+    struct AccessLogVisitor {
+        category: Option<String>,
+        trace_id: Option<String>,
+    }
+
+    impl Visit for AccessLogVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            match field.name() {
+                "category" => self.category = Some(value.to_string()),
+                "traceId" => self.trace_id = Some(value.to_string()),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            let formatted = format!("{value:?}").trim_matches('"').to_string();
+            match field.name() {
+                "category" => self.category = Some(formatted),
+                "traceId" => self.trace_id = Some(formatted),
+                _ => {}
+            }
+        }
+    }
+
+    impl Subscriber for AccessLogCapture {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = AccessLogVisitor::default();
+            event.record(&mut visitor);
+            if visitor.category.as_deref() == Some("accessLog") {
+                self.trace_ids
+                    .lock()
+                    .unwrap()
+                    .push(visitor.trace_id.unwrap_or_default());
+            }
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
 
     #[test]
     fn web_args_accepts_legacy_mode_web_flag() {
@@ -320,5 +390,40 @@ mod tests {
         assert_eq!(args.mode, "web");
         assert_eq!(args.listen, "0.0.0.0:7001");
         assert!(args.no_webhook);
+    }
+
+    #[tokio::test]
+    async fn access_log_records_non_empty_trace_id() {
+        let analyzer = Analyzer::builder().build().unwrap();
+        let state = Arc::new(WebState::new(
+            analyzer,
+            Client::new(),
+            PathBuf::new(),
+            GateConfig::default(),
+            1024 * 1024,
+            McpStatus::default(),
+            vec![],
+        ));
+        let app = build_app_router(state, None, None);
+
+        let capture = Arc::new(AccessLogCapture::default());
+        let dispatch = Dispatch::from(capture.clone());
+
+        let mut req = Request::builder()
+            .uri("/api/latest-images")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let resp = app.oneshot(req).with_subscriber(dispatch).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ids = capture.trace_ids.lock().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(
+            !ids[0].is_empty(),
+            "expected access_log traceId to be populated inside entry scope"
+        );
     }
 }

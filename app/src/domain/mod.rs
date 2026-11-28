@@ -4,6 +4,7 @@ pub mod model;
 pub mod service;
 pub mod state;
 pub mod treemap;
+pub mod updater;
 
 pub use model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileProvenanceHit, FileTreeFilter, FileTreeRow,
@@ -17,8 +18,11 @@ pub use model::{
     visible_layer_indices,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
-pub use state::{AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo};
+pub use state::{
+    AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo, UpdatePhase,
+    has_pending_update_indicator,
+};
 pub use treemap::{
     FsNode, TreemapChildTile, TreemapRect, TreemapTile, build_final_tree, dominant_layer,
-    find_fs_node, layer_bytes, layout_treemap_tiles, squarify, top_three_layers,
+    find_fs_node, layer_bytes, layout_treemap_tiles, slot_for_layer, squarify, top_three_layers,
 };

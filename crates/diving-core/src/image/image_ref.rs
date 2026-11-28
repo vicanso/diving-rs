@@ -142,9 +142,20 @@ fn strip_windows_drive_leading_slash(path: &str) -> &str {
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
     if let Some(path) = value.strip_prefix(FILE_PROTOCOL) {
-        // `?arch=` picks a platform out of a multi-arch OCI archive.
-        let (path, arch) = match path.rsplit_once("?arch=") {
-            Some((path, arch)) => (path, arch),
+        // `?arch=` (with optional `&other=...` params) picks a platform out of a multi-arch OCI archive.
+        let (path, arch) = match path.rsplit_once('?') {
+            Some((head, query)) => {
+                if let Some(found) = query
+                    .split('&')
+                    .filter_map(|kv| kv.split_once('='))
+                    .find(|(k, _)| *k == "arch")
+                    .map(|(_, v)| v)
+                {
+                    (head, found)
+                } else {
+                    (path, "")
+                }
+            }
             None => (path, ""),
         };
         let path = strip_windows_drive_leading_slash(path);
@@ -421,5 +432,22 @@ mod tests {
         assert_eq!(info.arch, "arm64");
         assert_eq!(info.tag, "alpine");
         assert_eq!(info.name, "redis");
+    }
+
+    #[test]
+    fn test_parse_file_url_splits_ampersand_query_params() {
+        let info = parse_image_info("file:///tmp/app.tar?arch=arm64&other=1");
+        assert_eq!(info.registry, REGISTRY_LOCAL_FILE);
+        assert_eq!(info.name, "/tmp/app.tar");
+        assert_eq!(info.arch, "arm64");
+
+        let info = parse_image_info("file:///tmp/app.tar?foo=bar&arch=arm/v7&baz=2");
+        assert_eq!(info.name, "/tmp/app.tar");
+        assert_eq!(info.arch, "arm/v7");
+
+        // `?` in a directory name without `&arch=` query leaves path intact cleanly.
+        let info = parse_image_info("file:///tmp/dir?name/oci");
+        assert_eq!(info.name, "/tmp/dir?name/oci");
+        assert_eq!(info.arch, "");
     }
 }

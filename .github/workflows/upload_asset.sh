@@ -28,9 +28,16 @@ if [ -n "${2:-}" ]; then
     export GH_TOKEN="$2"
 fi
 
-tag="$(git describe --tags --abbrev=0)"
-if [ -z "$tag" ]; then
-    printf "\e[31mError: Unable to find git tag\e[0m\n"
+case "${GITHUB_REF:-}" in
+    refs/tags/*)
+        tag="${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}"
+        ;;
+    *)
+        tag="$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || true)"
+        ;;
+esac
+if [ -z "${tag:-}" ]; then
+    printf "\e[31mError: Unable to find git tag\e[0m\n" >&2
     exit 1
 fi
 echo "Uploading $file_path to $repo@$tag"

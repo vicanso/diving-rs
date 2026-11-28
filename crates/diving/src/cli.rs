@@ -1,9 +1,10 @@
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use bytesize::ByteSize;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use diving_app::ai::{analyze_with_ai, entrypoint_scripts_md, AiConfig};
 use diving_app::config::LoadedConfig;
@@ -322,11 +323,57 @@ async fn analyze_for_cli(
     Ok(unwrap_result(arc))
 }
 
-fn print_gate_failures(failures: &[GateFailure], lang: Lang) {
+fn write_statusln(to_stderr: bool, out: &mut dyn Write, err: &mut dyn Write, line: &str) {
+    if to_stderr {
+        let _ = writeln!(err, "{line}");
+    } else {
+        let _ = writeln!(out, "{line}");
+    }
+}
+
+fn statusln(to_stderr: bool, line: &str) {
+    let mut out = io::stdout();
+    let mut err = io::stderr();
+    write_statusln(to_stderr, &mut out, &mut err, line);
+}
+
+fn write_gate_failures(
+    failures: &[GateFailure],
+    lang: Lang,
+    to_stderr: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) {
     let fail = tr(lang, "cli.fail").red().to_string();
     for failure in failures {
-        println!("{}", failure.render(lang, &fail));
+        write_statusln(to_stderr, out, err, &failure.render(lang, &fail));
     }
+}
+
+fn print_gate_failures(failures: &[GateFailure], lang: Lang, to_stderr: bool) {
+    let mut out = io::stdout();
+    let mut err = io::stderr();
+    write_gate_failures(failures, lang, to_stderr, &mut out, &mut err);
+}
+
+fn write_output_target(
+    target: &str,
+    content: &str,
+    separate_stdout: bool,
+    out: &mut dyn Write,
+) -> Result<bool, String> {
+    if target == "-" {
+        if separate_stdout {
+            writeln!(out, "\n---\n").map_err(|err| err.to_string())?;
+        }
+        write!(out, "{content}").map_err(|err| err.to_string())?;
+        if !content.ends_with('\n') {
+            writeln!(out).map_err(|err| err.to_string())?;
+        }
+        return Ok(true);
+    }
+    fs::write(target, content).map_err(|err| err.to_string())?;
+    Ok(false)
 }
 
 async fn analyze(
@@ -346,6 +393,7 @@ async fn analyze(
         notify_cfg,
         credentials,
     } = opts;
+    let stdout_piped = output_file == "-" || summary_file.as_deref() == Some("-");
     analyzer.cleanup_caches().await.map_err(|e| e.to_string())?;
     let result = analyze_for_cli(analyzer, &image, lang, verify_dup, credentials).await?;
 
@@ -375,8 +423,11 @@ async fn analyze(
         )
         .await
         .map_err(|e| fill(tr(lang, "ai.fail"), &[&e]))?;
-        println!("{}", tr(lang, "ai.report").bold().green());
-        println!("{report}");
+        statusln(
+            stdout_piped,
+            &tr(lang, "ai.report").bold().green().to_string(),
+        );
+        statusln(stdout_piped, &report);
         Some(report)
     } else {
         None
@@ -405,7 +456,7 @@ async fn analyze(
             report_url: report_url.as_deref(),
             lang,
         };
-        push_notifications(analyzer, &notify_cfg, &ctx).await?;
+        push_notifications(analyzer, &notify_cfg, &ctx, stdout_piped).await?;
     }
 
     let wants_output = !output_file.is_empty() || summary_file.is_some();
@@ -414,23 +465,29 @@ async fn analyze(
     }
 
     if is_ci() || wants_output {
-        println!("{}", tr(lang, "cli.result").bold().green());
-        println!(
-            "{}",
-            fill(tr(lang, "cli.efficiency"), &[&summary.score.to_string()])
+        statusln(
+            stdout_piped,
+            &tr(lang, "cli.result").bold().green().to_string(),
         );
-        println!(
-            "{}",
-            fill(
+        statusln(
+            stdout_piped,
+            &fill(tr(lang, "cli.efficiency"), &[&summary.score.to_string()]),
+        );
+        statusln(
+            stdout_piped,
+            &fill(
                 tr(lang, "cli.wasted"),
                 &[
                     &summary.wasted_size.to_string(),
                     &ByteSize(summary.wasted_size).to_string(),
-                ]
-            )
+                ],
+            ),
         );
         if !result.recommendations.is_empty() {
-            println!("{}", tr(lang, "cli.recs").bold().green());
+            statusln(
+                stdout_piped,
+                &tr(lang, "cli.recs").bold().green().to_string(),
+            );
             for r in &result.recommendations {
                 let tag = format!(
                     "[{}/{}]",
@@ -456,11 +513,16 @@ async fn analyze(
                 } else {
                     format!(" ({})", r.id)
                 };
-                println!("  {colored} {}{saved}{note}", r.title);
+                statusln(
+                    stdout_piped,
+                    &format!("  {colored} {}{saved}{note}", r.title),
+                );
             }
         }
 
-        print_gate_failures(&failures, lang);
+        print_gate_failures(&failures, lang, stdout_piped);
+        let mut out = io::stdout();
+        let mut wrote_stdout = false;
         if !output_file.is_empty() {
             let is_markdown = output_file == "-"
                 || output_file.ends_with(".md")
@@ -470,19 +532,11 @@ async fn analyze(
             } else {
                 serde_json::to_string(&result.report(&summary)).map_err(|err| err.to_string())?
             };
-            if output_file == "-" {
-                print!("{content}");
-            } else {
-                fs::write(output_file, content).map_err(|err| err.to_string())?;
-            }
+            wrote_stdout = write_output_target(&output_file, &content, false, &mut out)?;
         }
         if let Some(target) = &summary_file {
             let md = to_summary_markdown(&result, lang, verdict.as_deref());
-            if target == "-" {
-                print!("{md}");
-            } else {
-                fs::write(target, md).map_err(|err| err.to_string())?;
-            }
+            write_output_target(target, &md, wrote_stdout, &mut out)?;
         }
         if is_ci() && !failures.is_empty() {
             return Ok(false);
@@ -508,6 +562,8 @@ async fn diff(
         lang,
         credentials,
     } = opts;
+    let stdout_piped =
+        output_file.is_empty() || output_file == "-" || summary_file.as_deref() == Some("-");
     analyzer.cleanup_caches().await.map_err(|e| e.to_string())?;
     let base_res = analyze_for_cli(analyzer, &base, lang, verify_dup, credentials.clone()).await?;
     let target_res = analyze_for_cli(analyzer, &target, lang, verify_dup, credentials).await?;
@@ -526,18 +582,22 @@ async fn diff(
     let verdict = is_ci().then(|| gate_verdict_md(&failures, lang));
     let md = to_diff_markdown(&diff, lang, verdict.as_deref());
 
-    if output_file.is_empty() || output_file == "-" {
-        print!("{md}");
+    let mut out = io::stdout();
+    let wrote_stdout = if output_file.is_empty() || output_file == "-" {
+        write_output_target("-", &md, false, &mut out)?
     } else {
         let shown_delta = if diff.base_layers_ignored {
             diff.upper_size_delta
         } else {
             diff.size_delta
         };
-        println!("{}", tr(lang, "cli.result").bold().green());
-        println!(
-            "{}",
-            fill(
+        statusln(
+            stdout_piped,
+            &tr(lang, "cli.result").bold().green().to_string(),
+        );
+        statusln(
+            stdout_piped,
+            &fill(
                 tr(lang, "cli.diff.size"),
                 &[
                     &ByteSize(diff.base.total_size).to_string(),
@@ -547,24 +607,20 @@ async fn diff(
                         if shown_delta < 0 { "-" } else { "+" },
                         ByteSize(shown_delta.unsigned_abs())
                     ),
-                ]
-            )
+                ],
+            ),
         );
         let content = if output_file.ends_with(".md") || output_file.ends_with(".markdown") {
             md.clone()
         } else {
             serde_json::to_string(&diff).map_err(|err| err.to_string())?
         };
-        fs::write(output_file, content).map_err(|err| err.to_string())?;
-    }
+        write_output_target(&output_file, &content, false, &mut out)?
+    };
     if let Some(target) = &summary_file {
-        if target == "-" {
-            print!("{md}");
-        } else {
-            fs::write(target, &md).map_err(|err| err.to_string())?;
-        }
+        write_output_target(target, &md, wrote_stdout, &mut out)?;
     }
-    print_gate_failures(&failures, lang);
+    print_gate_failures(&failures, lang, stdout_piped);
     Ok(!(is_ci() && !failures.is_empty()))
 }
 
@@ -586,6 +642,7 @@ async fn push_notifications(
     analyzer: &Analyzer,
     cfg: &NotifyConfig,
     ctx: &NotifyContext<'_>,
+    to_stderr: bool,
 ) -> Result<(), String> {
     let wecom_only = cfg.channel_names().as_slice() == ["wecom"];
     let (sending_key, sent_key, fail_key) = if wecom_only {
@@ -600,7 +657,10 @@ async fn push_notifications(
             let joined = errs.join("; ");
             fill(tr(ctx.lang, fail_key), &[&joined])
         })?;
-    println!("{}", tr(ctx.lang, sent_key).bold().green());
+    statusln(
+        to_stderr,
+        &tr(ctx.lang, sent_key).bold().green().to_string(),
+    );
     Ok(())
 }
 
@@ -673,7 +733,7 @@ pub async fn run(args: Args, loaded: LoadedConfig, analyzer: Analyzer) {
                 exit_on(outcome, lang);
             })
             .await;
-    } else if let Some(value) = args.image {
+    } else if let Some(value) = args.image.filter(|s| !s.trim().is_empty()) {
         TRACE_ID
             .scope(generate_trace_id(), async {
                 let outcome = analyze(
@@ -697,7 +757,9 @@ pub async fn run(args: Args, loaded: LoadedConfig, analyzer: Analyzer) {
             })
             .await;
     } else {
-        error!("image can not be nil");
+        let mut cmd = Args::command();
+        let _ = cmd.write_help(&mut io::stderr());
+        eprintln!();
         std::process::exit(EXIT_ERROR);
     }
 }
@@ -796,5 +858,56 @@ mod tests {
         assert!(Args::try_parse_from(["diving", "--listen", "0.0.0.0:7001"]).is_err());
         assert!(Args::try_parse_from(["diving", "--mcp-token", "tok"]).is_err());
         assert!(Args::try_parse_from(["diving", "--webhook-token", "tok"]).is_err());
+    }
+
+    #[test]
+    fn piped_stdout_separates_status_onto_stderr_and_divides_combined_reports() {
+        use std::env::temp_dir;
+        use std::process::id;
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        write_statusln(true, &mut out, &mut err, "Analyze result:");
+        write_gate_failures(
+            &[GateFailure {
+                key: "cli.check.eff",
+                args: vec!["95".into()],
+            }],
+            Lang::En,
+            true,
+            &mut out,
+            &mut err,
+        );
+        let wrote_report = write_output_target("-", "# Full Report", false, &mut out).unwrap();
+        assert!(wrote_report);
+        let wrote_summary =
+            write_output_target("-", "# Summary Report", wrote_report, &mut out).unwrap();
+        assert!(wrote_summary);
+
+        let stdout_str = String::from_utf8(out).unwrap();
+        let stderr_str = String::from_utf8(err).unwrap();
+        assert_eq!(stdout_str, "# Full Report\n\n---\n\n# Summary Report\n");
+        assert!(stderr_str.contains("Analyze result:"));
+        assert!(stderr_str.contains("95"));
+
+        // Non-piped file output keeps status on stdout and writes content to file.
+        let dest = temp_dir().join(format!("diving-cli-test-summary-{}.md", id()));
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        write_statusln(false, &mut out2, &mut err2, "Analyze result:");
+        let wrote_file =
+            write_output_target(dest.to_str().unwrap(), "# File Summary", false, &mut out2)
+                .unwrap();
+        assert!(!wrote_file);
+        assert_eq!(String::from_utf8(out2).unwrap(), "Analyze result:\n");
+        assert!(err2.is_empty());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "# File Summary");
+        let _ = fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn blank_image_arg_is_treated_as_missing() {
+        let args = Args::try_parse_from(["diving", "   "]).unwrap();
+        assert!(args.image.filter(|s| !s.trim().is_empty()).is_none());
     }
 }

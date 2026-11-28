@@ -104,10 +104,10 @@ export const getImageSummary = (result: ImageAnalyzeResult) => {
     // actually inspected.
     let cell = rc.entrypoint ? `${rc.entrypoint}: ${rc.libc}` : rc.libc;
     if (rc.requiredGlibc) {
-      cell += ` (needs ${rc.requiredGlibc})`;
+      cell += ` (${i18nGet("runtimeNeedsGlibc").replace("{ver}", rc.requiredGlibc)})`;
     }
     if (rc.osGlibc) {
-      cell += ` → host ${rc.osGlibc}`;
+      cell += ` → ${i18nGet("runtimeHostGlibc").replace("{ver}", rc.osGlibc)}`;
     }
     const statusKey = (
       {
@@ -210,10 +210,11 @@ export const flattenFileTree = (
   if (!items) {
     return;
   }
+  const hasKeyword = Boolean(opt.keyword.trim());
   const collapsedItems = opt.collapsedItems || [];
   const shouldExpand = (key: string) => {
     if (collapsedItems.includes(key)) return false;
-    if (opt.keyword) return true;
+    if (hasKeyword) return true;
     if (opt.expandAll) return true;
     return !!(opt.expandItems && opt.expandItems.includes(key));
   };
@@ -262,7 +263,7 @@ export const flattenFileTree = (
       const beforeChildren = out.length;
       flattenFileTree(item.children, depth + 1, opt, out);
       // Drop empty directories when filtering produced no children
-      if (out.length === beforeChildren && !opt.keyword) {
+      if (out.length === beforeChildren && !hasKeyword) {
         out.pop();
       }
     }
@@ -1105,7 +1106,10 @@ export const parseLayerCommand = (
   if (!text) {
     return {
       opcode: layerIndex === 0 && layerSize > 0 ? "FROM" : "META",
-      summary: layerIndex === 0 ? "base image" : "metadata",
+      summary:
+        layerIndex === 0
+          ? i18nGet("layerBaseImage")
+          : i18nGet("layerMetadata"),
       envArgs: [],
       formatted: "",
     };

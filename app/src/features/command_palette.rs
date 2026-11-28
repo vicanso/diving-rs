@@ -2,8 +2,8 @@
 
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, InspectorTab, RecentImageEntry};
-use crate::i18n::{UiLang, t};
+use crate::domain::{AppRoute, AppState, InspectorTab, RecentImageEntry, UpdatePhase};
+use crate::i18n::{UiLang, t, tf};
 use crate::ui::{CommandItem, ui_command_palette};
 
 const CMD_RECENT_PREFIX: &str = "recent:";
@@ -152,6 +152,72 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
             .keywords(["clean", "cache", "gc"]),
     ]);
 
+    let upd_label = state.update_menu_label(lang);
+    let upd_phase = state.update_phase.get();
+    let upd_busy = matches!(
+        upd_phase,
+        UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing { .. }
+    );
+    match upd_phase {
+        UpdatePhase::Available { version, .. }
+        | UpdatePhase::Failed {
+            version: Some(version),
+            ..
+        } => {
+            out.push(
+                CommandItem::new("action:install_update", upd_label)
+                    .group(group_actions)
+                    .keywords([
+                        "update".to_owned(),
+                        "upgrade".to_owned(),
+                        "restart".to_owned(),
+                        "release".to_owned(),
+                        version,
+                    ]),
+            );
+            out.push(
+                CommandItem::new("action:skip_update", t(lang, "update.action_skip"))
+                    .group(group_actions)
+                    .keywords(["update", "skip", "ignore"]),
+            );
+            out.push(
+                CommandItem::new("action:check_updates", t(lang, "menu.check_updates"))
+                    .group(group_actions)
+                    .keywords(["update", "check", "version", "release"]),
+            );
+        }
+        UpdatePhase::ReadyToRestart { .. } => {
+            out.push(
+                CommandItem::new("action:relaunch_update", upd_label)
+                    .group(group_actions)
+                    .keywords(["update", "restart", "relaunch"]),
+            );
+        }
+        _ => {
+            out.push(
+                CommandItem::new("action:check_updates", upd_label)
+                    .group(group_actions)
+                    .keywords(["update", "check", "version", "release"])
+                    .disabled(upd_busy),
+            );
+            if let Some(skipped) = state.update_skipped.get() {
+                out.push(
+                    CommandItem::new(
+                        "action:resume_updates",
+                        tf(lang, "update.action_resume", &[&skipped]),
+                    )
+                    .group(group_actions)
+                    .keywords([
+                        "update".to_owned(),
+                        "resume".to_owned(),
+                        "unskip".to_owned(),
+                        skipped,
+                    ]),
+                );
+            }
+        }
+    }
+
     out.extend([
         CommandItem::new("theme:system", t(lang, "cmd.theme_system"))
             .group(group_appearance)
@@ -209,6 +275,11 @@ fn execute_command(state: &AppState, id: &str) {
         }
         "action:export_json" => state.export_json_report(),
         "action:clear_cache" => state.clear_cache(),
+        "action:check_updates" => state.check_for_updates(),
+        "action:install_update" => state.start_update(),
+        "action:skip_update" => state.skip_available_update(),
+        "action:resume_updates" => state.resume_skipped_update(),
+        "action:relaunch_update" => state.relaunch_after_update(),
         "action:home" => state.navigate_home(),
         "action:toggle_sidebar" => state.toggle_app_sidebar(),
         "tab:files" => switch_tab(state, InspectorTab::FileTree),

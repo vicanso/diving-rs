@@ -12,6 +12,16 @@ use crate::ui::{
     ui_code_viewer, ui_empty_state, ui_hex_viewer, ui_separator, ui_sheet, ui_skeleton,
 };
 
+fn save_as_disabled(state: &AppState) -> bool {
+    state.preview_loading.get()
+        || state.preview_error.get().is_some()
+        || state.preview_content.get().is_none()
+        || state
+            .preview_target
+            .get()
+            .is_some_and(|target| target.mode.starts_with('l'))
+}
+
 /// Mounts the right-sliding inspection drawer bound to `state.preview_sheet_open`.
 pub fn file_preview_sheet(state: AppState) -> impl IntoElement {
     let sheet_state = state.clone();
@@ -156,15 +166,18 @@ fn sheet_body(state: AppState) -> impl IntoElement {
                                 },
                             )
                         }))
-                        .child(ui_button(
-                            move || SharedString::from(t(lang.get(), "common.save_as")),
-                            ButtonVariant::Outline,
-                            UiSize::Xs,
-                            Some(IconName::Download),
-                            false,
-                            false,
-                            move || save_state.save_preview_file(),
-                        )),
+                        .child({
+                            let save_disabled_state = save_state.clone();
+                            ui_button(
+                                move || SharedString::from(t(lang.get(), "common.save_as")),
+                                ButtonVariant::Outline,
+                                UiSize::Xs,
+                                Some(IconName::Download),
+                                move || save_as_disabled(&save_disabled_state),
+                                false,
+                                move || save_state.save_preview_file(),
+                            )
+                        }),
                 )
                 .into_element()
         }))
@@ -466,6 +479,12 @@ mod tests {
             Duration::from_secs(2),
         )
         .expect("formatted byte placeholders in binary preview banner");
+        assert!(
+            !app.screen()
+                .accessibility_state("role:button[Save as…]")
+                .expect("save button enabled for binary content")
+                .disabled
+        );
 
         app.press("Close sheet").expect("close sheet before switch");
         app.wait_for_gone("00000000  7f 45 4c 46  |.ELF|", Duration::from_secs(2))
@@ -474,6 +493,12 @@ mod tests {
         app.wait_for_within("Symbolic link → busybox", Duration::from_secs(2))
             .expect("symlink target displayed cleanly");
         assert!(app.shows("Symbolic link"));
+        assert!(
+            app.screen()
+                .accessibility_state("role:button[Save as…]")
+                .expect("save button disabled for symlink")
+                .disabled
+        );
     }
 
     #[component]

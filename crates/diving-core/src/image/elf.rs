@@ -1,9 +1,9 @@
 //! Runtime-compatibility analyzer.
 
-use super::layer::{get_file_content_from_layer, read_files_from_layer};
+use super::layer::{get_file_content_from_layer, normalize_tar_path};
 use super::oci_image::{final_filesystem, FinalFile, ImageConfig};
 use super::{FileTreeItem, ImageLayer, Op};
-use crate::store::CacheStore;
+use crate::store::{touch_blob_times, CacheStore};
 use goblin::container::Ctx;
 use goblin::elf::section_header::{SectionHeader, SHT_NOBITS};
 use goblin::elf::Elf;
@@ -13,13 +13,10 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::thread;
 
 const MIN_STRIP_CANDIDATE_BYTES: u64 = 1024 * 1024;
 const MAX_STRIP_CANDIDATES: usize = 40;
-const MAX_STRIP_CANDIDATE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_STRIP_CANDIDATE_BYTES: u64 = 512 * 1024 * 1024;
 const MIN_STRIP_SAVINGS: u64 = 256 * 1024;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,12 +68,9 @@ fn strip_savings(bytes: &[u8]) -> Option<(u64, u64)> {
     Some((debug, symbols))
 }
 
-pub(crate) fn find_unstripped_binaries(
-    layers: &[ImageLayer],
+pub(crate) fn unstripped_candidates(
     file_tree_list: &[Vec<FileTreeItem>],
-    store: &CacheStore,
-    layer_concurrency: usize,
-) -> Vec<UnstrippedBinary> {
+) -> HashMap<usize, HashSet<String>> {
     let mut candidates: Vec<(String, FinalFile)> = final_filesystem(file_tree_list)
         .into_iter()
         .filter(|(path, file)| {
@@ -93,53 +87,26 @@ pub(crate) fn find_unstripped_binaries(
     for (path, file) in &candidates {
         by_layer.entry(file.layer).or_default().insert(path.clone());
     }
-    let jobs: Vec<(usize, HashSet<String>)> = by_layer.into_iter().collect();
-    if jobs.is_empty() {
-        return vec![];
-    }
-    let found = Mutex::new(Vec::new());
-    let next_job = AtomicUsize::new(0);
-    let scan_jobs = || {
-        while let Some((layer_index, paths)) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
-            let Some(layer) = layers.get(*layer_index) else {
-                continue;
-            };
-            let Ok(file) = File::open(store.blob_path(&layer.digest)) else {
-                continue;
-            };
-            let _ = read_files_from_layer(
-                BufReader::new(file),
-                &layer.media_type,
-                paths,
-                MAX_STRIP_CANDIDATE_BYTES,
-                |path, bytes| {
-                    let Some((debug_bytes, symbol_bytes)) = strip_savings(bytes) else {
-                        return;
-                    };
-                    if debug_bytes + symbol_bytes >= MIN_STRIP_SAVINGS {
-                        if let Ok(mut found) = found.lock() {
-                            found.push(UnstrippedBinary {
-                                layer_index: *layer_index,
-                                path: path.to_string(),
-                                size: bytes.len() as u64,
-                                debug_bytes,
-                                symbol_bytes,
-                            });
-                        }
-                    }
-                },
-            );
-        }
-    };
-    let workers = layer_concurrency.max(1).min(jobs.len());
-    thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(scan_jobs);
-        }
-    });
-    let mut found = found.into_inner().unwrap_or_default();
+    by_layer
+}
+
+pub(crate) fn check_unstripped_binary(
+    layer_index: usize,
+    path: &str,
+    bytes: &[u8],
+) -> Option<UnstrippedBinary> {
+    let (debug_bytes, symbol_bytes) = strip_savings(bytes)?;
+    (debug_bytes + symbol_bytes >= MIN_STRIP_SAVINGS).then(|| UnstrippedBinary {
+        layer_index,
+        path: path.to_string(),
+        size: bytes.len() as u64,
+        debug_bytes,
+        symbol_bytes,
+    })
+}
+
+pub(crate) fn sort_unstripped_binaries(found: &mut [UnstrippedBinary]) {
     found.sort_by_key(|b| (Reverse(b.savings()), b.path.clone()));
-    found
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,6 +216,7 @@ pub(crate) fn analyze_runtime_compat(
     })
 }
 
+#[derive(Debug, PartialEq)]
 struct EntryHit {
     path: String,
     layer_index: usize,
@@ -360,34 +328,45 @@ fn parse_exec_target(script: &[u8], cmd_first: Option<&str>) -> Option<String> {
     None
 }
 
+const MAX_LINK_HOPS: usize = 8;
+
 fn locate_file_in_layers(path: &str, file_tree_list: &[Vec<FileTreeItem>]) -> Option<EntryHit> {
-    let (idx, link) = find_leaf(path, file_tree_list)?;
-    if link.is_empty() {
-        return Some(EntryHit {
-            path: path.to_string(),
-            layer_index: idx,
-        });
+    let mut current = normalize_tar_path(path).to_string();
+    let mut visited = HashSet::new();
+    for hop in 0..=MAX_LINK_HOPS {
+        if current.is_empty() || !visited.insert(current.clone()) {
+            return None;
+        }
+        let (idx, mode, link) = find_leaf(&current, file_tree_list)?;
+        if link.is_empty() {
+            return Some(EntryHit {
+                path: current,
+                layer_index: idx,
+            });
+        }
+        if hop == MAX_LINK_HOPS {
+            return None;
+        }
+        // Symlink targets (`l...`) resolve relative to the symlink's directory
+        // or container root (`/...`); tar hardlinks (`-...`) are always root-relative.
+        current = if mode.starts_with('l') {
+            resolve_link(&current, &link)
+        } else {
+            normalize_tar_path(&link).to_string()
+        };
     }
-    let resolved = resolve_link(path, &link);
-    let (idx2, link2) = find_leaf(&resolved, file_tree_list)?;
-    if !link2.is_empty() {
-        return None;
-    }
-    Some(EntryHit {
-        path: resolved,
-        layer_index: idx2.max(idx),
-    })
+    None
 }
 
-fn find_leaf(path: &str, file_tree_list: &[Vec<FileTreeItem>]) -> Option<(usize, String)> {
-    let path = path.trim_start_matches('/');
-    let segments: Vec<&str> = path.split('/').collect();
+fn find_leaf(path: &str, file_tree_list: &[Vec<FileTreeItem>]) -> Option<(usize, String, String)> {
+    let path = normalize_tar_path(path);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     for (idx, tree) in file_tree_list.iter().enumerate().rev() {
         if let Some(leaf) = walk_tree(tree, &segments) {
             if leaf.op == Op::Removed {
                 return None;
             }
-            return Some((idx, leaf.link.clone()));
+            return Some((idx, leaf.mode.clone(), leaf.link.clone()));
         }
     }
     None
@@ -447,6 +426,7 @@ fn read_from_layer(
     }
     let blob = store.blob_path(&layer.digest);
     let file = File::open(&blob).ok()?;
+    touch_blob_times(&blob);
     let reader = BufReader::new(file);
     let bytes =
         get_file_content_from_layer(reader, &layer.media_type, path, MAX_BINARY_BYTES as u64)
@@ -886,5 +866,67 @@ mod tests {
         );
         assert_eq!(resolve_link("usr/bin/foo", "/opt/app/foo"), "opt/app/foo");
         assert_eq!(resolve_link("usr/bin/foo", "./bar"), "usr/bin/bar");
+    }
+
+    #[test]
+    fn locate_file_distinguishes_hardlinks_symlinks_chains_and_cycles() {
+        fn file_node(name: &str, mode: &str, link: &str) -> FileTreeItem {
+            FileTreeItem {
+                name: name.into(),
+                mode: mode.into(),
+                link: link.into(),
+                ..Default::default()
+            }
+        }
+
+        // Symlink chain (3 hops) vs tar hardlink (`-rwxr-xr-x`, root-relative target).
+        // Also tests cycle detection (`loop_a -> loop_b -> loop_a`) and >8-hop depth cap.
+        let mut chain_items = vec![
+            file_node("real", "-rwxr-xr-x", ""),
+            file_node("s1", "lrwxrwxrwx", "s2"),
+            file_node("s2", "lrwxrwxrwx", "./s3"),
+            file_node("s3", "lrwxrwxrwx", "real"),
+            file_node("hard", "-rwxr-xr-x", "bin/real"),
+            file_node("loop_a", "lrwxrwxrwx", "loop_b"),
+            file_node("loop_b", "lrwxrwxrwx", "loop_a"),
+        ];
+        // Build 9-hop chain: d0 -> d1 -> ... -> d9 -> real (exceeds MAX_LINK_HOPS = 8).
+        for hop in 0..=8 {
+            let target = if hop == 8 {
+                "real".to_string()
+            } else {
+                format!("d{}", hop + 1)
+            };
+            chain_items.push(file_node(&format!("d{hop}"), "lrwxrwxrwx", &target));
+        }
+        let tree = vec![vec![FileTreeItem {
+            name: "bin".into(),
+            children: chain_items,
+            ..Default::default()
+        }]];
+
+        assert_eq!(
+            locate_file_in_layers("/bin/s1", &tree),
+            Some(EntryHit {
+                path: "bin/real".into(),
+                layer_index: 0
+            })
+        );
+        assert_eq!(
+            locate_file_in_layers("bin/hard", &tree),
+            Some(EntryHit {
+                path: "bin/real".into(),
+                layer_index: 0
+            })
+        );
+        assert_eq!(locate_file_in_layers("bin/loop_a", &tree), None);
+        assert_eq!(locate_file_in_layers("bin/d0", &tree), None);
+        assert_eq!(
+            locate_file_in_layers("bin/d1", &tree),
+            Some(EntryHit {
+                path: "bin/real".into(),
+                layer_index: 0
+            })
+        );
     }
 }

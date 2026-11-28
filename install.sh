@@ -67,7 +67,11 @@ download_and_install() {
 
   # 直接构建二进制文件名，diving-rs 遵循 diving-{platform}-{arch}
   if [ "${platform}" = "windows" ]; then
-    filename="diving-windows.exe"
+    if [ "${arch}" = "aarch64" ]; then
+      filename="diving-windows-aarch64.exe"
+    else
+      filename="diving-windows.exe"
+    fi
   else
     # Darwin 或其他
     # 如果 Darwin 也是 aarch64/x86_64 结构

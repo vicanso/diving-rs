@@ -1275,9 +1275,14 @@ fn format_changed_tags(c: &FileChange, t: &dyn Fn(&str) -> String) -> String {
         ));
     }
     if c.base_link != c.target_link {
+        let is_symlink = c.base_mode.starts_with('l') || c.target_mode.starts_with('l');
+        let label = if is_symlink {
+            t("diff.tag.link")
+        } else {
+            t("diff.tag.hardlink")
+        };
         tags.push(format!(
-            "{}: {}→{}",
-            t("diff.tag.link"),
+            "{label}: {}→{}",
             if c.base_link.is_empty() {
                 "-"
             } else {
@@ -1758,7 +1763,7 @@ fn push_more(md: &mut String, total: usize, lang: Lang) {
 mod tests {
     use super::*;
     use crate::image::{FileTreeItem, Op};
-    use crate::UnstrippedBinary;
+    use crate::{tr, UnstrippedBinary};
 
     fn leaf(name: &str, size: u64) -> FileTreeItem {
         FileTreeItem {
@@ -2392,5 +2397,37 @@ mod tests {
             },
         );
         assert_eq!(diff2.changed.files, diff2_repeat.changed.files);
+    }
+
+    #[test]
+    fn format_changed_tags_distinguishes_hardlink_from_symlink() {
+        let symlink = FileChange {
+            path: "bin/s".into(),
+            base_mode: "lrwxrwxrwx".into(),
+            target_mode: "lrwxrwxrwx".into(),
+            base_link: "a".into(),
+            target_link: "b".into(),
+            ..Default::default()
+        };
+        let hardlink = FileChange {
+            path: "bin/h".into(),
+            base_mode: "-rwxr-xr-x".into(),
+            target_mode: "-rwxr-xr-x".into(),
+            base_link: "bin/old".into(),
+            target_link: "bin/new".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_changed_tags(&symlink, &|k| tr(Lang::En, k).to_string()),
+            " (`symlink: a→b`)"
+        );
+        assert_eq!(
+            format_changed_tags(&hardlink, &|k| tr(Lang::En, k).to_string()),
+            " (`hardlink: bin/old→bin/new`)"
+        );
+        assert_eq!(
+            format_changed_tags(&hardlink, &|k| tr(Lang::Zh, k).to_string()),
+            " (`硬链: bin/old→bin/new`)"
+        );
     }
 }

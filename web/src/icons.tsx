@@ -47,9 +47,6 @@ export const getLogoIcon = (isDarkMode: boolean) => {
 };
 
 export const getGithubIcon = (isDarkMode: boolean) => {
-  if (window.location.host.indexOf("diving") === -1) {
-    return null;
-  }
   const color = isDarkMode ? "#f1f5f9" : "#0f172a";
   return (
     <a
@@ -186,3 +183,21 @@ export const getDownloadIcon = () => {
     </svg>
   );
 };
+
+export const getKeyIcon = () => (
+  <svg
+    width="15"
+    height="15"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="7.5" cy="15.5" r="5.5" />
+    <path d="m21 2-9.6 9.6" />
+    <path d="m15.5 7.5 3 3L22 7l-3-3" />
+  </svg>
+);

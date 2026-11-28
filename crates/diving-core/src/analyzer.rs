@@ -5,34 +5,96 @@ use crate::image::{
     analyze_once, analyze_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
     hash_files_from_layer, is_local_registry, is_private_or_loopback_host, load_docker_config,
     parse_image_info, preview_image, registry_host, stream_file_from_layer, DockerAnalyzeResult,
-    DockerConfig, ImageInfo, ImagePreview, PipelineContext, PipelineOptions, RegistryCaches,
-    RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    DockerConfig, ImageInfo, ImagePreview, LocalManifest, PipelineContext, PipelineOptions,
+    RegistryCaches, RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
     REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
 use crate::recommend::build_recommendations;
 use crate::sensitive::SensitivePatterns;
 use crate::store::{
-    is_safe_blob_id, sha256_hex, CacheConfig, CacheStore, CleanupStats, RecentCache,
+    is_safe_blob_id, sha256_hex, sha256_hex_of_reader, touch_blob_times, CacheConfig, CacheStore,
+    CleanupStats, RecentCache,
 };
 use crate::trace::{clone_value_from_task_local, TRACE_ID};
 use futures::future::{try_join, FutureExt, Shared};
 use rustls::crypto::CryptoProvider;
+use serde_json::from_slice;
 use snafu::ResultExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
-use std::io::{BufReader, Take};
+use std::io::{BufReader, Read, Result as IoResult, Take};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::result::Result as StdResult;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
 
 const DEFAULT_MEMORY_CACHE_CAPACITY: usize = 4;
 
-type FlightOutput = std::result::Result<(Arc<DockerAnalyzeResult>, Lang), Arc<Error>>;
+enum LocalLayerReader {
+    Blob(File),
+    Entry(Take<File>),
+}
+
+impl Read for LocalLayerReader {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        match self {
+            Self::Blob(f) => f.read(buf),
+            Self::Entry(t) => t.read(buf),
+        }
+    }
+}
+
+fn open_tar_index_layer(index: &TarIndex, layer_digest: &str) -> Result<Take<File>> {
+    match index.open_reader(layer_digest) {
+        Ok((reader, _)) => Ok(reader),
+        Err(err) => {
+            if let Some(hex) = layer_digest.strip_prefix("sha256:") {
+                let oci_entry = format!("blobs/sha256/{hex}");
+                if let Ok((reader, _)) = index.open_reader(&oci_entry) {
+                    return Ok(reader);
+                }
+                if let Ok(manifest_bytes) = index.read("manifest.json") {
+                    if let Ok(manifests) = from_slice::<Vec<LocalManifest>>(&manifest_bytes) {
+                        let mut seen = HashSet::new();
+                        for entry_name in manifests.iter().flat_map(|m| m.layers.iter()) {
+                            if !seen.insert(entry_name.as_str()) {
+                                continue;
+                            }
+                            let key = if index.size_of(entry_name).is_some() {
+                                entry_name.as_str()
+                            } else {
+                                let trimmed = entry_name.trim_start_matches("./");
+                                if index.size_of(trimmed).is_some() {
+                                    trimmed
+                                } else {
+                                    continue;
+                                }
+                            };
+                            let Ok((reader, _)) = index.open_reader(key) else {
+                                continue;
+                            };
+                            if let Ok(actual) = sha256_hex_of_reader(reader) {
+                                if actual.eq_ignore_ascii_case(hex) {
+                                    if let Ok((matched, _)) = index.open_reader(key) {
+                                        return Ok(matched);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+type FlightOutput = StdResult<(Arc<DockerAnalyzeResult>, Lang), Arc<Error>>;
 type AnalysisFuture = Shared<Pin<Box<dyn Future<Output = FlightOutput> + Send>>>;
 type RecentAnalysisCache = RecentCache<(Arc<DockerAnalyzeResult>, Lang)>;
 
@@ -629,6 +691,18 @@ impl Analyzer {
                 &diff_opts,
                 true,
                 |is_target, layer, paths| {
+                    if is_safe_blob_id(&layer.digest) {
+                        let blob = store.blob_path(&layer.digest);
+                        if let Ok(file) = File::open(&blob) {
+                            touch_blob_times(&blob);
+                            return hash_files_from_layer(
+                                BufReader::new(file),
+                                &layer.media_type,
+                                paths,
+                            )
+                            .ok();
+                        }
+                    }
                     let (tar_path, index_cache) = if is_target {
                         (&target_tar, &mut target_index)
                     } else {
@@ -638,24 +712,13 @@ impl Analyzer {
                         let index = index_cache
                             .get_or_insert_with(|| TarIndex::build(archive_path).ok())
                             .as_ref()?;
-                        let (reader, _) = index.open_reader(&layer.digest).ok()?;
+                        let reader = open_tar_index_layer(index, &layer.digest).ok()?;
                         return hash_files_from_layer(
                             BufReader::new(reader),
                             &layer.media_type,
                             paths,
                         )
                         .ok();
-                    }
-                    if is_safe_blob_id(&layer.digest) {
-                        let blob = store.blob_path(&layer.digest);
-                        if let Ok(file) = File::open(&blob) {
-                            return hash_files_from_layer(
-                                BufReader::new(file),
-                                &layer.media_type,
-                                paths,
-                            )
-                            .ok();
-                        }
                     }
                     None
                 },
@@ -677,6 +740,7 @@ impl Analyzer {
     ) -> Result<Vec<u8>> {
         let path = self.layer_blob_path(layer_digest)?;
         let file = File::open(&path).context(IoSnafu {})?;
+        touch_blob_times(&path);
         get_file_content_from_layer(BufReader::new(file), media_type, file_path, max_bytes)
     }
 
@@ -694,6 +758,7 @@ impl Analyzer {
     {
         let path = self.layer_blob_path(layer_digest)?;
         let file = File::open(&path).context(IoSnafu {})?;
+        touch_blob_times(&path);
         stream_file_from_layer(
             BufReader::new(file),
             media_type,
@@ -713,6 +778,7 @@ impl Analyzer {
     ) -> Result<(Vec<u8>, u64)> {
         let path = self.layer_blob_path(layer_digest)?;
         let file = File::open(&path).context(IoSnafu {})?;
+        touch_blob_times(&path);
         get_file_head_from_layer(BufReader::new(file), media_type, file_path, limit)
     }
 
@@ -720,16 +786,23 @@ impl Analyzer {
         &self,
         archive_path: &str,
         layer_digest: &str,
-    ) -> Result<BufReader<Take<File>>> {
+    ) -> Result<BufReader<LocalLayerReader>> {
         let info = ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
             name: archive_path.to_string(),
             ..Default::default()
         };
         self.check_allowed(&info)?;
+        if is_safe_blob_id(layer_digest) {
+            let blob = self.inner.store.blob_path(layer_digest);
+            if let Ok(file) = File::open(&blob) {
+                touch_blob_times(&blob);
+                return Ok(BufReader::new(LocalLayerReader::Blob(file)));
+            }
+        }
         let index = TarIndex::build(archive_path)?;
-        let (reader, _) = index.open_reader(layer_digest)?;
-        Ok(BufReader::new(reader))
+        let reader = open_tar_index_layer(&index, layer_digest)?;
+        Ok(BufReader::new(LocalLayerReader::Entry(reader)))
     }
 
     /// Read a file's full bytes (up to `max_bytes`) from a layer inside a local `file://` archive or directory.

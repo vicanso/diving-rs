@@ -330,7 +330,8 @@ pub struct TreemapTile {
     pub children: Vec<TreemapChildTile>,
 }
 
-fn slot_for_layer(layer: Option<usize>, top_layers: &[usize]) -> usize {
+/// Resolves the legend/treemap color slot (`1..=3` for top layers, `0` for others).
+pub fn slot_for_layer(layer: Option<usize>, top_layers: &[usize]) -> usize {
     layer
         .and_then(|idx| top_layers.iter().position(|top| *top == idx))
         .map_or(0, |pos| pos + 1)

@@ -362,6 +362,15 @@ fn entrypoint_cmd_tokens(dockerfile: &str) -> Vec<String> {
     out
 }
 
+fn exec_tokens(result: &DockerAnalyzeResult) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in result.entrypoint.iter().chain(result.cmd.iter()) {
+        out.extend(raw.split_whitespace().map(str::to_string));
+    }
+    out.extend(entrypoint_cmd_tokens(&result.dockerfile));
+    out
+}
+
 fn is_probably_text(bytes: &[u8]) -> bool {
     !bytes[..bytes.len().min(8000)].contains(&0)
 }
@@ -371,7 +380,7 @@ fn read_from_layers(
     result: &DockerAnalyzeResult,
     token: &str,
 ) -> Option<Vec<u8>> {
-    let trimmed = token.trim_start_matches('/');
+    let trimmed = token.trim_start_matches("./").trim_start_matches('/');
     if trimmed.is_empty() {
         return None;
     }
@@ -397,7 +406,7 @@ pub fn entrypoint_scripts_md(
 ) -> String {
     let mut seen: HashSet<String> = HashSet::new();
     let mut blocks: Vec<String> = Vec::new();
-    for tok in entrypoint_cmd_tokens(&result.dockerfile) {
+    for tok in exec_tokens(result) {
         if blocks.len() >= MAX_SCRIPTS {
             break;
         }
@@ -586,5 +595,72 @@ mod tests {
     fn binary_content_is_rejected() {
         assert!(is_probably_text(b"#!/bin/sh\nexec \"$@\"\n"));
         assert!(!is_probably_text(b"\x7fELF\x00\x01binary"));
+    }
+
+    fn single_file_tar(path: &str, data: &[u8]) -> Vec<u8> {
+        let mut tar = vec![0u8; 512];
+        let name = path.as_bytes();
+        tar[..name.len()].copy_from_slice(name);
+        tar[100..108].copy_from_slice(b"0000755\0");
+        tar[108..116].copy_from_slice(b"0000000\0");
+        tar[116..124].copy_from_slice(b"0000000\0");
+        let size_oct = format!("{:011o}\0", data.len());
+        tar[124..136].copy_from_slice(size_oct.as_bytes());
+        tar[136..148].copy_from_slice(b"00000000000\0");
+        tar[148..156].copy_from_slice(b"        ");
+        tar[156] = b'0';
+        tar[257..263].copy_from_slice(b"ustar\0");
+        tar[263..265].copy_from_slice(b"00");
+        let sum: u32 = tar.iter().map(|&b| b as u32).sum();
+        let cksum = format!("{sum:06o}\0 ");
+        tar[148..156].copy_from_slice(cksum.as_bytes());
+        tar.extend_from_slice(data);
+        let pad = (512 - (data.len() % 512)) % 512;
+        tar.resize(tar.len() + pad + 1024, 0);
+        tar
+    }
+
+    #[tokio::test]
+    async fn entrypoint_scripts_md_reads_entrypoint_and_cmd_without_dockerfile() {
+        use diving_core::{sha256_hex, CacheConfig, ImageLayer};
+        use std::fs::write;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let cfg = CacheConfig::persistent(dir.path().join("layers"), dir.path().join("analysis"));
+        let analyzer = Analyzer::builder().cache(cfg).build().unwrap();
+
+        let tar1 = single_file_tar("docker-entrypoint.sh", b"#!/bin/sh\necho entry\n");
+        let d1 = format!("sha256:{}", sha256_hex(&tar1));
+        write(analyzer.layer_blob_path(&d1).unwrap(), &tar1).unwrap();
+
+        let tar2 = single_file_tar("app/start.sh", b"#!/bin/sh\necho cmd\n");
+        let d2 = format!("sha256:{}", sha256_hex(&tar2));
+        write(analyzer.layer_blob_path(&d2).unwrap(), &tar2).unwrap();
+
+        let result = DockerAnalyzeResult {
+            entrypoint: vec!["./docker-entrypoint.sh".to_string()],
+            cmd: vec!["/app/start.sh --serve".to_string()],
+            dockerfile: String::new(),
+            layers: vec![
+                ImageLayer {
+                    digest: d1,
+                    media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+                    ..Default::default()
+                },
+                ImageLayer {
+                    digest: d2,
+                    media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let md = entrypoint_scripts_md(&analyzer, &result, Lang::En);
+        assert!(md.contains("./docker-entrypoint.sh"), "{md}");
+        assert!(md.contains("echo entry"), "{md}");
+        assert!(md.contains("/app/start.sh"), "{md}");
+        assert!(md.contains("echo cmd"), "{md}");
     }
 }

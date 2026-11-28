@@ -7,7 +7,8 @@ use super::scan::compression_label;
 use crate::error::{Error, IoSnafu, JsonSnafu, RequestSnafu, ResponseJsonSnafu, Result};
 use crate::progress::{emit_progress, ProgressCallback, ProgressEvent};
 use crate::store::{
-    save_blob_to_file, sha256_hex, sha256_hex_of_file, tmp_sibling_path, CacheStore,
+    save_blob_to_file, sha256_hex, sha256_hex_of_file, tmp_sibling_path, touch_blob_times,
+    CacheStore,
 };
 use crate::tl_info;
 use crate::trace::{clone_value_from_task_local, TRACE_ID};
@@ -367,6 +368,7 @@ fn cache_local_layer_blob(
             .map(|m| m.len() == size)
             .unwrap_or(false)
         {
+            touch_blob_times(&dest);
             return Ok(known);
         }
     }
@@ -394,6 +396,7 @@ fn cache_local_layer_blob(
             .unwrap_or(false)
         {
             let _ = fs::remove_file(&tmp);
+            touch_blob_times(&dest);
         } else {
             fs::rename(&tmp, &dest).context(IoSnafu {})?;
         }
@@ -768,6 +771,7 @@ impl RegistryClient {
         let path = self.store.blob_path(digest);
         if let Ok(data) = tokio::fs::read(&path).await {
             if bytes_match_digest(&data, digest) {
+                touch_blob_times(&path);
                 tl_info!(digest, "blob cache hit");
                 return Ok(data);
             }
@@ -885,6 +889,9 @@ impl RegistryClient {
         let media_type = layer.media_type.clone();
         let digest = layer.digest.clone();
         let info = tokio::task::spawn_blocking(move || {
+            if is_cached {
+                touch_blob_times(&path);
+            }
             let file = File::open(&path).context(IoSnafu {})?;
             get_files_from_layer(BufReader::new(file), &media_type, compressed_size)
         })

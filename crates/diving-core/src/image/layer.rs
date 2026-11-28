@@ -79,7 +79,7 @@ struct CollectedLayer {
 
 const MAX_CONTENT_SECRETS_PER_LAYER: usize = 64;
 
-fn is_os_release_entry(clean_path: &str) -> Option<&'static str> {
+pub(crate) fn is_os_release_entry(clean_path: &str) -> Option<&'static str> {
     match clean_path {
         "etc/os-release" => Some("etc/os-release"),
         "usr/lib/os-release" => Some("usr/lib/os-release"),
@@ -88,6 +88,10 @@ fn is_os_release_entry(clean_path: &str) -> Option<&'static str> {
         "etc/redhat-release" => Some("etc/redhat-release"),
         _ => None,
     }
+}
+
+pub(crate) fn normalize_tar_path(path: &str) -> &str {
+    path.trim_start_matches("./").trim_start_matches('/')
 }
 
 fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLayer> {
@@ -105,14 +109,19 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLay
         if let Some(value) = file.link_name().context(TarSnafu {})? {
             link = value.to_string_lossy().to_string();
         }
-        let mut path = file
+        let raw_path = file
             .path()
             .context(TarSnafu {})?
             .to_string_lossy()
             .to_string();
-        if !is_safe_tar_path(&path) {
+        if !is_safe_tar_path(&raw_path) {
             continue;
         }
+        let clean_raw = normalize_tar_path(&raw_path);
+        if clean_raw.is_empty() || clean_raw == "." {
+            continue;
+        }
+        let mut path = clean_raw.to_string();
         let mut is_whiteout = None;
         let mut is_opaque = None;
         if let Some(filename) = Path::new(&path).file_name() {
@@ -122,7 +131,7 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLay
                     .parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                path = parent.trim_end_matches('/').to_string();
+                path = normalize_tar_path(parent.trim_end_matches('/')).to_string();
                 is_whiteout = Some(true);
                 is_opaque = Some(true);
             } else if let Some(stripped) = name.strip_prefix(".wh.") {
@@ -130,6 +139,7 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLay
                     .parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
+                let parent = normalize_tar_path(parent.trim_end_matches('/'));
                 path = if parent.is_empty() {
                     stripped.to_string()
                 } else {
@@ -145,21 +155,20 @@ fn collect_tar_entries<R: Read>(archive: &mut Archive<R>) -> Result<CollectedLay
 
         // Single-pass capture of base-OS release file & inline text secrets (no extra decompression).
         if is_whiteout.is_none() && entry_type.is_file() {
-            let clean = path.trim_start_matches("./").trim_start_matches('/');
-            if os_release.is_none() && size > 0 && size <= 32 * 1024 {
-                if let Some(canonical) = is_os_release_entry(clean) {
+            if let Some(canonical) = is_os_release_entry(&path) {
+                if os_release.is_none() && size > 0 && size <= 32 * 1024 {
                     let mut buf = Vec::with_capacity(size as usize);
                     if file.read_to_end(&mut buf).is_ok() {
                         os_release = Some((canonical.to_string(), buf));
                     }
                 }
             } else if content_secrets.len() < MAX_CONTENT_SECRETS_PER_LAYER
-                && should_scan_content(clean, size)
+                && should_scan_content(&path, size)
             {
                 let mut buf = Vec::with_capacity(size.min(64 * 1024) as usize);
                 if file.read_to_end(&mut buf).is_ok() {
-                    if let Some(reason) = scan_content_secrets(clean, &buf) {
-                        content_secrets.push((clean.to_string(), size, reason.to_string()));
+                    if let Some(reason) = scan_content_secrets(&path, &buf) {
+                        content_secrets.push((path.clone(), size, reason.to_string()));
                     }
                 }
             }
@@ -306,7 +315,7 @@ pub fn get_os_release_from_layer<R: Read>(
                 let mut entry = entry.ok()?;
                 let raw = entry.path().ok()?;
                 let name = raw.to_string_lossy();
-                let name = name.trim_start_matches("./");
+                let name = normalize_tar_path(&name);
                 if let Some(&hit) = CANDIDATES.iter().find(|&&c| c == name) {
                     let mut buf = Vec::new();
                     entry.read_to_end(&mut buf).ok()?;
@@ -340,19 +349,22 @@ fn decode_layer<'a, R: Read + 'a>(reader: R, media_type: &str) -> Result<Box<dyn
     })
 }
 
-/// One pass over a layer, handing each file in `targets` (spelled without `./`) to `on_file`.
-pub fn read_files_from_layer<R: Read>(
+/// One pass over a layer, optionally extracting files in `strip_targets` (spelled
+/// without `./` or leading `/`) for `on_strip` and blake3-hashing files in `dup_targets`.
+pub(crate) fn scan_blob_targets<R: Read>(
     reader: R,
     media_type: &str,
-    targets: &HashSet<String>,
-    max_bytes: u64,
-    mut on_file: impl FnMut(&str, &[u8]),
-) -> Result<()> {
-    if targets.is_empty() {
-        return Ok(());
+    strip_targets: &HashSet<String>,
+    dup_targets: &HashSet<String>,
+    max_strip_bytes: u64,
+    mut on_strip: impl FnMut(&str, &[u8]),
+) -> Result<HashMap<String, String>> {
+    if strip_targets.is_empty() && dup_targets.is_empty() {
+        return Ok(HashMap::new());
     }
     let mut archive = Archive::new(decode_layer(reader, media_type)?);
-    let mut seen = 0;
+    let mut dup_hashes: HashMap<String, String> = HashMap::new();
+    let mut seen_strip = 0usize;
     for entry in archive.entries().context(TarSnafu {})? {
         let mut entry = entry.context(TarSnafu {})?;
         let raw = entry
@@ -360,21 +372,43 @@ pub fn read_files_from_layer<R: Read>(
             .context(TarSnafu {})?
             .to_string_lossy()
             .into_owned();
-        let path = raw.trim_start_matches("./");
-        if !targets.contains(path) {
+        let normalized = normalize_tar_path(&raw);
+        let want_strip = strip_targets.contains(normalized);
+        let dup_key = if dup_targets.contains(&raw) {
+            Some(raw.clone())
+        } else if dup_targets.contains(normalized) {
+            Some(normalized.to_string())
+        } else {
+            None
+        };
+        if !want_strip && dup_key.is_none() {
             continue;
         }
-        seen += 1;
-        if entry.size() <= max_bytes {
-            let mut content = Vec::with_capacity(entry.size() as usize);
-            entry.read_to_end(&mut content).context(IoSnafu {})?;
-            on_file(path, &content);
+        let size = entry.size();
+        if want_strip {
+            seen_strip += 1;
+            if size <= max_strip_bytes {
+                let mut content = Vec::with_capacity(size as usize);
+                entry.read_to_end(&mut content).context(IoSnafu {})?;
+                on_strip(normalized, &content);
+                if let Some(k) = dup_key {
+                    dup_hashes.insert(k, blake3::hash(&content).to_hex().to_string());
+                }
+            } else if let Some(k) = dup_key {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update_reader(&mut entry).context(IoSnafu {})?;
+                dup_hashes.insert(k, hasher.finalize().to_hex().to_string());
+            }
+        } else if let Some(k) = dup_key {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update_reader(&mut entry).context(IoSnafu {})?;
+            dup_hashes.insert(k, hasher.finalize().to_hex().to_string());
         }
-        if seen >= targets.len() {
+        if seen_strip >= strip_targets.len() && dup_hashes.len() >= dup_targets.len() {
             break;
         }
     }
-    Ok(())
+    Ok(dup_hashes)
 }
 
 fn with_layer_entry<'a, R: Read + 'a, T>(
@@ -383,7 +417,7 @@ fn with_layer_entry<'a, R: Read + 'a, T>(
     filename: &str,
     on_match: impl FnOnce(&mut dyn Read, u64) -> Result<T>,
 ) -> Result<T> {
-    let want = filename.trim_start_matches("./");
+    let want = normalize_tar_path(filename);
     let mut archive = Archive::new(decode_layer(reader, media_type)?);
     for entry in archive.entries().context(TarSnafu {})? {
         let mut entry = entry.context(TarSnafu {})?;
@@ -392,7 +426,7 @@ fn with_layer_entry<'a, R: Read + 'a, T>(
             .context(TarSnafu {})?
             .to_string_lossy()
             .to_string();
-        if name.trim_start_matches("./") == want {
+        if normalize_tar_path(&name) == want {
             let size = entry.size();
             return on_match(&mut entry, size);
         }
@@ -481,50 +515,8 @@ pub fn hash_files_from_layer<R: Read>(
     media_type: &str,
     targets: &HashSet<String>,
 ) -> Result<HashMap<String, String>> {
-    if targets.is_empty() {
-        return Ok(HashMap::new());
-    }
-    macro_rules! walk {
-        ($reader:expr) => {{
-            let mut out: HashMap<String, String> = HashMap::new();
-            let mut archive = Archive::new($reader);
-            for entry in archive.entries().context(TarSnafu {})? {
-                let mut entry = entry.context(TarSnafu {})?;
-                let raw = entry
-                    .path()
-                    .context(TarSnafu {})?
-                    .to_string_lossy()
-                    .into_owned();
-                let normalized = raw.trim_start_matches("./").trim_start_matches('/');
-                let key = if targets.contains(&raw) {
-                    Some(raw.clone())
-                } else if targets.contains(normalized) {
-                    Some(normalized.to_string())
-                } else {
-                    None
-                };
-                if let Some(k) = key {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update_reader(&mut entry).context(IoSnafu {})?;
-                    out.insert(k, hasher.finalize().to_hex().to_string());
-                    if out.len() >= targets.len() {
-                        break;
-                    }
-                }
-            }
-            Ok(out)
-        }};
-    }
-    if media_type.contains("gzip") {
-        walk!(GzipDecoder::new(reader))
-    } else if media_type.contains("zstd") {
-        let dec = zstd::Decoder::new(reader).map_err(|source| Error::Decompress {
-            message: format!("Zstd decode fail: {source}"),
-        })?;
-        walk!(dec)
-    } else {
-        walk!(reader)
-    }
+    let empty = HashSet::new();
+    scan_blob_targets(reader, media_type, &empty, targets, 0, |_, _| {})
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -762,5 +754,62 @@ mod tests {
         let opq = files.iter().find(|f| f.path == "cache").unwrap();
         assert_eq!(opq.is_whiteout, Some(true));
         assert_eq!(opq.is_opaque, Some(true));
+    }
+
+    #[test]
+    fn content_secrets_scanned_before_and_without_os_release() {
+        use std::io::Cursor;
+        use tar::Builder;
+
+        let mut builder = Builder::new(Vec::new());
+        // Alphabetically before `etc/os-release`, previously skipped when os_release was None
+        // or scanned out of order.
+        append(
+            &mut builder,
+            "./app/.env",
+            b"AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n",
+        );
+        append(
+            &mut builder,
+            "./etc/os-release",
+            b"PRETTY_NAME=\"Alpine Linux v3.20\"\n",
+        );
+        append(
+            &mut builder,
+            "./z/token.txt",
+            b"GH_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz\n",
+        );
+        let data = builder.into_inner().unwrap();
+
+        let info = get_files_from_layer(Cursor::new(data), "tar", 0).unwrap();
+        assert!(info.os_release.is_some());
+        let paths: Vec<&str> = info
+            .content_secrets
+            .iter()
+            .map(|(p, _, _)| p.as_str())
+            .collect();
+        assert!(paths.contains(&"app/.env"), "{paths:?}");
+        assert!(paths.contains(&"z/token.txt"), "{paths:?}");
+        assert!(info.files.iter().all(|f| !f.path.starts_with("./")));
+    }
+
+    #[test]
+    fn dot_root_and_root_opaque_whiteout_are_normalized() {
+        use std::io::Cursor;
+        use tar::Builder;
+
+        let mut builder = Builder::new(Vec::new());
+        append(&mut builder, ".", &[]);
+        append(&mut builder, "./", &[]);
+        append(&mut builder, "./.wh..wh..opq", &[]);
+        append(&mut builder, "./etc/conf.d/app.conf", b"ok");
+        let data = builder.into_inner().unwrap();
+
+        let mut archive = Archive::new(Cursor::new(data));
+        let files = collect_tar_entries(&mut archive).unwrap().files;
+        assert!(!files.iter().any(|f| f.path == "."));
+        let root_opq = files.iter().find(|f| f.is_opaque == Some(true)).unwrap();
+        assert_eq!(root_opq.path, "");
+        assert!(files.iter().any(|f| f.path == "etc/conf.d/app.conf"));
     }
 }

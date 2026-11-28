@@ -1,10 +1,12 @@
 # Stage 1: build the React frontend.
 FROM node:24-alpine AS webbuilder
 
-COPY . /diving-rs
+WORKDIR /diving-rs
+COPY Makefile ./
+COPY web ./web
 RUN apk update \
   && apk add git make \
-  && cd /diving-rs \
+  && mkdir -p crates/diving-web \
   && make build-web
 
 # Stage 2: build the Rust web binary against glibc (Debian). Pinned Rust
@@ -13,10 +15,12 @@ RUN apk update \
 # our C dependencies (zstd-sys, blake3, mimalloc).
 FROM rust:1.100.0 AS builder
 
-COPY --from=webbuilder /diving-rs /diving-rs
+WORKDIR /diving-rs
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY --from=webbuilder /diving-rs/crates/diving-web/dist ./crates/diving-web/dist
 
-RUN cd /diving-rs \
-  && cargo build --release -p diving-web
+RUN cargo build --release -p diving-web
 
 # Stage 3: debian-trixie-slim glibc runtime (Debian 13).
 #

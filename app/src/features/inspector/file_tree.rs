@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diving_core::DockerAnalyzeResult;
+use nsh_core::AccessibilityState;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
@@ -12,6 +13,7 @@ use crate::domain::{
     build_indexed_tree, classify_layer_opcode, count_layer_file_ops, flatten_indexed_tree,
     format_bytes, format_command_lines,
 };
+use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, SelectItem, UiSize, font_mono_family, radius_inset,
@@ -279,30 +281,58 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
     let expand_state = state.clone();
     let collapse_state = state.clone();
     let prov_state = state.clone();
+    let meta_state = state.clone();
     let esc_keyword = state.tree_keyword;
     let esc_ref = state.tree_filter_ref;
     let min_size_str = move || Some(SharedString::from(state.tree_min_size.get().to_string()));
+    let initial_sidebar = if state.app_sidebar_open.get_untracked() {
+        APP_SIDEBAR_WIDTH
+    } else {
+        0.0
+    };
+    let initial_est =
+        untracked(|| window().width.0) - initial_sidebar - state.sidebar_width.get_untracked().0;
+    let toolbar_width = signal(initial_est.max(360.0));
+    let compact_bar = computed(move || toolbar_width.get() < 520.0);
 
     view()
         .w_full()
         .flex_col()
         .gap_1p5()
-        .px_4()
+        .px(move || {
+            if compact_bar.get() {
+                px(12.0)
+            } else {
+                px(16.0)
+            }
+        })
         .py_2()
         .bg(move || theme().background)
         .border_b_1()
         .border_color(move || theme().border)
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let next = bounds.size.width.0;
+            if (next - toolbar_width.get_untracked()).abs() > 2.0 {
+                toolbar_width.set(next);
+            }
+        })
         .child(
             view()
                 .w_full()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
-                .gap_2()
+                .gap(move || if compact_bar.get() { px(6.0) } else { px(8.0) })
                 .child(
                     view()
                         .flex_1()
-                        .min_w(px(220.0))
+                        .min_w(move || {
+                            if compact_bar.get() {
+                                px(110.0)
+                            } else {
+                                px(220.0)
+                            }
+                        })
                         .child(ui_search_input_with_escape(
                             state.tree_keyword,
                             move || t(lang.get(), "tree.filter_placeholder").to_owned(),
@@ -318,29 +348,95 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
                             })),
                         )),
                 )
-                .child(view().w(px(108.0)).flex_shrink_0().child(ui_select(
-                    move || min_size_items(lang.get()),
-                    min_size_str,
-                    move || SharedString::from(t(lang.get(), "tree.size_all")),
-                    "Minimum file size filter",
-                    UiSize::Sm,
-                    false,
-                    move |next| {
-                        let parsed = next
-                            .and_then(|s| s.as_str().parse::<u64>().ok())
-                            .unwrap_or(0);
-                        state.tree_min_size.set(parsed);
-                    },
-                )))
-                .child(ui_button(
-                    move || SharedString::from(t(lang.get(), "provenance.button")),
-                    ButtonVariant::Outline,
-                    UiSize::Sm,
-                    Some(IconName::Search),
-                    false,
-                    false,
-                    move || prov_state.open_provenance_search(),
-                )),
+                .child(
+                    view()
+                        .w(move || {
+                            if compact_bar.get() {
+                                px(90.0)
+                            } else {
+                                px(108.0)
+                            }
+                        })
+                        .flex_shrink_0()
+                        .child(ui_select(
+                            move || min_size_items(lang.get()),
+                            min_size_str,
+                            move || SharedString::from(t(lang.get(), "tree.size_all")),
+                            "Minimum file size filter",
+                            UiSize::Sm,
+                            false,
+                            move |next| {
+                                let parsed = next
+                                    .and_then(|s| s.as_str().parse::<u64>().ok())
+                                    .unwrap_or(0);
+                                state.tree_min_size.set(parsed);
+                            },
+                        )),
+                )
+                .child({
+                    let row1_expand = expand_state.clone();
+                    let row1_collapse = collapse_state.clone();
+                    dynamic(move || {
+                        let s = prov_state.clone();
+                        let e_state = row1_expand.clone();
+                        let c_state = row1_collapse.clone();
+                        if compact_bar.get() {
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .child(ui_icon_button(
+                                    IconName::Search,
+                                    "Find across layers",
+                                    Some(move || {
+                                        SharedString::from(t(lang.get(), "provenance.button"))
+                                    }),
+                                    ButtonVariant::Outline,
+                                    UiSize::Sm,
+                                    false,
+                                    false,
+                                    move || s.open_provenance_search(),
+                                ))
+                                .child(ui_icon_button(
+                                    IconName::ChevronDown,
+                                    "Expand all",
+                                    Some(move || {
+                                        SharedString::from(t(lang.get(), "tree.expand_all"))
+                                    }),
+                                    ButtonVariant::Ghost,
+                                    UiSize::Xs,
+                                    false,
+                                    false,
+                                    move || e_state.expand_all_dirs(),
+                                ))
+                                .child(ui_icon_button(
+                                    IconName::ChevronRight,
+                                    "Collapse all",
+                                    Some(move || {
+                                        SharedString::from(t(lang.get(), "tree.collapse_all"))
+                                    }),
+                                    ButtonVariant::Ghost,
+                                    UiSize::Xs,
+                                    false,
+                                    false,
+                                    move || c_state.collapse_all_dirs(),
+                                ))
+                                .into_element()
+                        } else {
+                            ui_button(
+                                move || SharedString::from(t(lang.get(), "provenance.button")),
+                                ButtonVariant::Outline,
+                                UiSize::Sm,
+                                Some(IconName::Search),
+                                false,
+                                false,
+                                move || s.open_provenance_search(),
+                            )
+                            .into_element()
+                        }
+                    })
+                }),
         )
         .child(
             view()
@@ -355,7 +451,7 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
                         .flex_row()
                         .flex_wrap()
                         .items_center()
-                        .gap_3()
+                        .gap(move || if compact_bar.get() { px(6.0) } else { px(12.0) })
                         .child(ui_checkbox(
                             move || SharedString::from(t(lang.get(), "tree.modifications_only")),
                             state.tree_modifications_only,
@@ -375,34 +471,39 @@ fn filter_toolbar(state: AppState) -> impl IntoElement {
                             state.tree_show_meta_cols,
                             false,
                             false,
-                            move |next| state.tree_show_meta_cols.set(next),
+                            move |next| meta_state.set_tree_show_meta_cols(next),
                         )),
                 )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .flex_shrink_0()
-                        .child(ui_button(
-                            move || SharedString::from(t(lang.get(), "tree.expand_all")),
-                            ButtonVariant::Ghost,
-                            UiSize::Sm,
-                            None,
-                            false,
-                            false,
-                            move || expand_state.expand_all_dirs(),
-                        ))
-                        .child(ui_button(
-                            move || SharedString::from(t(lang.get(), "tree.collapse_all")),
-                            ButtonVariant::Ghost,
-                            UiSize::Sm,
-                            None,
-                            false,
-                            false,
-                            move || collapse_state.collapse_all_dirs(),
-                        )),
-                ),
+                .child(when(
+                    move || !compact_bar.get(),
+                    move || {
+                        let e_state = expand_state.clone();
+                        let c_state = collapse_state.clone();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "tree.expand_all")),
+                                ButtonVariant::Ghost,
+                                UiSize::Sm,
+                                None,
+                                false,
+                                false,
+                                move || e_state.expand_all_dirs(),
+                            ))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "tree.collapse_all")),
+                                ButtonVariant::Ghost,
+                                UiSize::Sm,
+                                None,
+                                false,
+                                false,
+                                move || c_state.collapse_all_dirs(),
+                            ))
+                    },
+                )),
         )
 }
 
@@ -506,6 +607,31 @@ fn toggle_selected_tree_dir(rows: &Memo<Vec<FileTreeRow>>, state: &AppState, exp
     }
 }
 
+fn activate_selected_tree_row(
+    rows: &Memo<Vec<FileTreeRow>>,
+    state: &AppState,
+    fallback_idx: Option<usize>,
+) {
+    let row = rows.with_untracked(|list| {
+        if let Some(sel) = state.selected_file_path.get_untracked()
+            && let Some(active) = list.iter().find(|r| r.key == sel)
+        {
+            return Some(active.clone());
+        }
+        fallback_idx.and_then(|idx| list.get(idx).cloned())
+    });
+    let Some(row) = row else {
+        return;
+    };
+    if row.is_dir {
+        state.toggle_tree_dir(&row.key, row.expanded);
+    } else if row.is_previewable() {
+        state.open_file_preview(&row);
+    } else {
+        state.selected_file_path.set(Some(row.key));
+    }
+}
+
 fn virtual_tree(
     state: AppState,
     res: Arc<DockerAnalyzeResult>,
@@ -565,6 +691,20 @@ fn virtual_tree(
         on_key_with("left", tree_nav, move |_| {
             toggle_selected_tree_dir(&rows, &left_state, false);
         });
+        let act_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: false,
+            for_focus: true,
+            ..Default::default()
+        };
+        let enter_state = nav_state.clone();
+        on_key_with("enter", act_opts, move |_| {
+            activate_selected_tree_row(&rows, &enter_state, None);
+        });
+        let space_state = nav_state.clone();
+        on_key_with("space", act_opts, move |_| {
+            activate_selected_tree_row(&rows, &space_state, None);
+        });
     });
 
     virtual_list(
@@ -586,6 +726,15 @@ fn virtual_tree(
                 .gap_2()
                 .px_4()
                 .focusable(true)
+                .accessibility_state(move || {
+                    let current_key = rows.with(|r| r.get(at.index()).map(|item| item.key.clone()));
+                    let is_selected = current_key.is_some() && current_key == selected_file.get();
+                    AccessibilityState {
+                        selected: is_selected,
+                        ..AccessibilityState::default()
+                    }
+                })
+                .selected(|s| s.bg(surface_active))
                 .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
                 .bg(move || {
                     let current_key = rows.with(|r| r.get(at.index()).map(|item| item.key.clone()));
@@ -604,18 +753,8 @@ fn virtual_tree(
                     }
                 })
                 .on_key_down(move |ev: &KeyEvent| {
-                    let idx = at.index();
-                    let Some(row) = rows.with(|r| r.get(idx).cloned()) else {
-                        return;
-                    };
-                    if matches!(ev.key.as_str(), "Enter" | " ") {
-                        if row.is_dir {
-                            key_state.toggle_tree_dir(&row.key, row.expanded);
-                        } else if row.is_previewable() {
-                            key_state.open_file_preview(&row);
-                        } else {
-                            key_state.selected_file_path.set(Some(row.key));
-                        }
+                    if matches!(ev.key.as_str(), "Enter" | "Space" | " ") {
+                        activate_selected_tree_row(&rows, &key_state, Some(at.index()));
                     }
                 })
                 .on_press(move || {
@@ -1080,6 +1219,7 @@ mod tests {
         let lang = state.lang;
         let selected_layer = state.selected_layer;
         let selected_file = state.selected_file_path;
+        let preview_target = state.preview_target;
         let toggle_lang_state = state.clone();
 
         view()
@@ -1092,9 +1232,10 @@ mod tests {
                     .gap_2()
                     .child(text(move || {
                         format!(
-                            "layer={};file={}",
+                            "layer={};file={};preview={}",
                             selected_layer.get(),
-                            selected_file.get().unwrap_or_default()
+                            selected_file.get().unwrap_or_default(),
+                            preview_target.get().map(|t| t.path).unwrap_or_default()
                         )
                     }))
                     .child(ui_button(
@@ -1129,14 +1270,14 @@ mod tests {
         let mut app = Headless::start(config).expect("start file_tree focus nav harness");
         app.wait_for_within("app.conf", Duration::from_secs(2))
             .expect("file tree rows rendered");
-        assert!(app.shows("layer=0;file="));
+        assert!(app.shows("layer=0;file=;preview="));
 
         // Before FileTree is focused, Down/Up step layers globally.
         app.press_key("down").expect("step down to layer 1");
-        app.wait_for_within("layer=1;file=", Duration::from_secs(2))
+        app.wait_for_within("layer=1;file=;preview=", Duration::from_secs(2))
             .expect("layer stepped to 1");
         app.press_key("up").expect("step back up to layer 0");
-        app.wait_for_within("layer=0;file=", Duration::from_secs(2))
+        app.wait_for_within("layer=0;file=;preview=", Duration::from_secs(2))
             .expect("layer stepped back to 0");
         app.wait_for_within("app.conf", Duration::from_secs(2))
             .expect("layer 0 rows visible again");
@@ -1144,28 +1285,98 @@ mod tests {
         // Tab until focus enters the virtualized FileTree (`etc` row gets selected on focus).
         for _ in 0..20 {
             app.press_key("tab").expect("tab forward");
-            if app.shows("layer=0;file=etc") {
+            if app.shows("layer=0;file=etc;preview=") {
                 break;
             }
         }
         assert!(
-            app.shows("layer=0;file=etc"),
+            app.shows("layer=0;file=etc;preview="),
             "Tab should reach FileTree row `etc`"
         );
 
         // Inside focused FileTree, Down/Up move selected file row and NEVER step layer.
         app.press_key("down").expect("move down inside file tree");
-        app.wait_for_within("layer=0;file=etc/app.conf", Duration::from_secs(2))
+        app.wait_for_within("layer=0;file=etc/app.conf;preview=", Duration::from_secs(2))
             .expect("arrow down selected child row without stepping layer");
+
+        // Pressing Space while row 0 (`etc`) still held focus must open `etc/app.conf` (active selection), not toggle `etc`.
+        app.press_key("space")
+            .expect("space activates active selected file etc/app.conf");
+        app.wait_for_within(
+            "layer=0;file=etc/app.conf;preview=etc/app.conf",
+            Duration::from_secs(2),
+        )
+        .expect("Space opened preview for active selection etc/app.conf");
+
+        // Close the preview sheet so FileTree regains active navigation, then step back Up to `etc`.
+        app.press_key("escape")
+            .expect("escape closes file preview sheet");
         app.press_key("up").expect("move up inside file tree");
-        app.wait_for_within("layer=0;file=etc", Duration::from_secs(2))
-            .expect("arrow up selected parent row without stepping layer");
+        app.wait_for_within(
+            "layer=0;file=etc;preview=etc/app.conf",
+            Duration::from_secs(2),
+        )
+        .expect("arrow up selected parent row without stepping layer");
 
         // Moving focus back out of FileTree (Shift+Tab onto toolbar `Collapse all`) restores global layer stepping.
         app.press_key("shift+tab").expect("tab back out of tree");
         app.press_key("down")
             .expect("step layer down once outside file tree");
-        app.wait_for_within("layer=1;file=", Duration::from_secs(2))
+        app.wait_for_within("layer=1;file=;preview=etc/app.conf", Duration::from_secs(2))
             .expect("leaving FileTree focus must restore global layer stepping");
+    }
+
+    #[component]
+    fn CompactToolbarHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        state.app_sidebar_open.set(true);
+        state.sidebar_width.set(px(280.0));
+        let res = file_tree_fixture();
+        state.result.set(Some(res.clone()));
+        let measured_h = signal(0.0f32);
+        view()
+            .flex_col()
+            .child(
+                view()
+                    .w(px(440.0))
+                    .flex_col()
+                    .on_layout(move |bounds: &Bounds<Points>| {
+                        measured_h.set(bounds.size.height.0);
+                    })
+                    .child(filter_toolbar(state)),
+            )
+            .child(text(move || format!("toolbar_h={:.1}", measured_h.get())))
+    }
+
+    #[test]
+    fn file_tree_compact_toolbar_stays_within_two_rows_when_narrow() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(windowed_root::<CompactToolbarHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start compact toolbar harness");
+        app.wait_for_within("Modifications", Duration::from_secs(2))
+            .expect("compact checkboxes visible");
+        let h_text = app
+            .screen()
+            .texts()
+            .into_iter()
+            .find(|t| t.starts_with("toolbar_h="))
+            .expect("measured toolbar height text")
+            .to_owned();
+        let height: f32 = h_text
+            .trim_start_matches("toolbar_h=")
+            .parse()
+            .expect("numeric height");
+        assert!(
+            height > 0.0 && height <= 88.0,
+            "compact filter_toolbar wrapped beyond 2 rows (height={height:.1})"
+        );
     }
 }

@@ -7,15 +7,21 @@
 
 mod common;
 
+use bytesize::ByteSize;
 use common::{build_fixture_tar, build_fixture_v2_tar, test_web_state};
+use diving_app::config::build_http_client;
 use diving_app::logging::install_crypto_provider;
+use diving_core::{Analyzer, CacheConfig, GateConfig};
 use diving_web::controller;
 use diving_web::mcp::new_router;
-use diving_web::state::McpStatus;
-use reqwest::{Client, RequestBuilder, StatusCode};
+use diving_web::state::{McpStatus, WebState};
+use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use serde_json::{json, Value};
+use std::env;
+use std::sync::Arc;
 use tar::{Builder as TarBuilder, Header as TarHeader};
 use tempfile::NamedTempFile;
+use tokio::net::TcpListener;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -182,8 +188,9 @@ async fn mcp_tools_analyze_local_image() {
     assert!(secret.get("layerIndex").is_none());
     assert_eq!(findings["layers"].as_array().unwrap().len(), 3);
 
-    // Tool failures come back as `isError` results the model can read.
-    let err = call_tool(
+    // `read_file` works on local `file://` images (both cached sha256 blobs and tar entries)
+    // and reports binary files by full size while returning tool errors as `isError`.
+    let cfg = call_tool(
         &client,
         &url,
         6,
@@ -191,10 +198,36 @@ async fn mcp_tools_analyze_local_image() {
         json!({"image": image, "layer": 1, "path": "etc/config.yml"}),
     )
     .await;
-    assert_eq!(err["isError"], true);
-    assert!(tool_text(&err).contains("registry images"));
+    assert_ne!(cfg["isError"], true, "{cfg}");
+    assert_eq!(tool_text(&cfg), "a: 1");
 
-    let latest = call_tool(&client, &url, 7, "latest_images", json!({})).await;
+    let bin = call_tool(
+        &client,
+        &url,
+        7,
+        "read_file",
+        json!({"image": image, "layer": 3, "path": "data/model.bin"}),
+    )
+    .await;
+    assert_ne!(bin["isError"], true, "{bin}");
+    assert!(tool_text(&bin).contains("binary file"), "{bin}");
+    assert!(
+        tool_text(&bin).contains(&ByteSize(1_500_000).to_string()),
+        "{bin}"
+    );
+
+    let err = call_tool(
+        &client,
+        &url,
+        8,
+        "read_file",
+        json!({"image": image, "layer": 2, "path": "etc/config.yml"}),
+    )
+    .await;
+    assert_eq!(err["isError"], true);
+    assert!(tool_text(&err).contains("no file content"));
+
+    let latest = call_tool(&client, &url, 9, "latest_images", json!({})).await;
     assert!(tool_text(&latest).contains(".tar"));
 }
 
@@ -215,9 +248,9 @@ async fn mcp_token_is_required_when_configured() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-    // With a token the Host check is off, so a public hostname is fine.
+    // With a token the Host check is off, so a public hostname is fine (case-insensitive Bearer).
     let resp = post(&client, &url, ping)
-        .bearer_auth("s3cret")
+        .header("Authorization", "bearer s3cret")
         .header("Host", "diving.example.com")
         .send()
         .await
@@ -495,4 +528,112 @@ async fn multi_arch_diff_supports_mode_override_over_http_and_mcp() {
         .unwrap();
     assert_eq!(full_diff["baseLayersIgnored"], false);
     assert_eq!(full_diff["changed"]["count"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_preview_download_and_error_statuses_on_local_tar() {
+    let (_tmp, image) = fixture_image();
+    let client = client();
+
+    let state = test_web_state(McpStatus::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, controller::new_router(state))
+            .await
+            .unwrap();
+    });
+
+    // Missing file:// tar returns 404.
+    let missing = client
+        .get(format!(
+            "http://{addr}/api/analyze?image=file:///nonexistent/diving-missing-12345.tar"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let report: Value = client
+        .get(format!("http://{addr}/api/analyze?image={image}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let layer0 = &report["layers"][0];
+    let layer2 = &report["layers"][2];
+
+    let preview_url = Url::parse_with_params(
+        &format!("http://{addr}/api/file-preview"),
+        &[
+            ("digest", layer0["digest"].as_str().unwrap()),
+            ("mediaType", layer0["mediaType"].as_str().unwrap()),
+            ("file", "etc/config.yml"),
+            ("image", image.as_str()),
+        ],
+    )
+    .unwrap();
+    let preview: Value = client
+        .get(preview_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["binary"], false);
+    assert_eq!(preview["content"], "a: 1");
+
+    let download_url = Url::parse_with_params(
+        &format!("http://{addr}/api/file"),
+        &[
+            ("digest", layer0["digest"].as_str().unwrap()),
+            ("mediaType", layer0["mediaType"].as_str().unwrap()),
+            ("file", "etc/config.yml"),
+            ("image", image.as_str()),
+        ],
+    )
+    .unwrap();
+    let download = client.get(download_url).send().await.unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.text().await.unwrap(), "a: 1");
+
+    // 1.5 MB data/model.bin triggers 413 when max_download_file_size is 64 KiB.
+    let small_cap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let small_addr = small_cap_listener.local_addr().unwrap();
+    let http_client = build_http_client().unwrap();
+    let analyzer = Analyzer::builder()
+        .cache(CacheConfig::ephemeral())
+        .http_client(http_client.clone())
+        .allow_local_file(true)
+        .build()
+        .unwrap();
+    let small_state = Arc::new(WebState::new(
+        analyzer,
+        http_client,
+        env::temp_dir(),
+        GateConfig::default(),
+        64 * 1024,
+        McpStatus::default(),
+        vec![],
+    ));
+    tokio::spawn(async move {
+        axum::serve(small_cap_listener, controller::new_router(small_state))
+            .await
+            .unwrap();
+    });
+    let too_large_url = Url::parse_with_params(
+        &format!("http://{small_addr}/api/file"),
+        &[
+            ("digest", layer2["digest"].as_str().unwrap()),
+            ("mediaType", layer2["mediaType"].as_str().unwrap()),
+            ("file", "data/model.bin"),
+            ("image", image.as_str()),
+        ],
+    )
+    .unwrap();
+    let too_large = client.get(too_large_url).send().await.unwrap();
+    assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

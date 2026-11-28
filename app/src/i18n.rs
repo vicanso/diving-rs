@@ -37,6 +37,7 @@ const CATALOG: &[(&str, &str, &str)] = &[
     // App shell & navigation
     ("app.title", "Diving", "Diving"),
     ("nav.back_home", "Back to Home", "返回首页"),
+    #[cfg(debug_assertions)]
     ("nav.ui_gallery", "UI Gallery", "组件画廊"),
     ("menu.more_actions", "More actions", "更多操作"),
     ("menu.open_local_file", "Open local file…", "打开本地文件…"),
@@ -824,6 +825,60 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("menu.edit", "Edit", "编辑"),
     ("menu.view", "View", "视图"),
     ("menu.window", "Window", "窗口"),
+    // Auto-updater
+    ("menu.check_updates", "Check for updates…", "检查更新…"),
+    ("update.checking", "Checking for updates…", "正在检查更新…"),
+    (
+        "update.up_to_date",
+        "Diving Desktop is up to date ({0}).",
+        "Diving Desktop 已是最新版本（{0}）。",
+    ),
+    (
+        "update.available_notice",
+        "Update available: {0} → {1}",
+        "发现新版本：{0} → {1}",
+    ),
+    ("update.action_install", "Update & restart", "更新并重启"),
+    (
+        "update.action_install_version",
+        "Update & restart ({0})",
+        "更新并重启（{0}）",
+    ),
+    ("update.action_skip", "Skip this version", "跳过此版本"),
+    (
+        "update.action_resume",
+        "Resume reminders ({0})",
+        "恢复此版本提醒（{0}）",
+    ),
+    (
+        "update.downloading",
+        "Downloading {0} ({1})…",
+        "正在下载 {0}（{1}）…",
+    ),
+    ("update.installing", "Installing {0}…", "正在安装 {0}…"),
+    (
+        "update.ready_restart",
+        "Installed {0}. Restart to finish updating.",
+        "已安装 {0}，重启应用以完成更新。",
+    ),
+    ("update.restart_now", "Restart now", "立即重启"),
+    (
+        "update.opened_installer",
+        "Opened installer for {0}. Drag Diving.app to Applications.",
+        "已打开 {0} 安装包，请将 Diving.app 拖入「应用程序」。",
+    ),
+    ("update.failed", "Update failed: {0}", "更新失败：{0}"),
+    ("update.retry", "Retry update", "重试更新"),
+    (
+        "update.skipped_notice",
+        "Skipped update reminders for {0}.",
+        "已跳过 {0} 的更新提醒。",
+    ),
+    (
+        "update.unsupported",
+        "In-place updates are not available for {0}/{1}. Download manually from GitHub Releases.",
+        "当前平台（{0}/{1}）不支持自动更新，请前往 GitHub Releases 手动下载。",
+    ),
 ];
 
 /// Returns the desktop version badge string (preferring `DIVING_APP_VERSION` in CI/nightly builds).

@@ -17,13 +17,13 @@ A single, fast Rust binary that pulls images straight from any registry and show
 - ⚡ **Fast & standalone** — one static binary. Pulls layers directly from Docker Hub / any V2 registry, a local docker / podman client, a `docker save` tar or an OCI archive / layout. Layers are cached and downloads resume automatically.
 - 🔍 **Layer-by-layer explorer** — an interactive TUI to walk the filesystem of every layer, with added / modified / removed files colorized.
 - 📉 **Waste & bloat detection** — efficiency score, wasted bytes, cross-layer duplicate files, oversized layers, package-manager caches, dev/build artifacts, binaries shipped with debug info, and a reconstructed Dockerfile with anti-pattern linting.
-- 🛡️ **Security hygiene checks** — flags leaked secret files (`.env`, SSH / cloud keys, certs), hardcoded credentials in `ENV`/labels/Dockerfile (key names only, never the value), setuid & world-writable files, and containers that run as root.
+- 🛡️ **Security hygiene checks** — flags leaked secret files (`.env`, SSH / cloud keys, certs), inline secrets inside small text/config files (embedded PEM keys, AWS/GitHub/Slack/Stripe/Google tokens, hardcoded config secrets), hardcoded credentials in `ENV`/labels/Dockerfile (key names only, never the value), setuid & world-writable files, and containers that run as root.
 - 🤖 **AI optimization report** — hand the full analysis to any OpenAI-compatible model and get a prioritized fix list, plus version-over-version regression detection.
 - 🔀 **Image diff** — compare two releases: what grew, which layers changed, which files were added, removed or resized.
 - 🚦 **CI gate** — fail the pipeline when an image drops below your efficiency / wasted-bytes thresholds, outgrows a size cap, or grows too much since the last release. Ships as a GitHub Action with a job-summary report.
-- 🌐 **Terminal · Web · MCP · JSON / Markdown · WeCom** — explore interactively, expose an HTTP API or an MCP endpoint for AI agents, export a report, or push results to a chat.
+- 🌐 **Terminal · Desktop · Web · MCP · JSON / Markdown · Webhooks** — explore interactively in the terminal or native desktop app, expose an HTTP API or an MCP endpoint for AI agents, export a report, or push results to a chat.
 
-> **Scope note:** diving focuses on size, structure, and basic security checks (leaked secret files, file permissions, runs-as-root, etc.). It scans file **paths** and image metadata — it does **not** do CVE/vulnerability scanning or file-content scanning. Pair it with Trivy/grype/docker scout for vulnerability coverage.
+> **Scope note:** diving focuses on size, structure, and basic security hygiene (secret files, inline secrets in small text/config files, file permissions, runs-as-root, etc.). It scans file **paths**, image metadata, and small text/config file contents (≤ 1 MiB) — it does **not** do CVE/vulnerability scanning. Pair it with Trivy/grype/docker scout for vulnerability coverage.
 
 ## Quick start
 
@@ -36,9 +36,10 @@ cargo install diving                                                            
 diving redis:alpine
 ```
 
-Three ways to use **diving**:
+Four ways to use **diving**:
 
 - **CLI / TUI / CI (`diving`)** — install via `install.sh`, `cargo install diving`, `cargo install --git https://github.com/vicanso/diving-rs diving`, or [prebuilt releases](https://github.com/vicanso/diving-rs/releases). No Docker daemon required.
+- **Desktop App (`Diving Desktop`, `app/`)** — native desktop client for macOS, Linux, and Windows built directly on `diving-core` (no embedded browser or separate server). Download installers from [prebuilt releases](https://github.com/vicanso/diving-rs/releases) or build/run locally with `make dev-app` / `make package-macos`.
 - **Web Server / MCP / Webhook (`vicanso/diving` / `diving-web`)** — run via [Docker](#web-mode) or build `cargo build --release -p diving-web`.
 - **Rust Library (`diving-core`)** — embed the analysis engine directly in another Rust service (see [Rust Library](#rust-library-diving-core)).
 
@@ -184,7 +185,7 @@ The repository is also a GitHub Action: it installs the diving release binary, r
 | `output` | — | Also write the full analysis here (`.json` or `.md`) |
 | `summary-file` | temp file | Where to write the short summary |
 | `job-summary` | `true` | Append the summary to the job summary |
-| `version` | `latest` | diving release to install, e.g. `v0.12.0` |
+| `version` | `latest` | diving release to install, e.g. `v0.12.3` |
 | `args` | — | Extra arguments, e.g. `--lang zh` |
 
 The step fails with diving's [exit code](#exit-codes). Its `summary-file` output is the summary's path, but GitHub passes no outputs on from a failed step — so to post the summary as a pull-request comment even when the gate fails, give the path yourself:
@@ -476,11 +477,14 @@ Access control:
 
 The Docker image listens on `0.0.0.0`, so for remote MCP clients pass the token as an environment variable, e.g. `docker run -e DIVING_MCP_TOKEN=<token> …`. Clients on the same host can use `http://127.0.0.1:7001/mcp` without one.
 
-## Sensitive-file scanning
+## Sensitive-file and secret scanning
 
-During analysis diving scans every file **path** against built-in rules (`.env` files, SSH private keys, AWS/GCP credentials, TLS private keys, kubeconfig, `.htpasswd`, an accidentally-copied `.git` directory, …) and reports matches under **Security Warnings**. (It scans paths and metadata, not file contents.)
+During analysis diving runs two complementary checks and reports matches under **Security Warnings**:
 
-Extend or suppress the rules with `~/.diving/sensitive-files` — one rule per line:
+- **File path rules** — checks every file path against built-in patterns (`.env` files, SSH private keys, AWS/GCP credentials, TLS private keys, kubeconfig, `.htpasswd`, an accidentally-copied `.git` directory, …).
+- **File content secret scanning** — scans small non-binary text and config files (≤ 1 MiB, excluding public CA stores, `node_modules`, and system/cache directories, up to 64 findings per layer) during the single-pass tar scan for embedded PEM private key headers (`-----BEGIN ... PRIVATE KEY-----`), provider tokens (AWS Access Key IDs, GitHub/Slack/Stripe/Google API tokens), and hardcoded secret assignments (`*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_TOKEN`, `DATABASE_URL`, `AWS_SECRET_ACCESS_KEY`) in `.env`/YAML/TOML/INI/properties/conf files while ignoring obvious placeholders (`$VAR`, `{{...}}`, `changeme`, `example`, etc.).
+
+Extend or suppress the rules with `~/.diving/sensitive-files` (ignore rules suppress both path and content findings) — one rule per line:
 
 | Line format | Effect |
 |-------------|--------|

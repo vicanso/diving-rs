@@ -107,7 +107,7 @@ pub fn ui_menu(trigger: impl IntoElement) -> MenuElement {
         .trigger(trigger)
 }
 
-/// Styled right-click context menu using `0.6.1` `ContextMenuEvents`.
+/// Styled right-click context menu using `0.7.0` `ContextMenuEvents`.
 pub fn ui_context_menu(
     trigger: impl IntoElement,
     on_open_change: impl Fn(&ContextMenuEvents) + 'static,
@@ -453,6 +453,8 @@ pub fn ui_banner(
                 .child(ui_icon(icon, px(16.0), move || banner_fg(tone)))
                 .child(
                     text(message)
+                        .flex_1()
+                        .min_w(px(0.0))
                         .text_sm()
                         .text_color(move || theme().foreground),
                 ),

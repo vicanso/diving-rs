@@ -4,8 +4,10 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use ring::digest::{digest as ring_digest, Context, SHA256};
-use std::io::Read;
+use std::fs::{File, FileTimes, Metadata, OpenOptions};
+use std::io::{Read, Result as IoResult};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 use tokio::fs;
 use tracing::{info, warn};
 
@@ -59,20 +61,24 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(ring_digest(&SHA256, data).as_ref())
 }
 
-/// sha256 hex of a file on disk, streamed in 64 KB chunks（同步阻塞 I/O；
-/// 大文件调用方应放在 spawn_blocking 中运行）.
-pub fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
+/// sha256 hex of a reader, streamed in 64 KB chunks.
+pub(crate) fn sha256_hex_of_reader<R: Read>(mut reader: R) -> IoResult<String> {
     let mut ctx = Context::new(&SHA256);
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         ctx.update(&buf[..n]);
     }
     Ok(hex::encode(ctx.finish().as_ref()))
+}
+
+/// sha256 hex of a file on disk, streamed in 64 KB chunks（同步阻塞 I/O；
+/// 大文件调用方应放在 spawn_blocking 中运行）.
+pub fn sha256_hex_of_file(path: &Path) -> IoResult<String> {
+    sha256_hex_of_reader(File::open(path)?)
 }
 
 /// Sibling temp path used for atomic blob/file writes. Kept in the same
@@ -101,6 +107,30 @@ pub async fn save_blob_to_file(store: &CacheStore, digest: &str, data: &Bytes) -
     Ok(())
 }
 
+/// Refresh both access and modification timestamps on a cached blob so LRU
+/// eviction works accurately even on `noatime` / `relatime` mounts.
+pub(crate) fn touch_blob_times(path: &Path) {
+    let now = SystemTime::now();
+    let times = FileTimes::new().set_accessed(now).set_modified(now);
+    let opened = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(|_| File::open(path));
+    if let Ok(file) = opened {
+        let _ = file.set_times(times);
+    }
+}
+
+fn last_used_timestamp(meta: &Metadata) -> i64 {
+    let latest = match (meta.accessed().ok(), meta.modified().ok()) {
+        (Some(a), Some(m)) => Some(a.max(m)),
+        (a, m) => a.or(m),
+    };
+    latest
+        .map(|t| DateTime::<Utc>::from(t).timestamp())
+        .unwrap_or(0)
+}
+
 /// Sweep expired regular files in `dir` whose access/modification timestamp is
 /// at or before `expired_ts`. Uses `read_dir` rather than globbing so paths
 /// containing `[`, `]`, or `*` work safely.
@@ -125,11 +155,7 @@ pub(crate) async fn sweep_expired_dir(dir: &Path, expired_ts: i64) -> Result<usi
         if !meta.is_file() {
             continue;
         }
-        let Ok(time) = meta.accessed().or_else(|_| meta.modified()) else {
-            continue;
-        };
-        let t: DateTime<Utc> = DateTime::from(time);
-        if t.timestamp() > expired_ts {
+        if last_used_timestamp(&meta) > expired_ts {
             continue;
         }
         match fs::remove_file(&path).await {
@@ -172,11 +198,7 @@ pub async fn enforce_layer_cache_limit(store: &CacheStore) -> Result<(usize, u64
             continue;
         }
         let size = meta.len();
-        let atime = meta
-            .accessed()
-            .or_else(|_| meta.modified())
-            .map(|t| DateTime::<Utc>::from(t).timestamp())
-            .unwrap_or(0);
+        let atime = last_used_timestamp(&meta);
         total += size;
         files.push((path, size, atime));
     }
@@ -273,5 +295,58 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("_unsafe_"));
+    }
+
+    #[tokio::test]
+    async fn touch_blob_times_prevents_eviction_on_noatime_mounts() {
+        use crate::store::CacheConfig;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let layer_dir = dir.path().join("layers");
+        let analysis_dir = dir.path().join("analysis");
+        let cfg =
+            CacheConfig::persistent(&layer_dir, &analysis_dir).max_layer_cache_size(Some(1024));
+        let store = CacheStore::from_config(cfg).unwrap();
+
+        let digest_a = format!("sha256:{}", "a".repeat(64));
+        let digest_b = format!("sha256:{}", "b".repeat(64));
+        let path_a = store.blob_path(&digest_a);
+        let path_b = store.blob_path(&digest_b);
+        fs::write(&path_a, vec![1u8; 700]).await.unwrap();
+        fs::write(&path_b, vec![2u8; 700]).await.unwrap();
+
+        // Simulate `noatime`: set older atime+mtime on A and B (B slightly newer),
+        // then simulate a cache hit touching only mtime on A (leaving old atime intact).
+        let now = SystemTime::now();
+        let t_a_old = now - Duration::from_secs(120);
+        let t_b_old = now - Duration::from_secs(60);
+        OpenOptions::new()
+            .write(true)
+            .open(&path_a)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(t_a_old).set_modified(t_a_old))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path_b)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(t_b_old).set_modified(t_b_old))
+            .unwrap();
+
+        touch_blob_times(&path_a);
+        // Simulate `noatime` leaving atime stale while mtime stays updated.
+        OpenOptions::new()
+            .write(true)
+            .open(&path_a)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(t_a_old).set_modified(now))
+            .unwrap();
+
+        let (evicted, _) = enforce_layer_cache_limit(&store).await.unwrap();
+        assert_eq!(evicted, 1);
+        assert!(path_a.exists(), "touched blob A should be kept");
+        assert!(!path_b.exists(), "untouched blob B should be evicted");
     }
 }

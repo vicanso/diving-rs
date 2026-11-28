@@ -1,5 +1,7 @@
 //! Headless integration tests verifying `UiGallery` rendering and core interactions.
 
+#![cfg(debug_assertions)]
+
 use std::time::{Duration, SystemTime};
 
 use nsh_app_diving::ui::{UiGallery, app_tokens};

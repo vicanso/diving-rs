@@ -4,8 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 description = "Shared configuration, AI reporting, and notification layer for diving and diving-web."
+keywords = ["diving", "docker", "image", "oci", "configuration"]
+categories = ["development-tools"]
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
 rust-version.workspace = true
 
 [dependencies]

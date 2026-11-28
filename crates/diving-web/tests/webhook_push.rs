@@ -393,3 +393,69 @@ async fn unauthenticated_webhook_allows_loopback_and_rejects_public_forwarded_ip
         .unwrap();
     assert_eq!(allowed.status(), StatusCode::ACCEPTED);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn webhook_rejects_oversized_body_with_413_and_ignores_forwarded_host() {
+    let (mock_base, store) = spawn_mock_notifiers().await;
+    let notify_cfg = NotifyConfig {
+        webhook: Some(CustomWebhookConfig {
+            webhook: format!("{mock_base}/hook"),
+            secret: None,
+        }),
+        public_url: None,
+        ..Default::default()
+    };
+    let webhook_url = spawn_webhook_server(WebhookConfig {
+        token: Some("sec".to_string()),
+        allow_public: false,
+        ai_cfg: None,
+        no_ai_history: false,
+        notify_cfg,
+        default_lang: Lang::En,
+    })
+    .await;
+
+    let c = client();
+
+    // > 1 MiB body returns 413 Payload Too Large.
+    let huge = vec![b'a'; 1024 * 1024 + 64];
+    let resp = c
+        .post(&webhook_url)
+        .header("Authorization", "bearer sec")
+        .header("Content-Type", "application/json")
+        .body(huge)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Untrusted X-Forwarded-Host / Proto are ignored when public_url is unset.
+    let (_tmp, image) = fixture_image();
+    let accepted = c
+        .post(&webhook_url)
+        .header("Authorization", "bearer sec")
+        .header("X-Forwarded-Host", "evil.attacker.example")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({ "image": image }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    timeout(Duration::from_secs(15), async {
+        while store.channel_count() < 1 {
+            store.notify.notified().await;
+        }
+    })
+    .await
+    .expect("custom webhook channel must receive notification");
+
+    let hook_req = store.take("webhook").unwrap();
+    let hook_json: Value = serde_json::from_slice(&hook_req.body).unwrap();
+    let report_url = hook_json["reportUrl"].as_str().unwrap();
+    assert!(report_url.starts_with("http://127.0.0.1:"), "{report_url}");
+    assert!(
+        !report_url.contains("evil.attacker.example"),
+        "{report_url}"
+    );
+}

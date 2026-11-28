@@ -47,14 +47,32 @@ impl Lang {
     }
 }
 
-/// Substitute `{0}`, `{1}`, … placeholders. The catalog templates contain no
-/// literal braces, so a plain replace is sufficient and dependency-free.
+/// Substitute `{0}`, `{1}`, … placeholders in a single pass so substituted
+/// values that happen to contain `{1}` are never re-expanded.
 pub fn fill(template: &str, args: &[&str]) -> String {
-    let mut s = template.to_string();
-    for (i, a) in args.iter().enumerate() {
-        s = s.replace(&format!("{{{i}}}"), a);
+    let mut out = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(rel_end) = template[i + 1..].find('}') {
+                let inner = &template[i + 1..i + 1 + rel_end];
+                if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Ok(idx) = inner.parse::<usize>() {
+                        if let Some(val) = args.get(idx) {
+                            out.push_str(val);
+                            i += 2 + rel_end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        let ch = template[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    s
+    out
 }
 
 /// Look up a catalog entry. Unknown keys return a visible marker (loud but
@@ -462,6 +480,8 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Zh, "diff.tag.mode") => "权限",
         (Lang::En, "diff.tag.link") => "symlink",
         (Lang::Zh, "diff.tag.link") => "软链",
+        (Lang::En, "diff.tag.hardlink") => "hardlink",
+        (Lang::Zh, "diff.tag.hardlink") => "硬链",
         (Lang::En, "md.title") => "Image Analysis",
         (Lang::Zh, "md.title") => "镜像分析",
         (Lang::En, "md.risktags") => "Risk Tags",
@@ -615,11 +635,23 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "tui.col.uidgid") => " UID:GID ",
         (Lang::Zh, "tui.col.uidgid") => " UID:GID ",
         (Lang::En, "tui.col.fsize") => "     Size",
-        (Lang::Zh, "tui.col.fsize") => "   大小",
+        (Lang::Zh, "tui.col.fsize") => "     大小",
         (Lang::En, "tui.col.filetree") => "FileTree",
         (Lang::Zh, "tui.col.filetree") => "目录树",
         (Lang::En, "tui.modetips") => "Esc|0: All   1: Modified/Removed   2: File >= 1MB   |  Current: {0}",
         (Lang::Zh, "tui.modetips") => "Esc|0: 全部   1: 修改/删除   2: 文件 >= 1MB   |  当前: {0}",
+        (Lang::En, "tui.layers.empty") => "(no layers)",
+        (Lang::Zh, "tui.layers.empty") => "（无镜像层）",
+        (Lang::En, "tui.files.empty") => "(no files in this layer)",
+        (Lang::Zh, "tui.files.empty") => "（当前层无文件）",
+        (Lang::En, "tui.files.nomatch") => "(no matching files)",
+        (Lang::Zh, "tui.files.nomatch") => "（无匹配文件）",
+        (Lang::En, "tui.footer.hints") => "q Quit | Tab/←→ Panel | ↑↓/jk Move | PgUp/PgDn/Home/End | Enter/Space Fold | / Filter | 0/1/2 Mode",
+        (Lang::Zh, "tui.footer.hints") => "q 退出 | Tab/←→ 切栏 | ↑↓/jk 移动 | PgUp/PgDn/Home/End | Enter/Space 折叠 | / 搜索 | 0/1/2 过滤",
+        (Lang::En, "tui.footer.search") => "Filter: /{0}_   (Enter: apply | Esc: clear)",
+        (Lang::Zh, "tui.footer.search") => "搜索: /{0}_   (Enter: 确认 | Esc: 清空)",
+        (Lang::En, "tui.imgdetails.title_active") => " ● Image Details ",
+        (Lang::Zh, "tui.imgdetails.title_active") => " ● 镜像详情 ",
         (Lang::En, "tui.col.count") => "Count",
         (Lang::Zh, "tui.col.count") => "次数",
         (Lang::En, "tui.col.totspace") => "Total Space",
@@ -724,5 +756,13 @@ mod tests {
     fn zh_catalog_has_entries() {
         assert_ne!(tr(Lang::Zh, "rec.runasroot.title"), "<missing i18n key>");
         assert_ne!(tr(Lang::Zh, "rec.wasted.detail"), "<missing i18n key>");
+    }
+
+    #[test]
+    fn fill_substitutes_in_a_single_pass() {
+        // An argument that contains `{1}` must not be substituted a second time
+        // when `{1}` is processed.
+        assert_eq!(fill("{0} -> {1}", &["x{1}y", "z"]), "x{1}y -> z");
+        assert_eq!(fill("{1}{0}{missing}", &["A", "{0}"]), "{0}A{missing}");
     }
 }

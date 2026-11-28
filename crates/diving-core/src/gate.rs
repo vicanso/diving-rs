@@ -88,7 +88,7 @@ pub fn evaluate_gate(
     lang: Lang,
     config: &GateConfig,
 ) -> Vec<GateFailure> {
-    let lowest_efficiency = (config.lowest_efficiency * 100.0) as u64;
+    let lowest_efficiency = (config.lowest_efficiency * 100.0).max(0.0).round() as u64;
     let highest_wasted_bytes = config.highest_wasted_bytes;
     let highest_user_wasted_percent = config.highest_user_wasted_percent;
     let mut failures = vec![];
@@ -297,5 +297,40 @@ mod tests {
         let failures = evaluate_diff_gate(&breached, Some(10 * 1024 * 1024));
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].key, "cli.check.upper_growth");
+    }
+
+    #[test]
+    fn lowest_efficiency_threshold_rounds_instead_of_truncating() {
+        let result = DockerAnalyzeResult::default();
+        // Float IEEE-754 representation of 0.29 * 100.0 is 28.999999999999996;
+        // 0.57 * 100.0 is 56.99999999999999. Ensure we round rather than truncate.
+        for (threshold, expected_pct) in [(0.29, 29u64), (0.57, 57), (0.58, 58)] {
+            let cfg = GateConfig {
+                lowest_efficiency: threshold,
+                highest_user_wasted_percent: 1.0,
+                highest_wasted_bytes: u64::MAX,
+                ..Default::default()
+            };
+            let below = DockerAnalyzeSummary {
+                score: expected_pct - 1,
+                ..Default::default()
+            };
+            let at = DockerAnalyzeSummary {
+                score: expected_pct,
+                ..Default::default()
+            };
+            let fail = evaluate_gate(&result, &below, Lang::En, &cfg);
+            assert_eq!(
+                fail.iter().map(|f| f.key).collect::<Vec<_>>(),
+                vec!["cli.check.eff"],
+                "threshold {threshold} should reject score {}",
+                expected_pct - 1
+            );
+            assert_eq!(fail[0].args, vec![expected_pct.to_string()]);
+            assert!(
+                evaluate_gate(&result, &at, Lang::En, &cfg).is_empty(),
+                "threshold {threshold} should allow score {expected_pct}"
+            );
+        }
     }
 }

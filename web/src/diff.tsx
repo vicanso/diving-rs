@@ -362,7 +362,11 @@ const DiffConfigRuntime = ({ diff }: { diff: ImageDiff }) => {
     const show = (s: string) => s || "—";
     const cmd = (v: string[]) => (v.length ? v.join(" ") : "—");
     if (cd.baseOs)
-      out.push(["Base OS", show(cd.baseOs.base), show(cd.baseOs.target)]);
+      out.push([
+        i18nGet("baseOsLabel"),
+        show(cd.baseOs.base),
+        show(cd.baseOs.target),
+      ]);
     if (cd.user) out.push(["USER", show(cd.user.base), show(cd.user.target)]);
     if (cd.workingDir)
       out.push([
@@ -398,25 +402,37 @@ const DiffConfigRuntime = ({ diff }: { diff: ImageDiff }) => {
     }
     if (rd.entrypoint)
       out.push([
-        "Runtime entrypoint",
+        i18nGet("diffRuntimeEntrypoint"),
         show(rd.entrypoint.base),
         show(rd.entrypoint.target),
       ]);
     if (rd.libc)
-      out.push(["Runtime libc", show(rd.libc.base), show(rd.libc.target)]);
+      out.push([
+        i18nGet("runtimeLibcLabel"),
+        show(rd.libc.base),
+        show(rd.libc.target),
+      ]);
     if (rd.requiredGlibc)
       out.push([
-        "Min glibc",
+        i18nGet("diffMinGlibc"),
         show(rd.requiredGlibc.base),
         show(rd.requiredGlibc.target),
       ]);
     if (rd.osGlibc)
-      out.push(["OS glibc", show(rd.osGlibc.base), show(rd.osGlibc.target)]);
+      out.push([
+        i18nGet("diffOsGlibc"),
+        show(rd.osGlibc.base),
+        show(rd.osGlibc.target),
+      ]);
     if (rd.issue)
-      out.push(["Runtime issue", show(rd.issue.base), show(rd.issue.target)]);
+      out.push([
+        i18nGet("diffRuntimeIssue"),
+        show(rd.issue.base),
+        show(rd.issue.target),
+      ]);
     if (rd.addedUnstripped?.length || rd.removedUnstripped?.length) {
       out.push([
-        "Unstripped binaries",
+        i18nGet("diffUnstrippedBinaries"),
         rd.removedUnstripped?.length
           ? `${rd.baseUnstrippedCount} (−${rd.removedUnstripped.join(", ")})`
           : String(rd.baseUnstrippedCount),

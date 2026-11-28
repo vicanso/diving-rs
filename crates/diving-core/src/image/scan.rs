@@ -266,7 +266,9 @@ pub(crate) fn scan_layers(
                         let dir = file.path.as_str();
                         let doomed: Vec<(String, (u64, usize))> = seen_files
                             .iter()
-                            .filter(|(p, _)| path_under_dir(p, dir))
+                            .filter(|(p, &(_, written_in))| {
+                                written_in != layer_index && path_under_dir(p, dir)
+                            })
                             .map(|(p, &seen)| (p.clone(), seen))
                             .collect();
                         for (path, (prev_size, written_in)) in doomed {
@@ -430,6 +432,17 @@ pub(crate) fn extract_image_exec_meta(config: &ImageConfig) -> (Vec<String>, Vec
     )
 }
 
+/// Whether a `USER` config value resolves to UID 0 (`""`, `"root"`, `"0"`,
+/// `"0:0"`, `"root:root"`, `"0:*"`, `"root:*"`, etc.).
+pub(crate) fn is_root_user(user: &str) -> bool {
+    let trimmed = user.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let name = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    name == "root" || name == "0"
+}
+
 pub(crate) fn build_risk_tags(scan: &LayerScan, run_user: &str) -> Vec<String> {
     let mut tags: Vec<String> = vec![];
     if scan.has_pkg_cache {
@@ -441,7 +454,7 @@ pub(crate) fn build_risk_tags(scan: &LayerScan, run_user: &str) -> Vec<String> {
     if !scan.sensitive_files.is_empty() {
         tags.push("[Potential Secrets]".to_string());
     }
-    if run_user.is_empty() || run_user == "root" {
+    if is_root_user(run_user) {
         tags.push("[Runs as Root]".to_string());
     }
     if scan.layers.len() > 30 {
@@ -488,5 +501,91 @@ mod tests {
                 ("CMD [\"app\"]", true, "", 0),
             ]
         );
+    }
+
+    #[test]
+    fn same_layer_opaque_whiteout_only_evicts_prior_layers() {
+        use super::super::oci_image::ImageRootfs;
+        use super::super::ImageFileInfo;
+
+        let config = ImageConfig {
+            rootfs: ImageRootfs {
+                diff_ids: vec!["sha256:l0".into(), "sha256:l1".into()],
+                ..Default::default()
+            },
+            history: vec![
+                ImageHistory {
+                    created_by: Some("RUN base".into()),
+                    ..Default::default()
+                },
+                ImageHistory {
+                    created_by: Some("RUN replace cache".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let manifest = vec![
+            ImageManifestLayer {
+                digest: "sha256:l0".into(),
+                size: 100,
+                ..Default::default()
+            },
+            ImageManifestLayer {
+                digest: "sha256:l1".into(),
+                size: 100,
+                ..Default::default()
+            },
+        ];
+        // Layer 0 writes cache/old; Layer 1 writes cache/new *and* then encounters cache/.wh..wh..opq
+        // (possible when archive order places the opaque marker after new files in the same layer).
+        let info_list = vec![
+            ImageLayerInfo {
+                files: vec![ImageFileInfo {
+                    path: "cache/old".into(),
+                    size: 500,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ImageLayerInfo {
+                files: vec![
+                    ImageFileInfo {
+                        path: "cache/new".into(),
+                        size: 300,
+                        ..Default::default()
+                    },
+                    ImageFileInfo {
+                        path: "cache".into(),
+                        is_whiteout: Some(true),
+                        is_opaque: Some(true),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        let scan = scan_layers(
+            &config,
+            &manifest,
+            &info_list,
+            &SensitivePatterns::default(),
+        );
+        assert_eq!(scan.file_summary_list.len(), 1);
+        assert_eq!(scan.file_summary_list[0].info.path, "cache/old");
+        assert_eq!(scan.file_summary_list[0].written_in, Some(0));
+    }
+
+    #[test]
+    fn is_root_user_handles_numeric_and_group_forms() {
+        for user in ["", "root", "0", "0:0", "root:root", "0:1000", "root:wheel"] {
+            assert!(is_root_user(user), "{user:?} should be treated as root");
+        }
+        for user in ["1000", "1000:0", "nobody", "app:root"] {
+            assert!(
+                !is_root_user(user),
+                "{user:?} should not be treated as root"
+            );
+        }
     }
 }

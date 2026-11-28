@@ -38,11 +38,18 @@ test-app:
 build-app:
 	cd app && nsh build
 
+NSH_RELEASE_PROFILE_ENV = \
+	CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
+	CARGO_PROFILE_RELEASE_LTO=true \
+	CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+	CARGO_PROFILE_RELEASE_STRIP=true \
+	CARGO_PROFILE_RELEASE_PANIC=abort
+
 package-macos:
-	cd app && nsh package --target macos
+	cd app && $(NSH_RELEASE_PROFILE_ENV) nsh package --target macos
 
 package-macos-universal:
-	cd app && nsh package --target macos --arch universal
+	cd app && $(NSH_RELEASE_PROFILE_ENV) nsh package --target macos --arch universal
 
 dev:
 	cargo run -p diving -- redis:alpine?arch=amd64

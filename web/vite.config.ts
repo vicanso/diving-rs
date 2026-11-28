@@ -7,13 +7,27 @@ export default defineConfig({
   base: "./",
   build: {
     chunkSizeWarningLimit: 1024 * 1024,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        manualChunks(id) {
-          if (id.includes('node_modules')) {
-            return 'vendor';
-          }
-        }
+        codeSplitting: {
+          groups: [
+            {
+              name: 'react',
+              test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'antd',
+              test: /node_modules[\\/](antd|@ant-design|@rc-component|rc-)/,
+              priority: 10,
+            },
+            {
+              name: 'vendor',
+              test: /node_modules[\\/]/,
+              priority: 5,
+            },
+          ],
+        },
       },
     },
   },

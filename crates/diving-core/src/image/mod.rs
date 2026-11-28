@@ -17,6 +17,7 @@ pub use image_ref::{
 };
 pub use layer::{get_file_content_from_layer, get_file_head_from_layer, stream_file_from_layer};
 pub(crate) use layer::{hash_files_from_layer, TarIndex};
+pub(crate) use local::LocalManifest;
 pub use local::{list_local_images, parse_local_images_output, LocalContainerImage, LocalRuntime};
 pub use model::{
     AnalyzeReport, BigModifiedFileInfo, DockerAnalyzeResult, DockerAnalyzeSummary,
@@ -33,3 +34,4 @@ pub use registry::is_private_or_loopback_host;
 pub(crate) use registry::RegistryCaches;
 pub(crate) use registry_auth::{load_docker_config, DockerConfig};
 pub use registry_auth::{registry_host, resolve_explicit, RegistryCredentials};
+pub(crate) use scan::is_root_user;

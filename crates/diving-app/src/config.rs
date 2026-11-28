@@ -167,34 +167,84 @@ fn custom_config_file(flag: Option<PathBuf>, env_val: Option<String>) -> Option<
     flag.or_else(|| env_val.filter(|v| !v.trim().is_empty()).map(PathBuf::from))
 }
 
-fn ensure_config_dir() -> Result<PathBuf, String> {
-    let dir = home_dir().ok_or_else(|| "failed to determine home directory".to_string())?;
-    let config_dir = dir.join(".diving");
-    fs::create_dir_all(&config_dir).map_err(|e| {
+fn expand_tilde(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        return home
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "failed to determine home directory".to_string());
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        let h = home.ok_or_else(|| "failed to determine home directory".to_string())?;
+        return Ok(h.join(rest));
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+fn resolve_cache_path(
+    raw: Option<&str>,
+    default_name: &str,
+    config_dir: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    match raw {
+        Some(val) if !val.trim().is_empty() => {
+            let expanded = expand_tilde(val, home)?;
+            if expanded.is_absolute() {
+                Ok(expanded)
+            } else {
+                Ok(config_dir.join(expanded))
+            }
+        }
+        _ => Ok(config_dir.join(default_name)),
+    }
+}
+
+fn create_dir(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| {
         format!(
             "failed to create {} directory: check permissions ({e})",
-            config_dir.display()
+            dir.display()
         )
-    })?;
-    Ok(config_dir)
+    })
 }
 
 /// Load `config.yml` (`explicit_file` > `$DIVING_CONFIG` > `~/.diving/config.yml`).
 pub fn load_config(explicit_file: Option<&str>) -> Result<LoadedConfig, String> {
-    let config_dir = ensure_config_dir()?;
-    let custom = custom_config_file(
-        explicit_file.map(PathBuf::from),
-        env::var("DIVING_CONFIG").ok(),
-    );
-    let config_file = match custom {
-        Some(path) => {
+    load_config_with_home(explicit_file, env::var("DIVING_CONFIG").ok(), home_dir())
+}
+
+fn load_config_with_home(
+    explicit_file: Option<&str>,
+    div_cfg_env: Option<String>,
+    home: Option<PathBuf>,
+) -> Result<LoadedConfig, String> {
+    let custom = custom_config_file(explicit_file.map(PathBuf::from), div_cfg_env);
+    let default_config_dir = home.as_deref().map(|h| h.join(".diving"));
+
+    let (config_file, config_dir, need_default_dir) = match custom {
+        Some(raw_path) => {
+            let path = expand_tilde(&raw_path.to_string_lossy(), home.as_deref())?;
             if !path.is_file() {
                 return Err(format!("config file not found: {}", path.display()));
             }
-            path
+            let dir = default_config_dir.clone().unwrap_or_else(|| {
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf()
+            });
+            (path, dir, false)
         }
         None => {
-            let path = config_dir.join("config.yml");
+            let dir = default_config_dir
+                .clone()
+                .ok_or_else(|| "failed to determine home directory".to_string())?;
+            create_dir(&dir)?;
+            let path = dir.join("config.yml");
             if !path.exists() {
                 fs::File::create(&path).map_err(|e| {
                     format!(
@@ -203,7 +253,7 @@ pub fn load_config(explicit_file: Option<&str>) -> Result<LoadedConfig, String> 
                     )
                 })?;
             }
-            path
+            (path, dir, true)
         }
     };
 
@@ -214,8 +264,26 @@ pub fn load_config(explicit_file: Option<&str>) -> Result<LoadedConfig, String> 
         .try_deserialize::<DivingConfig>()
         .map_err(|e| format!("{} contains invalid fields: {e}", config_file.display()))?;
 
-    let layer_dir = config_dir.join(config.layer_path.as_deref().unwrap_or("layers"));
-    let analysis_dir = config_dir.join(config.analysis_path.as_deref().unwrap_or("analysis"));
+    let layer_dir = resolve_cache_path(
+        config.layer_path.as_deref(),
+        "layers",
+        &config_dir,
+        home.as_deref(),
+    )?;
+    let analysis_dir = resolve_cache_path(
+        config.analysis_path.as_deref(),
+        "analysis",
+        &config_dir,
+        home.as_deref(),
+    )?;
+
+    if !need_default_dir {
+        if let Some(ref default_dir) = default_config_dir {
+            if layer_dir.starts_with(default_dir) || analysis_dir.starts_with(default_dir) {
+                create_dir(default_dir)?;
+            }
+        }
+    }
 
     Ok(LoadedConfig {
         config,
@@ -467,5 +535,60 @@ notify_webhook_secret: hook-sec
         if let Err(err) = analyzer {
             panic!("desktop analyzer build failed: {err}");
         }
+    }
+
+    #[test]
+    fn tilde_cache_paths_expand_and_external_config_skips_home_diving_dir() {
+        use tempfile::tempdir;
+
+        let fake_home = tempdir().unwrap();
+        let ext_dir = tempdir().unwrap();
+
+        let tilde_cfg = ext_dir.path().join("tilde.yml");
+        fs::write(
+            &tilde_cfg,
+            "layer_path: ~/my-layers\nanalysis_path: ~/my-analysis\n",
+        )
+        .unwrap();
+        let loaded = load_config_with_home(
+            Some(tilde_cfg.to_str().unwrap()),
+            None,
+            Some(fake_home.path().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(loaded.layer_dir, fake_home.path().join("my-layers"));
+        assert_eq!(loaded.analysis_dir, fake_home.path().join("my-analysis"));
+        assert!(
+            !fake_home.path().join(".diving").exists(),
+            "custom config with non-default paths must not create ~/.diving"
+        );
+
+        let ext_layers = ext_dir.path().join("layers");
+        let ext_analysis = ext_dir.path().join("analysis");
+        let ext_cfg = ext_dir.path().join("external.yml");
+        fs::write(
+            &ext_cfg,
+            format!(
+                "layer_path: {}\nanalysis_path: {}\n",
+                ext_layers.display(),
+                ext_analysis.display()
+            ),
+        )
+        .unwrap();
+        let loaded_ext = load_config_with_home(
+            Some(ext_cfg.to_str().unwrap()),
+            None,
+            Some(fake_home.path().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(loaded_ext.layer_dir, ext_layers);
+        assert_eq!(loaded_ext.analysis_dir, ext_analysis);
+        assert!(!fake_home.path().join(".diving").exists());
+
+        // When default config (~/.diving/config.yml) is used, ~/.diving IS created.
+        let loaded_default =
+            load_config_with_home(None, None, Some(fake_home.path().to_path_buf())).unwrap();
+        assert_eq!(loaded_default.config_dir, fake_home.path().join(".diving"));
+        assert!(fake_home.path().join(".diving").exists());
     }
 }

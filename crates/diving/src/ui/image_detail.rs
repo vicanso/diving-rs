@@ -7,21 +7,24 @@ use diving_core::{fill, tr, DockerAnalyzeSummary, Lang, Recommendation, RuntimeC
 
 pub struct ImageDetailWidget<'a> {
     pub widget: Paragraph<'a>,
+    pub content_lines: u16,
 }
 
-pub struct ImageDetailWidgetOption {
-    pub name: String,
-    pub arch: String,
-    pub os: String,
+pub struct ImageDetailWidgetOption<'a> {
+    pub is_active: bool,
+    pub width: u16,
+    pub name: &'a str,
+    pub arch: &'a str,
+    pub os: &'a str,
     pub total_size: u64,
     pub size: u64,
-    pub summary: DockerAnalyzeSummary,
-    pub recommendations: Vec<Recommendation>,
-    pub base_os: String,
-    pub runtime_compat: RuntimeCompat,
+    pub summary: &'a DockerAnalyzeSummary,
+    pub recommendations: &'a [Recommendation],
+    pub base_os: &'a str,
+    pub runtime_compat: &'a RuntimeCompat,
     /// Set when this is a cached result shown because the registry was
     /// unavailable (see `DockerAnalyzeResult::stale_as_of`).
-    pub stale_as_of: Option<String>,
+    pub stale_as_of: Option<&'a str>,
     pub lang: Lang,
 }
 
@@ -37,57 +40,27 @@ fn short_time(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 
-pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailWidget<'a> {
+pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption<'a>) -> ImageDetailWidget<'a> {
     let total_size = opt.total_size;
     let size = opt.size;
     let wasted_size = opt.summary.wasted_size;
     let score = opt.summary.score;
-    let wasted_list = opt.summary.wasted_list;
+    let wasted_list = &opt.summary.wasted_list;
 
-    // let mut wasted_list: Vec<ImageFileWastedSummary> = vec![];
-    // let mut wasted_size = 0;
-    // for file in opt.file_summary_list.iter() {
-    //     let mut found = false;
-    //     let info = &file.info;
-    //     wasted_size += info.size;
-    //     for wasted in wasted_list.iter_mut() {
-    //         if wasted.path == info.path {
-    //             found = true;
-    //             wasted.count += 1;
-    //             wasted.total_size += info.size;
-    //         }
-    //     }
-    //     if !found {
-    //         wasted_list.push(ImageFileWastedSummary {
-    //             path: info.path.clone(),
-    //             count: 1,
-    //             total_size: info.size,
-    //         });
-    //     }
-    // }
-    // wasted_list.sort_by(|a, b| b.total_size.cmp(&a.total_size));
-
-    // let mut score = 100 - wasted_size * 100 / total_size;
-    // // 有浪费空间，则分数-1
-    // if wasted_size != 0 {
-    //     score -= 1;
-    // }
-
-    // 生成浪费空间的文件列表
     let space_span = Span::from("   ");
     let headers = [
         tr(opt.lang, "tui.col.count"),
         tr(opt.lang, "tui.col.totspace"),
         tr(opt.lang, "tui.col.path"),
     ];
-    let mut name = opt.name;
+    let mut name = opt.name.to_string();
     if !opt.arch.is_empty() {
         name += &format!("({}/{})", opt.os, opt.arch);
     }
     let mut spans_list = vec![];
     // First thing in the panel, so it stays on screen for as long as the
     // (possibly outdated) numbers below it do.
-    if let Some(as_of) = &opt.stale_as_of {
+    if let Some(as_of) = opt.stale_as_of {
         let warn = Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
@@ -138,17 +111,14 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
                 tr(opt.lang, "tui.baseos"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::from(opt.base_os.clone()),
+            Span::from(opt.base_os),
         ]));
     }
     // Runtime libc (glibc/musl + version requirement vs host) — visible
     // whenever the ELF probe classified the entrypoint successfully. Colored
     // red when the issue tag is non-empty.
     if !opt.runtime_compat.libc.is_empty() {
-        let rc = &opt.runtime_compat;
-        // Lead with the resolved binary path (incl. "(via wrapper)" when
-        // we unwrapped a shell entrypoint) so the user can see which
-        // file was actually inspected.
+        let rc = opt.runtime_compat;
         let mut cell = String::new();
         if !rc.entrypoint.is_empty() {
             cell.push_str(&format!("{}: ", rc.entrypoint));
@@ -188,40 +158,46 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
             Span::styled(cell, status_style),
         ]));
     }
+
+    let mut count_pad_width = util::get_width(headers[0]) as usize;
+    let mut size_pad_width = util::get_width(headers[1]) as usize;
+    let formatted_wasted: Vec<(String, String, &str)> = wasted_list
+        .iter()
+        .map(|wasted| {
+            let c = wasted.count.to_string();
+            let s = ByteSize(wasted.total_size).to_string();
+            count_pad_width = count_pad_width.max(util::get_width(&c) as usize);
+            size_pad_width = size_pad_width.max(util::get_width(&s) as usize);
+            (c, s, wasted.path.as_str())
+        })
+        .collect();
+
     spans_list.extend(vec![
         Line::from(vec![]),
         Line::from(vec![
-            Span::styled(headers[0], Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                util::pad_display(headers[0], count_pad_width, util::PadAlign::Right),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             space_span.clone(),
-            Span::styled(headers[1], Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                util::pad_display(headers[1], size_pad_width, util::PadAlign::Right),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             space_span.clone(),
             Span::styled(headers[2], Style::default().add_modifier(Modifier::BOLD)),
         ]),
     ]);
 
-    // Pad data cells to the header's terminal display width (CJK = 2 cols),
-    // so the unpadded header row and the padded data rows line up in any
-    // language. ASCII headers keep their old width → English is unchanged.
-    let count_pad_width = util::get_width(headers[0]) as usize;
-    let size_pad_width = util::get_width(headers[1]) as usize;
-
-    for wasted in wasted_list.iter() {
-        let count_str = util::pad_display(
-            &wasted.count.to_string(),
-            count_pad_width,
-            util::PadAlign::Right,
-        );
-        let size_str = util::pad_display(
-            &ByteSize(wasted.total_size).to_string(),
-            size_pad_width,
-            util::PadAlign::Right,
-        );
+    for (c, s, path) in formatted_wasted {
+        let count_str = util::pad_display(&c, count_pad_width, util::PadAlign::Right);
+        let size_str = util::pad_display(&s, size_pad_width, util::PadAlign::Right);
         spans_list.push(Line::from(vec![
             Span::from(count_str),
             space_span.clone(),
             Span::from(size_str),
             space_span.clone(),
-            Span::from(format!("/{}", wasted.path)),
+            Span::from(format!("/{path}")),
         ]))
     }
 
@@ -266,9 +242,20 @@ pub fn new_image_detail_widget<'a>(opt: ImageDetailWidgetOption) -> ImageDetailW
         }
     }
 
-    let widget =
-        Paragraph::new(spans_list).block(util::create_block(tr(opt.lang, "tui.imgdetails.title")));
-    ImageDetailWidget { widget }
+    let inner_width = opt.width.saturating_sub(2).max(1);
+    let content_lines = util::wrapped_line_count(&spans_list, inner_width, false);
+    let title = if opt.is_active {
+        tr(opt.lang, "tui.imgdetails.title_active")
+    } else {
+        tr(opt.lang, "tui.imgdetails.title")
+    };
+    let widget = Paragraph::new(spans_list)
+        .block(util::create_block(title))
+        .wrap(Wrap { trim: false });
+    ImageDetailWidget {
+        widget,
+        content_lines,
+    }
 }
 
 #[cfg(test)]
@@ -279,17 +266,21 @@ mod tests {
     /// Render the panel 44 columns wide — half of a narrow terminal — and
     /// return its rows as text.
     fn render(stale_as_of: Option<&str>, lang: Lang) -> Vec<String> {
+        let summary = DockerAnalyzeSummary::default();
+        let runtime_compat = RuntimeCompat::default();
         let widget = new_image_detail_widget(ImageDetailWidgetOption {
-            name: "library/redis:alpine".to_string(),
-            arch: "amd64".to_string(),
-            os: "linux".to_string(),
+            is_active: false,
+            width: 44,
+            name: "library/redis:alpine",
+            arch: "amd64",
+            os: "linux",
             total_size: 100,
             size: 50,
-            summary: DockerAnalyzeSummary::default(),
-            recommendations: vec![],
-            base_os: String::new(),
-            runtime_compat: RuntimeCompat::default(),
-            stale_as_of: stale_as_of.map(str::to_string),
+            summary: &summary,
+            recommendations: &[],
+            base_os: "",
+            runtime_compat: &runtime_compat,
+            stale_as_of,
             lang,
         });
         let mut terminal = Terminal::new(TestBackend::new(44, 12)).unwrap();
@@ -316,8 +307,9 @@ mod tests {
             rows[2].contains("Cached at: 2026-10-06 04:22 UTC"),
             "{rows:#?}"
         );
+        assert!(rows[4].contains("Image name:"), "{rows:#?}");
         assert!(
-            rows[4].contains("Image name: library/redis:alpine"),
+            format!("{}{}", rows[4], rows[5]).contains("library/redis:alpine(linux/amd64)"),
             "{rows:#?}"
         );
 

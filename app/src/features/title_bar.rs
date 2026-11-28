@@ -3,11 +3,13 @@
 use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, InspectorTab, count_layer_file_ops, findings_total_count};
+use crate::domain::{
+    AppRoute, AppState, InspectorTab, UpdatePhase, count_layer_file_ops, findings_total_count,
+    has_pending_update_indicator,
+};
 use crate::features::arch_select_items;
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
-use crate::i18n::{UiLang, t};
-#[cfg(debug_assertions)]
+use crate::i18n::{UiLang, t, tf};
 use crate::ui::ui_menu_separator;
 use crate::ui::{
     ButtonVariant, IconName, SegmentOption, SelectItem, TabOption, UiSize, radius_control, theme,
@@ -38,74 +40,176 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let export_json_state = state.clone();
     #[cfg(debug_assertions)]
     let gallery_state = state.clone();
+    let update_state = state.clone();
+    let update_label_state = state.clone();
+    let update_phase = state.update_phase;
+    let update_skipped = state.update_skipped;
+    let skip_state = state.clone();
+    let resume_state = state.clone();
+    let check_now_state = state.clone();
     let clean_state = state;
 
-    let menu = ui_menu(ui_menu_trigger_icon(
-        IconName::More,
-        "More actions",
-        Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
-        ButtonVariant::Ghost,
-        size,
-        false,
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.open_local_file")),
-        Some(IconName::FolderInput),
-        Some("mod+o"),
-        false,
-        move || open_state.open_local_file_dialog(),
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "action.open_folder")),
-        Some(IconName::FolderOpen),
-        None,
-        false,
-        move || folder_state.open_local_folder(),
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.browse_local_images")),
-        Some(IconName::Container),
-        Some("mod+shift+o"),
-        false,
-        move || local_state.open_local_picker(),
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.compare_with")),
-        Some(IconName::Compare),
-        Some("mod+d"),
-        false,
-        move || cmp_menu_state.open_compare_dialog(),
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.export_markdown")),
-        Some(IconName::Download),
-        Some("mod+e"),
-        move || {
-            !export_disabled_state.can_export_markdown()
-                || (route.get() == AppRoute::Diff && diff_error.get().is_some())
-        },
-        move || {
-            if export_state.route.get_untracked() == AppRoute::Diff {
-                export_state.export_diff_markdown();
-            } else {
-                export_state.export_markdown_report();
-            }
-        },
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.export_json")),
-        Some(IconName::Download),
-        None,
-        move || has_result.get().is_none(),
-        move || export_json_state.export_json_report(),
-    ))
-    .child(ui_menu_item(
-        move || SharedString::from(t(lang.get(), "menu.clear_cache")),
-        Some(IconName::Refresh),
-        None,
-        false,
-        move || clean_state.clear_cache(),
-    ));
+    let trigger = view()
+        .relative()
+        .child(ui_menu_trigger_icon(
+            IconName::More,
+            "More actions",
+            Some(move || SharedString::from(t(lang.get(), "menu.more_actions"))),
+            ButtonVariant::Ghost,
+            size,
+            false,
+        ))
+        .child(when(
+            move || has_pending_update_indicator(&update_phase.get()),
+            move || {
+                view()
+                    .absolute()
+                    .top(px(2.0))
+                    .right(px(2.0))
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(move || theme().primary)
+                    .accessibility_elements_hidden(true)
+            },
+        ));
+
+    let menu = ui_menu(trigger)
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.open_local_file")),
+            Some(IconName::FolderInput),
+            Some("mod+o"),
+            false,
+            move || open_state.open_local_file_dialog(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "action.open_folder")),
+            Some(IconName::FolderOpen),
+            None,
+            false,
+            move || folder_state.open_local_folder(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.browse_local_images")),
+            Some(IconName::Container),
+            Some("mod+shift+o"),
+            false,
+            move || local_state.open_local_picker(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.compare_with")),
+            Some(IconName::Compare),
+            Some("mod+d"),
+            false,
+            move || cmp_menu_state.open_compare_dialog(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.export_markdown")),
+            Some(IconName::Download),
+            Some("mod+e"),
+            move || {
+                !export_disabled_state.can_export_markdown()
+                    || (route.get() == AppRoute::Diff && diff_error.get().is_some())
+            },
+            move || {
+                if export_state.route.get_untracked() == AppRoute::Diff {
+                    export_state.export_diff_markdown();
+                } else {
+                    export_state.export_markdown_report();
+                }
+            },
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.export_json")),
+            Some(IconName::Download),
+            None,
+            move || has_result.get().is_none(),
+            move || export_json_state.export_json_report(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.clear_cache")),
+            Some(IconName::Refresh),
+            None,
+            false,
+            move || clean_state.clear_cache(),
+        ))
+        .child(ui_menu_separator())
+        .child(ui_menu_item(
+            move || SharedString::from(update_label_state.update_menu_label(lang.get())),
+            Some(IconName::Download),
+            None,
+            move || {
+                matches!(
+                    update_phase.get(),
+                    UpdatePhase::Checking
+                        | UpdatePhase::Downloading { .. }
+                        | UpdatePhase::Installing { .. }
+                )
+            },
+            move || match update_state.update_phase.get_untracked() {
+                UpdatePhase::Available { .. }
+                | UpdatePhase::Failed {
+                    version: Some(_), ..
+                } => {
+                    update_state.start_update();
+                }
+                UpdatePhase::ReadyToRestart { .. } => update_state.relaunch_after_update(),
+                _ => update_state.check_for_updates(),
+            },
+        ))
+        .child(when(
+            move || {
+                matches!(
+                    update_phase.get(),
+                    UpdatePhase::Available { .. }
+                        | UpdatePhase::Failed {
+                            version: Some(_),
+                            ..
+                        }
+                )
+            },
+            move || {
+                let s_skip = skip_state.clone();
+                let s_check = check_now_state.clone();
+                view()
+                    .flex_col()
+                    .child(ui_menu_item(
+                        move || SharedString::from(t(lang.get(), "update.action_skip")),
+                        Some(IconName::Close),
+                        None,
+                        false,
+                        move || s_skip.skip_available_update(),
+                    ))
+                    .child(ui_menu_item(
+                        move || SharedString::from(t(lang.get(), "menu.check_updates")),
+                        Some(IconName::Refresh),
+                        None,
+                        false,
+                        move || s_check.check_for_updates(),
+                    ))
+            },
+        ))
+        .child(when(
+            move || {
+                update_skipped.get().is_some()
+                    && !matches!(
+                        update_phase.get(),
+                        UpdatePhase::Available { .. } | UpdatePhase::ReadyToRestart { .. }
+                    )
+            },
+            move || {
+                let s_resume = resume_state.clone();
+                ui_menu_item(
+                    move || {
+                        let ver = update_skipped.get().unwrap_or_default();
+                        SharedString::from(tf(lang.get(), "update.action_resume", &[&ver]))
+                    },
+                    Some(IconName::Refresh),
+                    None,
+                    false,
+                    move || s_resume.resume_skipped_update(),
+                )
+            },
+        ));
     #[cfg(debug_assertions)]
     let menu = menu.child(ui_menu_separator()).child(ui_menu_item(
         move || SharedString::from(t(lang.get(), "nav.ui_gallery")),
@@ -124,7 +228,16 @@ pub fn content_header_bar(state: AppState) -> impl IntoElement {
     let lang = state.lang;
 
     when(
-        move || route.get() != AppRoute::Gallery,
+        move || {
+            #[cfg(debug_assertions)]
+            {
+                route.get() != AppRoute::Gallery
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                true
+            }
+        },
         move || {
             let bar_state = state.clone();
             view()
@@ -168,6 +281,7 @@ pub fn content_header_bar(state: AppState) -> impl IntoElement {
                             inspector_header(bar_state.clone(), left_nav).into_element()
                         }
                         AppRoute::Diff => diff_header(bar_state.clone(), left_nav).into_element(),
+                        #[cfg(debug_assertions)]
                         AppRoute::Gallery => view().into_element(),
                     }
                 }))
@@ -336,10 +450,13 @@ fn inspector_header(state: AppState, left_nav: impl IntoElement) -> impl IntoEle
                             .min_w(px(0.0))
                             .flex_shrink(1.0)
                             .overflow_hidden()
-                            .style_when(move || tight.get(), |s| s.max_w(px(120.0)))
                             .style_when(
-                                move || compact.get() && !tight.get(),
+                                move || tight.get() && sidebar_open.get(),
                                 |s| s.max_w(px(136.0)),
+                            )
+                            .style_when(
+                                move || compact.get() && !(tight.get() && sidebar_open.get()),
+                                |s| s.max_w(px(196.0)),
                             )
                             .child(ui_image_pill_button(
                                 move || {
@@ -781,6 +898,7 @@ mod tests {
         )));
 
         let diff_state = state.clone();
+        #[cfg(debug_assertions)]
         let gallery_state = state.clone();
         let search_state = state.clone();
         let sidebar_state = state.clone();
@@ -825,15 +943,25 @@ mod tests {
                             search_state.open_header_search();
                         },
                     ))
-                    .child(ui_button(
-                        "GoGallery",
-                        ButtonVariant::Ghost,
-                        UiSize::Xs,
-                        None,
-                        false,
-                        false,
-                        move || gallery_state.open_gallery(),
-                    )),
+                    .child({
+                        #[cfg(debug_assertions)]
+                        {
+                            ui_button(
+                                "GoGallery",
+                                ButtonVariant::Ghost,
+                                UiSize::Xs,
+                                None,
+                                false,
+                                false,
+                                move || gallery_state.open_gallery(),
+                            )
+                            .into_element()
+                        }
+                        #[cfg(not(debug_assertions))]
+                        {
+                            view().into_element()
+                        }
+                    }),
             )
     }
 
@@ -930,10 +1058,13 @@ mod tests {
         app.wait_for_gone("Workbench", Duration::from_secs(3))
             .expect("sidebar collapsed");
 
-        // Switch to Gallery: content_header_bar unmounts to avoid double header.
-        app.press("GoGallery").expect("switch to Gallery");
-        app.wait_for_gone("Swap", Duration::from_secs(3))
-            .expect("header collapsed on Gallery");
-        assert_eq!(app.screen().matches("label:New analysis"), Ok(false));
+        #[cfg(debug_assertions)]
+        {
+            // Switch to Gallery: content_header_bar unmounts to avoid double header.
+            app.press("GoGallery").expect("switch to Gallery");
+            app.wait_for_gone("Swap", Duration::from_secs(3))
+                .expect("header collapsed on Gallery");
+            assert_eq!(app.screen().matches("label:New analysis"), Ok(false));
+        }
     }
 }

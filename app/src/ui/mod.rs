@@ -7,6 +7,7 @@ pub mod button;
 pub mod code;
 pub mod controls;
 pub mod data;
+#[cfg(debug_assertions)]
 pub mod gallery;
 pub mod icons;
 pub mod input;
@@ -26,8 +27,9 @@ pub use controls::{
 pub use data::{
     BadgeTone, FileOpKind, LayerOpcodeKind, ui_badge, ui_empty_state, ui_opcode_pill, ui_panel,
     ui_panel_titled, ui_progress_bar, ui_resizable_split, ui_separator, ui_size_bar, ui_skeleton,
-    ui_status_badge,
+    ui_status_badge, ui_treemap_size_bar,
 };
+#[cfg(debug_assertions)]
 pub use gallery::{UiGallery, ui_gallery};
 pub use icons::{IconName, ui_icon, ui_spinner};
 pub use input::{

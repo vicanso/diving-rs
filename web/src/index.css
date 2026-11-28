@@ -46,12 +46,12 @@
   --size-bar-heavy: #f59e0b;
   --size-bar-extreme: #ef4444;
 
-  /* treemap layer colors (validated vs. the card surface; all pairs) */
-  --treemap-1: #2a78d6;
-  --treemap-2: #eb6834;
-  --treemap-3: #1baf7a;
+  /* treemap layer colors (validated for WCAG AA contrast with white ink) */
+  --treemap-1: #1d58bd;
+  --treemap-2: #ac3c10;
+  --treemap-3: #0b714e;
   --treemap-other: #c3c2b7;
-  --treemap-ink: #0b0b0b;
+  --treemap-ink: #ffffff;
   --treemap-ink-other: #0b0b0b;
   /* diff: a diverging pair (grew / shrank) around a neutral axis */
   --diverge-up: #eb6834;
@@ -114,11 +114,11 @@ html.dark {
   --size-bar-heavy: #fbbf24;
   --size-bar-extreme: #f87171;
 
-  --treemap-1: #3987e5;
-  --treemap-2: #d95926;
-  --treemap-3: #199e70;
+  --treemap-1: #215fd1;
+  --treemap-2: #b23f12;
+  --treemap-3: #0c7451;
   --treemap-other: #4a4a46;
-  --treemap-ink: #0b0b0b;
+  --treemap-ink: #ffffff;
   --treemap-ink-other: #ffffff;
   --diverge-up: #d95926;
   --diverge-down: #3987e5;

@@ -10,7 +10,7 @@ use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
 use nsh_core::element::desktop::{on_reopen, window as app_window};
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, DivingService};
+use crate::domain::{AppRoute, AppState, DivingService, UpdatePhase};
 use crate::features::{
     app_sidebar, bind_global_keys, command_palette_overlay, compare_dialog, content_header_bar,
     diff_workspace, file_preview_sheet, inspector_workspace, install_application_menu,
@@ -18,15 +18,18 @@ use crate::features::{
 };
 use crate::i18n::{t, tf};
 use crate::ui::{
-    BannerTone, ButtonVariant, IconName, UiGallery, UiSize, font_mono_family, register_fonts,
-    theme, ui_banner, ui_button, ui_gallery, ui_progress_bar,
+    BannerTone, ButtonVariant, IconName, UiSize, font_mono_family, register_fonts, theme,
+    ui_banner, ui_button, ui_progress_bar,
 };
+#[cfg(debug_assertions)]
+use crate::ui::{UiGallery, ui_gallery};
 
 /// The app's UI set (`nsh.json` `"rust"`): what a TSX entry may import from
 /// `diving/native` (`README.md`, "Adding a TSX entry").
 #[native_module("diving/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
+    #[cfg(debug_assertions)]
     registry.register::<UiGallery>();
 }
 
@@ -36,6 +39,7 @@ pub fn App() -> impl IntoElement {
     register_fonts();
 
     let state = AppState::new(DivingService::new());
+    state.startup_update_tasks();
     provide_context(state.clone());
     install_application_menu(state.clone());
 
@@ -53,10 +57,17 @@ pub fn App() -> impl IntoElement {
         on_reopen(move || main_open.set(true));
     }
 
+    let host_size = untracked(window);
+    let initial_size = if host_size.width >= px(960.0) && host_size.height >= px(640.0) {
+        host_size
+    } else {
+        size(px(1280.0), px(820.0))
+    };
+
     let win_state = state;
     app_window()
         .id("main")
-        .default_size(size(px(1280.0), px(820.0)))
+        .default_size(initial_size)
         .restore_bounds(true)
         .attributes(attrs)
         .open(main_open)
@@ -117,6 +128,7 @@ pub fn App() -> impl IntoElement {
                                 AppRoute::Diff => {
                                     diff_workspace(route_state.clone()).into_element()
                                 }
+                                #[cfg(debug_assertions)]
                                 AppRoute::Gallery => ui_gallery().into_element(),
                             },
                         ))),
@@ -158,15 +170,98 @@ pub fn status_notice_banner(state: AppState) -> impl IntoElement {
 }
 
 fn floating_status_toast(state: AppState) -> impl IntoElement {
+    let lang = state.lang;
+    let is_update = state.status_notice_is_update;
+    let phase = state.update_phase;
+    let install_state = state.clone();
+    let skip_state = state.clone();
+    let restart_state = state.clone();
+    let retry_state = state.clone();
+
     view()
         .absolute()
         .bottom_8()
         .right_4()
-        .max_w(px(460.0))
+        .max_w(px(480.0))
         .shadow_md()
         .rounded_md()
         .bg(move || theme().popover)
+        .flex_col()
         .child(status_notice_banner(state))
+        .child(when(
+            move || is_update.get(),
+            move || match phase.get() {
+                UpdatePhase::Available { .. } => {
+                    let s1 = install_state.clone();
+                    let s2 = skip_state.clone();
+                    view()
+                        .px_3()
+                        .pb_2p5()
+                        .flex_row()
+                        .items_center()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.action_skip")),
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            None,
+                            false,
+                            false,
+                            move || s2.skip_available_update(),
+                        ))
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.action_install")),
+                            ButtonVariant::Default,
+                            UiSize::Xs,
+                            Some(IconName::Download),
+                            false,
+                            false,
+                            move || s1.start_update(),
+                        ))
+                        .into_element()
+                }
+                UpdatePhase::ReadyToRestart { .. } => {
+                    let s = restart_state.clone();
+                    view()
+                        .px_3()
+                        .pb_2p5()
+                        .flex_row()
+                        .justify_end()
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.restart_now")),
+                            ButtonVariant::Default,
+                            UiSize::Xs,
+                            Some(IconName::Refresh),
+                            false,
+                            false,
+                            move || s.relaunch_after_update(),
+                        ))
+                        .into_element()
+                }
+                UpdatePhase::Failed {
+                    version: Some(_), ..
+                } => {
+                    let s = retry_state.clone();
+                    view()
+                        .px_3()
+                        .pb_2p5()
+                        .flex_row()
+                        .justify_end()
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.retry")),
+                            ButtonVariant::Outline,
+                            UiSize::Xs,
+                            Some(IconName::Refresh),
+                            false,
+                            false,
+                            move || s.start_update(),
+                        ))
+                        .into_element()
+                }
+                _ => view().into_element(),
+            },
+        ))
 }
 
 fn config_warning_banner(state: AppState) -> impl IntoElement {

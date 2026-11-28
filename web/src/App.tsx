@@ -20,9 +20,17 @@ import {
   Tabs,
   theme,
 } from "antd";
-import axios, { AxiosError } from "axios";
+import type { AxiosError } from "axios";
 import prettyBytes from "pretty-bytes";
-import i18nGet from "./i18n";
+import {
+  clearApiToken,
+  getApiToken,
+  isApiAuthError,
+  request,
+  setApiToken,
+  setAuthRequiredListener,
+} from "./api";
+import i18nGet, { getLocale } from "./i18n";
 import {
   addKeyToFileTreeItem,
   countLayerFiles,
@@ -32,6 +40,7 @@ import {
   FileTreeViewOption,
 } from "./analysis";
 import {
+  ApiTokenModal,
   BigModifiedFilesCard,
   CommandInspector,
   DockerfileCard,
@@ -43,6 +52,7 @@ import {
   LatestImagesList,
   LayerTimeline,
   McpGuide,
+  RecentImagesPopover,
   RecommendationsCard,
   SearchBar,
   SensitiveFilesCard,
@@ -50,7 +60,7 @@ import {
   WastedSummaryCard,
 } from "./components";
 import { CompareButton, DiffRefs, DiffView } from "./diff";
-import { getGithubIcon, getLogoIcon, getThemeIcon } from "./icons";
+import { getGithubIcon, getKeyIcon, getLogoIcon, getThemeIcon } from "./icons";
 import {
   DuplicateGroup,
   FileTreeList,
@@ -73,10 +83,16 @@ const { defaultAlgorithm, darkAlgorithm } = theme;
 const { Header, Content } = Layout;
 
 const amd64Arch = "amd64";
-const request = axios.create({
-  timeout: 600 * 1000,
-  baseURL: "./api",
-});
+
+const DEFAULT_VIEW_OPTION: FileTreeViewOption = {
+  expandAll: false,
+  expandItems: [],
+  collapsedItems: [],
+  sizeLimit: 0,
+  onlyModifiedRemoved: false,
+  keyword: "",
+  compactPaths: true,
+};
 
 type ThemeMode = "system" | "light" | "dark";
 const THEME_STORAGE_KEY = "diving-theme";
@@ -202,16 +218,11 @@ const App = () => {
   const [arch, setArch] = useState(initial.arch);
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ReportState | null>(null);
+  const [reportVersion, setReportVersion] = useState(0);
   const [currentLayer, setCurrentLayer] = useState(0);
-  const [viewOption, setViewOption] = useState<FileTreeViewOption>({
-    expandAll: false,
-    expandItems: [],
-    collapsedItems: [],
-    sizeLimit: 0,
-    onlyModifiedRemoved: false,
-    keyword: "",
-    compactPaths: true,
-  });
+  const [viewOption, setViewOption] = useState<FileTreeViewOption>(
+    DEFAULT_VIEW_OPTION,
+  );
   const [showMetaColumns, setShowMetaColumns] = useState(false);
   const [mobilePane, setMobilePane] = useState<"layers" | "workspace">(
     "workspace",
@@ -225,10 +236,48 @@ const App = () => {
     null,
   );
   const [preview, setPreview] = useState<ImagePreview | null>(null);
+  const [tokenModalOpen, setTokenModalOpen] = useState(false);
+  const [tokenRejected, setTokenRejected] = useState(false);
+  const [authRequired, setAuthRequired] = useState(() => Boolean(getApiToken()));
+  const [apiTokenVersion, setApiTokenVersion] = useState(0);
+  const pendingActionRef = useRef<(() => void) | null>(null);
+  const lastAnalyzedImageRef = useRef(initial.image);
 
   // Every request takes a ticket; a response whose ticket is no longer the
   // latest — the user moved on, e.g. with the back button — is dropped.
   const ticket = useRef(0);
+
+  const openTokenModal = useCallback(
+    (rejected: boolean, retryAction?: () => void) => {
+      setAuthRequired(true);
+      setTokenRejected(rejected);
+      if (retryAction) {
+        pendingActionRef.current = retryAction;
+      }
+      setTokenModalOpen(true);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setAuthRequiredListener((rejected) => openTokenModal(rejected));
+    return () => setAuthRequiredListener(null);
+  }, [openTokenModal]);
+
+  const fetchLatestImages = useCallback(() => {
+    request
+      .get<LatestImages>("/latest-images", { timeout: 5 * 1000 })
+      .then(({ data }) => {
+        setLatestImages(data.images);
+        setVersion(data.version);
+        setMcp(data.mcp || null);
+      })
+      .catch((err: unknown) => {
+        if (isApiAuthError(err)) {
+          openTokenModal(Boolean(getApiToken()));
+        }
+      });
+  }, [openTokenModal]);
 
   const onSearch = async (
     value: string,
@@ -239,15 +288,21 @@ const App = () => {
     if (!image) {
       return;
     }
+    if (lastAnalyzedImageRef.current !== image) {
+      lastAnalyzedImageRef.current = image;
+      setViewOption(DEFAULT_VIEW_OPTION);
+    }
     setLocation(
-      `?image=${encodeURIComponent(image)}&arch=${archValue}`,
+      `?image=${encodeURIComponent(image)}&arch=${encodeURIComponent(archValue)}`,
       history,
     );
     setImageName(image);
+    setArch(archValue);
     setLoading(true);
     setPreview(null);
     const current = ++ticket.current;
     const ref = encodeURIComponent(withArch(image, archValue));
+    const lang = getLocale();
     let analyzeDone = false;
     const manifestController = new AbortController();
     // Registry images only: a local source has no cheap manifest to read.
@@ -272,7 +327,7 @@ const App = () => {
             });
         }, PREVIEW_DELAY_MS);
     try {
-      const reqUrl = `/analyze?image=${ref}`;
+      const reqUrl = `/analyze?image=${ref}&lang=${lang}`;
       const { data } = await request.get<ImageAnalyzeResult>(reqUrl, {
         timeout: 10 * 60 * 1000,
       });
@@ -297,11 +352,19 @@ const App = () => {
         staleAsOf: data.staleAsOf || "",
         supportedArchs: data.supportedArchs || [],
       });
+      setReportVersion((v) => v + 1);
       setCurrentLayer(0);
       setDiff(null);
+      fetchLatestImages();
     } catch (err: unknown) {
       if (current === ticket.current) {
-        showRequestError(err, "analyze image fail");
+        if (isApiAuthError(err)) {
+          openTokenModal(Boolean(getApiToken()), () =>
+            onSearch(image, "none", archValue),
+          );
+        } else {
+          showRequestError(err, i18nGet("analyzeFail"));
+        }
       }
     } finally {
       analyzeDone = true;
@@ -327,7 +390,7 @@ const App = () => {
         ? `&baseMode=${encodeURIComponent(baseMode)}`
         : "";
     setLocation(
-      `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${archValue}${modeQuery}`,
+      `?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}&arch=${encodeURIComponent(archValue)}${modeQuery}`,
       history,
     );
     setLoading(true);
@@ -337,8 +400,9 @@ const App = () => {
         baseMode && baseMode !== "auto"
           ? `&baseLayerMode=${encodeURIComponent(baseMode)}`
           : "";
+      const lang = getLocale();
       const { data } = await request.get<ImageDiff>(
-        `/diff?base=${encodeURIComponent(withArch(base, archValue))}&target=${encodeURIComponent(withArch(target, archValue))}${apiModeQuery}`,
+        `/diff?base=${encodeURIComponent(withArch(base, archValue))}&target=${encodeURIComponent(withArch(target, archValue))}${apiModeQuery}&lang=${lang}`,
         { timeout: 20 * 60 * 1000 },
       );
       if (current !== ticket.current) {
@@ -346,15 +410,34 @@ const App = () => {
       }
       setDiff({ refs: { base, target }, data });
       setReport(null);
+      fetchLatestImages();
     } catch (err: unknown) {
       if (current === ticket.current) {
-        showRequestError(err, "compare images fail");
+        if (isApiAuthError(err)) {
+          openTokenModal(Boolean(getApiToken()), () =>
+            onCompare(base, target, "none", archValue, baseMode),
+          );
+        } else {
+          showRequestError(err, i18nGet("compareFail"));
+        }
       }
     } finally {
       if (current === ticket.current) {
         setLoading(false);
       }
     }
+  };
+
+  const goHome = () => {
+    setLocation("", "push");
+    ticket.current++;
+    lastAnalyzedImageRef.current = "";
+    setLoading(false);
+    setPreview(null);
+    setReport(null);
+    setDiff(null);
+    setImageName("");
+    setViewOption(DEFAULT_VIEW_OPTION);
   };
 
   // Show whatever the URL names: on the first load and after back / forward.
@@ -368,11 +451,13 @@ const App = () => {
       onSearch(query.image, history, query.arch);
     } else {
       ticket.current++;
+      lastAnalyzedImageRef.current = "";
       setLoading(false);
       setPreview(null);
       setReport(null);
       setDiff(null);
       setImageName("");
+      setViewOption(DEFAULT_VIEW_OPTION);
     }
   };
   const openQueryRef = useRef(openQuery);
@@ -392,16 +477,7 @@ const App = () => {
     }
     mounted.current = true;
     openQuery("replace");
-    request
-      .get<LatestImages>("/latest-images", { timeout: 5 * 1000 })
-      .then(({ data }) => {
-        setLatestImages(data.images);
-        setVersion(data.version);
-        setMcp(data.mcp || null);
-      })
-      .catch(() => {
-        /* decorative list */
-      });
+    fetchLatestImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -430,20 +506,32 @@ const App = () => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
+      const isTextInput =
+        target instanceof HTMLInputElement &&
+        !["checkbox", "radio", "button", "submit", "reset"].includes(
+          target.type.toLowerCase(),
+        );
       const isEditing =
         target &&
-        (target.tagName === "INPUT" ||
+        (isTextInput ||
           target.tagName === "TEXTAREA" ||
           target.tagName === "SELECT" ||
           target.isContentEditable);
 
       if (e.key === "Escape") {
         if (isEditing && target) {
+          e.preventDefault();
           target.blur();
         }
         return;
       }
-      if (isEditing || !report || preview) {
+      if (
+        isEditing ||
+        !report ||
+        preview ||
+        tokenModalOpen ||
+        target?.closest?.('[role="tree"]')
+      ) {
         return;
       }
       if (e.key === "ArrowDown") {
@@ -459,7 +547,7 @@ const App = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [report, preview]);
+  }, [report, preview, tokenModalOpen]);
 
   const deferredOption = useDeferredValue(viewOption);
   const fileTreeRows = useMemo(() => {
@@ -503,7 +591,7 @@ const App = () => {
     ].map((size) => {
       let label = `≥ ${prettyBytes(size)}`;
       if (size === 0) {
-        label = "No limit";
+        label = i18nGet("noLimitLabel");
       }
       return { value: size, label };
     });
@@ -519,16 +607,20 @@ const App = () => {
     }
   };
 
+  const hasActiveView = Boolean(report || diff || preview);
   const searchBar = (
     <SearchBar
       arch={arch}
       platforms={report?.supportedArchs}
       defaultImage={imageName}
       loading={loading}
+      autoFocus={!hasActiveView && !tokenModalOpen}
       onArchChange={onArchChange}
       onSearch={onSearch}
     />
   );
+
+  const fileTreeResetKey = `${reportVersion}:${imageName}:${currentLayer}:${viewOption.keyword}:${viewOption.sizeLimit}:${viewOption.onlyModifiedRemoved}:${viewOption.compactPaths}:${viewOption.expandAll}`;
 
   const renderFileTreeTab = () => {
     if (!report) {
@@ -554,9 +646,20 @@ const App = () => {
             className="fileTreeSearchInput"
             allowClear
             size="small"
-            placeholder={`${i18nGet("keywordsLabel")} (e.g. usr/local, *.so)  [/]`}
+            value={viewOption.keyword}
+            placeholder={i18nGet("keywordsPlaceholder")}
             onChange={(e) => {
-              updateOption({ keyword: e.target.value.trim(), collapsedItems: [] });
+              updateOption({ keyword: e.target.value, collapsedItems: [] });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                if (viewOption.keyword) {
+                  updateOption({ keyword: "", collapsedItems: [] });
+                }
+                fileSearchRef.current?.blur();
+              }
             }}
           />
           <Select
@@ -625,6 +728,10 @@ const App = () => {
           rows={fileTreeRows}
           layer={layerInfo}
           onToggleExpand={onToggleExpand}
+          resetKey={fileTreeResetKey}
+          imageName={imageName}
+          apiTokenVersion={apiTokenVersion}
+          authRequired={authRequired}
           showMetaColumns={showMetaColumns}
           emptyMessage={
             isEmptyLayer ? i18nGet("noFilesInLayer") : undefined
@@ -665,20 +772,19 @@ const App = () => {
     >
       <Layout className="appLayout">
         <Header
-          className={report || diff || preview ? "header hasSearch" : "header"}
+          className={hasActiveView ? "header hasSearch" : "header"}
         >
           <div className="headerInner">
             <div className="headerLeft">
-              <div
+              <button
+                type="button"
                 className="logo"
-                onClick={() => {
-                  window.location.href = "/";
-                }}
+                onClick={goHome}
               >
                 {getLogoIcon(isDark)}
                 <span>Diving</span>
                 {version && <span className="version">v{version}</span>}
-              </div>
+              </button>
               {report && !preview && (
                 <div className="headerBreadcrumb" title={imageName}>
                   <span className="breadcrumbSep">/</span>
@@ -686,10 +792,16 @@ const App = () => {
                 </div>
               )}
             </div>
-            {(report || diff || preview) && (
+            {hasActiveView && (
               <div className="headerSearch">{searchBar}</div>
             )}
             <div className="headerActions">
+              {hasActiveView && (
+                <RecentImagesPopover
+                  images={latestImages}
+                  onSelect={(img, imgArch) => onSearch(img, "push", imgArch)}
+                />
+              )}
               {report && !preview && (
                 <CompareButton
                   target={imageName}
@@ -699,6 +811,17 @@ const App = () => {
                 />
               )}
               {mcp?.enabled && <McpGuide status={mcp} />}
+              {(authRequired || Boolean(getApiToken())) && (
+                <button
+                  type="button"
+                  className="headerIconBtn"
+                  onClick={() => openTokenModal(false)}
+                  title={i18nGet("apiTokenButton")}
+                  aria-label={i18nGet("apiTokenButton")}
+                >
+                  {getKeyIcon()}
+                </button>
+              )}
               <button
                 type="button"
                 className="headerIconBtn"
@@ -741,6 +864,10 @@ const App = () => {
                 ))}
               </div>
               <p className="landingHint">{i18nGet("imageSlowDesc")}</p>
+              <LatestImagesList
+                images={latestImages}
+                onSelect={(img, imgArch) => onSearch(img, "push", imgArch)}
+              />
             </div>
           </div>
         )}
@@ -825,6 +952,7 @@ const App = () => {
                             />
                             <BigModifiedFilesCard
                               files={report.bigModifiedFileList}
+                              layers={report.layers}
                             />
                             <RecommendationsCard
                               recommendations={report.recommendations}
@@ -873,7 +1001,33 @@ const App = () => {
             </div>
           </Content>
         )}
-        <LatestImagesList images={latestImages} />
+        <ApiTokenModal
+          open={tokenModalOpen}
+          rejected={tokenRejected}
+          hasToken={Boolean(getApiToken())}
+          onSave={(token) => {
+            setApiToken(token);
+            setAuthRequired(true);
+            setTokenRejected(false);
+            setTokenModalOpen(false);
+            setApiTokenVersion((v) => v + 1);
+            fetchLatestImages();
+            const retry = pendingActionRef.current;
+            pendingActionRef.current = null;
+            if (retry) {
+              retry();
+            } else if (!report && !diff) {
+              openQuery("none");
+            }
+          }}
+          onClear={() => {
+            clearApiToken();
+            setTokenRejected(false);
+            setTokenModalOpen(false);
+            setApiTokenVersion((v) => v + 1);
+          }}
+          onCancel={() => setTokenModalOpen(false)}
+        />
       </Layout>
     </ConfigProvider>
   );

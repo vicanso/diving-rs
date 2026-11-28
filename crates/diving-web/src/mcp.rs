@@ -17,8 +17,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use bytesize::ByteSize;
 use diving_core::{
-    is_local_registry, is_safe_blob_id, parse_image_info, resolve_explicit_credentials,
-    to_diff_markdown, to_markdown, AnalyzeOptions, DockerAnalyzeResult, FileTreeItem, Lang, Op,
+    is_safe_blob_id, parse_image_info, resolve_explicit_credentials, to_diff_markdown, to_markdown,
+    AnalyzeOptions, DockerAnalyzeResult, FileTreeItem, Lang, Op, REGISTRY_LOCAL_FILE,
 };
 use http::{header, StatusCode};
 use rmcp::handler::server::wrapper::Parameters;
@@ -32,8 +32,9 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::task;
 
-use crate::http_util::{digests_equal, token_fingerprint};
+use crate::http_util::{digests_equal, extract_bearer_token, token_fingerprint};
 use crate::state::{parse_diff_options, with_arch, WebState};
 
 /// How often a long-running analysis emits a progress notification (only
@@ -237,7 +238,7 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
     }
 
     #[tool(
-        description = "Read a text file from one layer of an analyzed registry image \
+        description = "Read a text file from one layer of an analyzed image \
 (up to 256 KiB; binary files are reported, not returned).",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
@@ -246,10 +247,7 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
         Parameters(params): Parameters<ReadFileParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<String, String> {
-        let registry = parse_image_info(&params.target.image).registry;
-        if is_local_registry(&registry) {
-            return Err("read_file only supports registry images".to_string());
-        }
+        let info = parse_image_info(&params.target.image);
         let lang = Lang::resolve(params.target.lang.as_deref());
         let result = run_analysis(&self.state, &params.target, lang, &ctx).await?;
         let layer = layer_slot(params.layer, result.layers.len())
@@ -261,7 +259,9 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
                     result.layers.len()
                 )
             })?;
-        if layer.empty || !is_safe_blob_id(&layer.digest) {
+        let use_cached =
+            is_safe_blob_id(&layer.digest) && self.state.analyzer.has_layer_blob(&layer.digest);
+        if layer.empty || (!use_cached && info.registry != REGISTRY_LOCAL_FILE) {
             return Err(format!("layer {} has no file content", params.layer));
         }
         let file_path = normalize_path(&params.path).to_string();
@@ -280,17 +280,22 @@ keyword or size, with pagination. Returns JSON rows of {layer, path, size, mode,
         let analyzer = self.state.analyzer.clone();
         let digest = layer.digest.clone();
         let media_type = layer.media_type.clone();
-        let max_bytes = self.state.max_download_file_size;
+        let archive_path = info.name;
         let wanted = file_path.clone();
-        // Decompression is CPU-bound; keep it off the async workers.
-        let content = tokio::task::spawn_blocking(move || {
-            analyzer
-                .read_file(&digest, &media_type, &wanted, max_bytes)
-                .map_err(|e| e.to_string())
+        let limit = (MAX_READ_TEXT_BYTES + 1) as u64;
+        // Decompression is CPU-bound; keep it off the async workers and read
+        // only the preview head instead of buffering huge blobs in memory.
+        let (head, total_size) = task::spawn_blocking(move || {
+            let res = if use_cached {
+                analyzer.read_file_head(&digest, &media_type, &wanted, limit)
+            } else {
+                analyzer.read_local_file_head(&archive_path, &digest, &media_type, &wanted, limit)
+            };
+            res.map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
-        Ok(render_file_text(&file_path, &content))
+        Ok(render_file_text(&file_path, &head, total_size))
     }
 
     #[tool(
@@ -389,8 +394,8 @@ async fn require_token(State(expected): State<Arc<Vec<u8>>>, req: Request, next:
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|got| digests_equal(&token_fingerprint(got.trim()), &expected));
+        .and_then(extract_bearer_token)
+        .is_some_and(|got| digests_equal(&token_fingerprint(got), &expected));
     if !authorized {
         return (
             StatusCode::UNAUTHORIZED,
@@ -600,21 +605,22 @@ fn list_files_in(trees: &[Vec<FileTreeItem>], query: &FileQuery) -> Result<FileP
     })
 }
 
-fn render_file_text(path: &str, content: &[u8]) -> String {
-    let sniff = &content[..content.len().min(BINARY_SNIFF_BYTES)];
+fn render_file_text(path: &str, head: &[u8], total_size: u64) -> String {
+    let full_size = total_size.max(head.len() as u64);
+    let sniff = &head[..head.len().min(BINARY_SNIFF_BYTES)];
     if sniff.contains(&0) {
         return format!(
             "{path} is a binary file ({}); content not returned.",
-            ByteSize(content.len() as u64)
+            ByteSize(full_size)
         );
     }
-    let shown = &content[..content.len().min(MAX_READ_TEXT_BYTES)];
+    let shown = &head[..head.len().min(MAX_READ_TEXT_BYTES)];
     let mut text = String::from_utf8_lossy(shown).into_owned();
-    if shown.len() < content.len() {
+    if (shown.len() as u64) < full_size {
         text.push_str(&format!(
             "\n\n[truncated: showing the first {} of {}]",
             ByteSize(shown.len() as u64),
-            ByteSize(content.len() as u64)
+            ByteSize(full_size)
         ));
     }
     text
@@ -938,10 +944,15 @@ mod tests {
 
     #[test]
     fn render_file_text_handles_binary_and_truncation() {
-        assert!(render_file_text("bin/app", b"\x7fELF\0\0").contains("binary file"));
-        assert_eq!(render_file_text("a.txt", b"hello"), "hello");
-        let big = vec![b'a'; MAX_READ_TEXT_BYTES + 10];
-        let text = render_file_text("big.txt", &big);
+        let bin_msg = render_file_text("bin/app", b"\x7fELF\0\0", 2_000_000);
+        assert!(bin_msg.contains("binary file"), "{bin_msg}");
+        assert!(
+            bin_msg.contains(&ByteSize(2_000_000).to_string()),
+            "{bin_msg}"
+        );
+        assert_eq!(render_file_text("a.txt", b"hello", 5), "hello");
+        let big = vec![b'a'; MAX_READ_TEXT_BYTES + 1];
+        let text = render_file_text("big.txt", &big, (MAX_READ_TEXT_BYTES + 1024) as u64);
         assert!(text.starts_with("aaaa"));
         assert!(text.contains("[truncated:"), "{}", &text[text.len() - 80..]);
     }

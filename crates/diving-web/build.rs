@@ -3,20 +3,17 @@
 //!
 //! The web frontend lives in `web/` and is compiled into `dist/` by
 //! `make build-web` (yarn). That output is `.gitignore`d, so a source-only
-//! build — `cargo install diving` from crates.io, `cargo install --git`, or
-//! a fresh `git clone` + `cargo build` — has no `dist/`, and the
-//! `#[derive(RustEmbed)]` would fail to compile. To keep those paths working
-//! without Node/yarn, drop in a minimal placeholder page when no real build
-//! is present.
+//! `cargo build` without running `make build-web` has no `dist/`, and
+//! `#[derive(RustEmbed)]` would fail to compile. Drop in a minimal
+//! placeholder page when no real frontend build is present.
 //!
-//! This only degrades the React SPA: the terminal UI (the default mode)
-//! needs no web assets, and `--mode web`'s JSON API (`/api/analyze`,
-//! `/api/file`, `/api/latest-images`) still works — only the bundled UI is
-//! the placeholder until a real frontend is embedded.
+//! This only affects the embedded React SPA: the JSON API (`/api/analyze`,
+//! `/api/diff`, `/api/file`, `/api/latest-images`), `/mcp`, and
+//! `POST /api/webhook` still work until `make build-web` embeds the real UI.
 //!
-//! Released crates.io packages bundle the real `dist/` via the `include`
-//! key in `Cargo.toml` (populated by `make build-web` before
-//! `cargo publish`), so `cargo install diving` ships the full web UI.
+//! `diving-web` is not published to crates.io (`publish = false`); release
+//! binaries (`make build-web-bin`) and the `vicanso/diving` Docker image run
+//! `make build-web` beforehand so the full SPA is bundled.
 
 use std::env;
 use std::fs;
@@ -38,13 +35,13 @@ const PLACEHOLDER_HTML: &str = r#"<!doctype html>
     <h1>diving</h1>
     <p>This build does not include the bundled web UI.</p>
     <p>
-      The terminal UI works fully — run <code>diving &lt;image&gt;</code> — and
-      the JSON API on this server is live (try <code>/api/analyze?image=redis:alpine</code>).
+      The JSON API on this server is live (try <code>/api/analyze?image=redis:alpine</code>),
+      along with <code>/mcp</code> and <code>POST /api/webhook</code>.
     </p>
     <p>
-      To get the web UI: install the released crate with
-      <code>cargo install diving</code>, grab a prebuilt binary, or build from
-      source with <code>make build-web</code> before <code>cargo build</code>.
+      To include the web UI, run <code>make build-web</code> before building
+      <code>diving-web</code> (or use <code>make build-web-bin</code> / the
+      <code>vicanso/diving</code> Docker image).
     </p>
     <p><a href="https://github.com/vicanso/diving-rs">github.com/vicanso/diving-rs</a></p>
   </body>

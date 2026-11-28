@@ -27,13 +27,34 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Check tag matches Cargo.toml version
+      - name: Check tag matches Cargo.toml and app versions
+        shell: bash
         run: |
-          ver="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-          case "$GITHUB_REF_NAME" in
-            "v$ver"*) echo "Tag $GITHUB_REF_NAME matches Cargo.toml version $ver" ;;
-            *) echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $ver" >&2; exit 1 ;;
-          esac
+          set -euo pipefail
+          read -r cargo_ver core_dep app_dep app_cargo_ver app_nsh_ver < <(python3 -c '
+          import json, tomllib
+          with open("Cargo.toml", "rb") as f:
+              root = tomllib.load(f)
+          with open("app/Cargo.toml", "rb") as f:
+              app = tomllib.load(f)
+          with open("app/nsh.json", "r", encoding="utf-8") as f:
+              nsh = json.load(f)
+          print(
+              root["workspace"]["package"]["version"],
+              root["workspace"]["dependencies"]["diving-core"]["version"],
+              root["workspace"]["dependencies"]["diving-app"]["version"],
+              app["package"]["version"],
+              nsh["version"],
+          )')
+          if [ "$cargo_ver" != "$core_dep" ] || [ "$cargo_ver" != "$app_dep" ] || [ "$cargo_ver" != "$app_cargo_ver" ] || [ "$cargo_ver" != "$app_nsh_ver" ]; then
+            echo "::error::Version mismatch across manifests: Cargo.toml=$cargo_ver, diving-core=$core_dep, diving-app=$app_dep, app/Cargo.toml=$app_cargo_ver, app/nsh.json=$app_nsh_ver" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v${cargo_ver}" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not exactly match version v${cargo_ver}" >&2
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME exactly matches Cargo.toml, app/Cargo.toml, and app/nsh.json ($cargo_ver)"
       - name: Ensure release exists for tag
         run: |
           tag="${GITHUB_REF_NAME}"
@@ -201,6 +222,11 @@ jobs:
       - name: Package, sign, and notarize Diving Desktop (macOS universal)
         working-directory: app
         env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
@@ -209,12 +235,14 @@ jobs:
           AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
         run: |
           set -euo pipefail
+          app_version="${GITHUB_REF_NAME#v}"
+          export DIVING_APP_VERSION="$app_version"
           out_dir="${RUNNER_TEMP}/diving-app-out"
           stage_dir="${RUNNER_TEMP}/diving-app-stage"
           rm -rf "$out_dir" "$stage_dir"
           mkdir -p "$out_dir" "$stage_dir"
           nsh package --target macos --arch universal \
-            --app-version "${GITHUB_REF_NAME#v}" \
+            --app-version "$app_version" \
             --build "$GITHUB_RUN_NUMBER" \
             --out "$out_dir"
           APP_PATH="${out_dir}/${APP_NAME}.app" \
@@ -299,14 +327,21 @@ jobs:
         working-directory: app
         env:
           TARGET_ARCH: ${{ matrix.platform.arch }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
         run: |
           set -euo pipefail
+          app_version="${GITHUB_REF_NAME#v}"
+          export DIVING_APP_VERSION="$app_version"
           out_dir="${RUNNER_TEMP}/diving-app-out"
           stage_dir="${RUNNER_TEMP}/diving-app-stage"
           rm -rf "$out_dir" "$stage_dir"
           mkdir -p "$out_dir" "$stage_dir"
           nsh package --target linux \
-            --app-version "${GITHUB_REF_NAME#v}" \
+            --app-version "$app_version" \
             --build "$GITHUB_RUN_NUMBER" \
             --out "$out_dir"
           archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
@@ -395,6 +430,11 @@ jobs:
         working-directory: app
         env:
           TARGET_ARCH: ${{ matrix.platform.arch }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
         run: |
           $ErrorActionPreference = 'Stop'
           $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'
@@ -403,6 +443,7 @@ jobs:
           New-Item -ItemType Directory -Path $outDir, $stageDir | Out-Null
 
           $appVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $env:DIVING_APP_VERSION = $appVersion
           & nsh.exe package --target windows `
             --app-version $appVersion `
             --build $env:GITHUB_RUN_NUMBER `
@@ -450,14 +491,22 @@ jobs:
           cat SHA256SUMS.txt
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt -R "$GITHUB_REPOSITORY" --clobber
       - name: Publish release
-        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--draft=false)
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease --latest=false) ;;
+          esac
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" "${args[@]}"
 
   # Build each architecture on its native runner and push only the per-arch
   # digest. The `docker-merge` job below assembles the final multi-arch
   # manifest at `IMAGE_NAME:<version>`. Splitting like this avoids QEMU
   # emulation, which roughly halves total wall time vs. the old setup.
   docker-build:
-    timeout-minutes: 3600
+    needs: [prepare-release]
+    timeout-minutes: 90
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
       matrix:
@@ -550,9 +599,9 @@ jobs:
       - name: Create and push multi-arch manifest
         shell: bash
         working-directory: ${{ runner.temp }}/digests
-        # Tag the same manifest with both the version (e.g. `0.8.5`) and
-        # `latest`. `imagetools create` accepts multiple `-t` and only
-        # writes manifest references — no blobs are re-uploaded.
+        # Tag the manifest with the version (e.g. `0.12.3`), and also `latest`
+        # on stable (non-prerelease) tags. `imagetools create` accepts multiple
+        # `-t` and only writes manifest references — no blobs are re-uploaded.
         run: |
           set -euo pipefail
           sources=()
@@ -564,11 +613,18 @@ jobs:
             echo "::error::No image digests found to merge"
             exit 1
           fi
-          docker buildx imagetools create \
-            -t "${IMAGE_NAME}:${VERSION}" \
-            -t "${IMAGE_NAME}:latest" \
-            "${sources[@]}"
+          tags=(-t "${IMAGE_NAME}:${VERSION}")
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *) tags+=(-t "${IMAGE_NAME}:latest") ;;
+          esac
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
       - name: Inspect image
+        shell: bash
         run: |
-          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:latest
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}"
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "Pre-release tag ${GITHUB_REF_NAME}; skipped :latest tag" ;;
+            *) docker buildx imagetools inspect "${IMAGE_NAME}:latest" ;;
+          esac

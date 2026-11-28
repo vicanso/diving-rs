@@ -3,13 +3,13 @@
 use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, RecentImageEntry, format_bytes};
+use crate::domain::{AppRoute, AppState, RecentImageEntry, UpdatePhase, format_bytes};
 use crate::features::title_bar::more_actions_menu;
-use crate::i18n::{UiLang, app_version_badge, t};
+use crate::i18n::{UiLang, app_version_badge, t, tf};
 use crate::ui::{
-    ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, text_tertiary, theme,
-    ui_button, ui_context_menu, ui_icon, ui_icon_button, ui_menu_item, ui_recent_item,
-    ui_segmented, ui_sidebar_item,
+    ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_inset, text_tertiary,
+    theme, ui_button, ui_context_menu, ui_icon, ui_icon_button, ui_menu_item, ui_progress_bar,
+    ui_recent_item, ui_segmented, ui_sidebar_item, ui_spinner,
 };
 
 fn appearance_icon(appearance: Appearance) -> IconName {
@@ -294,10 +294,12 @@ fn sidebar_recent_list(state: AppState) -> impl IntoElement {
 fn sidebar_footer(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let appearance = state.appearance;
+    let update_phase = state.update_phase;
     let palette_state = state.clone();
     let theme_state = state.clone();
     let lang_state = state.clone();
-    let menu_state = state;
+    let menu_state = state.clone();
+    let update_card_state = state;
 
     view()
         .w_full()
@@ -307,6 +309,161 @@ fn sidebar_footer(state: AppState) -> impl IntoElement {
         .gap_2()
         .border_t_1()
         .border_color(move || theme().sidebar_border)
+        .child(dynamic(move || {
+            let card_state = update_card_state.clone();
+            match update_phase.get() {
+                UpdatePhase::Available { version, .. } => {
+                    let s_install = card_state.clone();
+                    let s_skip = card_state;
+                    view()
+                        .w_full()
+                        .p_2()
+                        .rounded(radius_inset)
+                        .border_1()
+                        .border_color(move || theme().border)
+                        .bg(move || theme().accent.opacity(0.65))
+                        .flex_col()
+                        .gap_1p5()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_1()
+                                .child(
+                                    text(format!("{} → {version}", app_version_badge()))
+                                        .text_xs()
+                                        .font_family(font_mono_family())
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .number_of_lines(1)
+                                        .text_color(move || theme().primary),
+                                )
+                                .child(ui_icon_button(
+                                    IconName::Close,
+                                    "Skip this version",
+                                    Some(move || {
+                                        SharedString::from(t(lang.get(), "update.action_skip"))
+                                    }),
+                                    ButtonVariant::Ghost,
+                                    UiSize::Xs,
+                                    false,
+                                    false,
+                                    move || s_skip.skip_available_update(),
+                                )),
+                        )
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.action_install")),
+                            ButtonVariant::Default,
+                            UiSize::Xs,
+                            Some(IconName::Download),
+                            false,
+                            false,
+                            move || s_install.start_update(),
+                        ))
+                        .into_element()
+                }
+                UpdatePhase::Downloading {
+                    version,
+                    received,
+                    total,
+                } => {
+                    let progress = if total > 0 {
+                        let pct = ((received as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+                        format!("{pct:.0}%")
+                    } else {
+                        format_bytes(received)
+                    };
+                    let ratio = if total > 0 {
+                        (received as f32 / total as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    view()
+                        .w_full()
+                        .p_2()
+                        .rounded(radius_inset)
+                        .border_1()
+                        .border_color(move || theme().border)
+                        .bg(move || theme().muted)
+                        .flex_col()
+                        .gap_1p5()
+                        .child(
+                            text(move || {
+                                SharedString::from(tf(
+                                    lang.get(),
+                                    "update.downloading",
+                                    &[&version, &progress],
+                                ))
+                            })
+                            .text_xs()
+                            .number_of_lines(1)
+                            .text_color(move || theme().foreground),
+                        )
+                        .child(ui_progress_bar(
+                            ratio,
+                            total == 0,
+                            "Update download progress",
+                        ))
+                        .into_element()
+                }
+                UpdatePhase::Installing { version } => view()
+                    .w_full()
+                    .p_2()
+                    .rounded(radius_inset)
+                    .border_1()
+                    .border_color(move || theme().border)
+                    .bg(move || theme().muted)
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(ui_spinner(px(12.0), move || theme().primary))
+                    .child(
+                        text(move || {
+                            SharedString::from(tf(lang.get(), "update.installing", &[&version]))
+                        })
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(move || theme().foreground),
+                    )
+                    .into_element(),
+                UpdatePhase::ReadyToRestart { version, .. } => {
+                    let s_restart = card_state;
+                    view()
+                        .w_full()
+                        .p_2()
+                        .rounded(radius_inset)
+                        .border_1()
+                        .border_color(move || theme().border)
+                        .bg(move || theme().accent.opacity(0.65))
+                        .flex_col()
+                        .gap_1p5()
+                        .child(
+                            text(move || {
+                                SharedString::from(tf(
+                                    lang.get(),
+                                    "update.ready_restart",
+                                    &[&version],
+                                ))
+                            })
+                            .text_xs()
+                            .text_color(move || theme().foreground),
+                        )
+                        .child(ui_button(
+                            move || SharedString::from(t(lang.get(), "update.restart_now")),
+                            ButtonVariant::Default,
+                            UiSize::Xs,
+                            Some(IconName::Refresh),
+                            false,
+                            false,
+                            move || s_restart.relaunch_after_update(),
+                        ))
+                        .into_element()
+                }
+                _ => view().into_element(),
+            }
+        }))
         .child(
             view()
                 .flex_row()
@@ -454,5 +611,65 @@ mod tests {
             .expect("folder action localized");
         app.wait_for_within("arm64 · 2.0 MiB · 快照", Duration::from_secs(3))
             .expect("stale badge in recent row reactively relocalized");
+    }
+
+    #[component]
+    fn SidebarUpdaterHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.update_phase.set(UpdatePhase::Available {
+            version: "v9.9.9".to_owned(),
+            notes: "Updater UI check".to_owned(),
+        });
+        let dl_state = state.clone();
+        view()
+            .flex_col()
+            .child(ui_button(
+                "TriggerDownload",
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || {
+                    dl_state.update_phase.set(UpdatePhase::Downloading {
+                        version: "v9.9.9".to_owned(),
+                        received: 512,
+                        total: 1024,
+                    });
+                },
+            ))
+            .child(app_sidebar(state))
+    }
+
+    #[test]
+    fn sidebar_updater_ui_shows_available_nudge_downloading_and_menu_actions() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(400.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<SidebarUpdaterHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start sidebar updater harness");
+        app.wait_for_within("Update & restart", Duration::from_secs(3))
+            .expect("Update & restart nudge visible");
+        assert!(app.shows(&format!("{} → v9.9.9", app_version_badge())));
+
+        app.press("label:More actions").expect("open ... menu");
+        app.wait_for_within("role:menuitem[Skip this version]", Duration::from_secs(3))
+            .expect("Skip this version item visible in ... menu");
+        assert!(app.shows("Check for updates…"));
+        app.press_key("escape").expect("close ... menu");
+
+        app.press("中").expect("switch sidebar lang to ZH");
+        app.wait_for_within("更新并重启", Duration::from_secs(3))
+            .expect("ZH updater nudge visible");
+
+        app.press("TriggerDownload")
+            .expect("switch to downloading state");
+        app.wait_for_within("正在下载 v9.9.9（50%）…", Duration::from_secs(3))
+            .expect("ZH live download progress shown");
     }
 }

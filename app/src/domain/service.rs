@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use diving_core::{
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
+use tokio::time::sleep;
 
 use crate::domain::model::{
     FilePreviewContent, ImageSourceKind, classify_file_preview, image_source_kind,
@@ -224,7 +225,7 @@ impl DivingService {
 
         if is_registry {
             let preview_handle = self.inner.rt.spawn(async move {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(500)).await;
                 if done.load(Ordering::SeqCst) {
                     return;
                 }
@@ -377,28 +378,21 @@ impl DivingService {
         let (tx, rx) = oneshot::channel();
         let analyzer = self.inner.analyzer.clone();
         self.inner.rt.spawn_blocking(move || {
-            let info = parse_image_info(&image_ref);
-            let outcome = if info.registry == REGISTRY_LOCAL_FILE {
-                analyzer.read_local_file_head(
-                    &info.name,
-                    &layer_digest,
-                    &media_type,
-                    &file_path,
-                    FILE_PREVIEW_LIMIT,
-                )
-            } else {
-                analyzer.read_file_head(&layer_digest, &media_type, &file_path, FILE_PREVIEW_LIMIT)
-            };
-            let result = outcome
-                .map(|(bytes, total_size)| classify_file_preview(&file_path, &bytes, total_size))
-                .map_err(|err| err.to_string());
+            let result = read_preview_head(
+                &analyzer,
+                &image_ref,
+                &layer_digest,
+                &media_type,
+                &file_path,
+            )
+            .map(|(bytes, total_size)| classify_file_preview(&file_path, &bytes, total_size));
             let _ = tx.send(result);
         });
         rx
     }
 
     /// Exports an entire file (up to 100 MiB) from a cached layer blob or local archive to `dest`.
-    /// Streams registry blobs in 64 KiB chunks to avoid buffering large files in memory.
+    /// Streams registry and cached `file://` blobs in 64 KiB chunks to avoid buffering large files.
     pub fn export_layer_file(
         &self,
         image_ref: String,
@@ -410,64 +404,14 @@ impl DivingService {
         let (tx, rx) = oneshot::channel();
         let analyzer = self.inner.analyzer.clone();
         self.inner.rt.spawn_blocking(move || {
-            let info = parse_image_info(&image_ref);
-            let result = if info.registry == REGISTRY_LOCAL_FILE {
-                analyzer
-                    .read_local_file(
-                        &info.name,
-                        &layer_digest,
-                        &media_type,
-                        &file_path,
-                        FILE_EXPORT_LIMIT,
-                    )
-                    .map_err(|err| err.to_string())
-                    .and_then(|bytes| {
-                        let len = bytes.len() as u64;
-                        fs::write(&dest, &bytes)
-                            .map(|()| len)
-                            .map_err(|err| err.to_string())
-                    })
-            } else {
-                let mut writer: Option<BufWriter<File>> = None;
-                let mut written: u64 = 0;
-                let stream_res = analyzer.stream_file(
-                    &layer_digest,
-                    &media_type,
-                    &file_path,
-                    FILE_EXPORT_LIMIT,
-                    |chunk| {
-                        let w = match writer.as_mut() {
-                            Some(w) => w,
-                            None => {
-                                let file = File::create(&dest).map_err(|e| CoreError::Other {
-                                    message: e.to_string(),
-                                })?;
-                                writer.insert(BufWriter::new(file))
-                            }
-                        };
-                        w.write_all(chunk).map_err(|e| CoreError::Other {
-                            message: e.to_string(),
-                        })?;
-                        written = written.saturating_add(chunk.len() as u64);
-                        Ok(())
-                    },
-                );
-                match stream_res {
-                    Ok(()) => {
-                        if let Some(mut w) = writer {
-                            w.flush().map(|()| written).map_err(|e| e.to_string())
-                        } else {
-                            // Empty file
-                            fs::write(&dest, []).map(|()| 0).map_err(|e| e.to_string())
-                        }
-                    }
-                    Err(err) => {
-                        drop(writer);
-                        let _ = fs::remove_file(&dest);
-                        Err(err.to_string())
-                    }
-                }
-            };
+            let result = export_layer_file_sync(
+                &analyzer,
+                &image_ref,
+                &layer_digest,
+                &media_type,
+                &file_path,
+                &dest,
+            );
             let _ = tx.send(result);
         });
         rx
@@ -579,6 +523,138 @@ impl DivingService {
     }
 }
 
+fn read_preview_head(
+    analyzer: &Analyzer,
+    image_ref: &str,
+    layer_digest: &str,
+    media_type: &str,
+    file_path: &str,
+) -> Result<(Vec<u8>, u64), String> {
+    let info = parse_image_info(image_ref);
+    if info.registry != REGISTRY_LOCAL_FILE {
+        return analyzer
+            .read_file_head(layer_digest, media_type, file_path, FILE_PREVIEW_LIMIT)
+            .map_err(|err| err.to_string());
+    }
+    if layer_digest.starts_with("sha256:")
+        && analyzer.has_layer_blob(layer_digest)
+        && let Ok(head) =
+            analyzer.read_file_head(layer_digest, media_type, file_path, FILE_PREVIEW_LIMIT)
+    {
+        return Ok(head);
+    }
+    analyzer
+        .read_local_file_head(
+            &info.name,
+            layer_digest,
+            media_type,
+            file_path,
+            FILE_PREVIEW_LIMIT,
+        )
+        .map_err(|err| err.to_string())
+}
+
+fn stream_cached_blob_to_file(
+    analyzer: &Analyzer,
+    layer_digest: &str,
+    media_type: &str,
+    file_path: &str,
+    dest: &Path,
+) -> Result<u64, String> {
+    let mut writer: Option<BufWriter<File>> = None;
+    let mut written: u64 = 0;
+    let stream_res = analyzer.stream_file(
+        layer_digest,
+        media_type,
+        file_path,
+        FILE_EXPORT_LIMIT,
+        |chunk| {
+            let w = match writer.as_mut() {
+                Some(w) => w,
+                None => {
+                    let file = File::create(dest).map_err(|e| CoreError::Other {
+                        message: e.to_string(),
+                    })?;
+                    writer.insert(BufWriter::new(file))
+                }
+            };
+            w.write_all(chunk).map_err(|e| CoreError::Other {
+                message: e.to_string(),
+            })?;
+            written = written.saturating_add(chunk.len() as u64);
+            Ok(())
+        },
+    );
+    match stream_res {
+        Ok(()) => {
+            if let Some(mut w) = writer {
+                w.flush().map(|()| written).map_err(|e| e.to_string())
+            } else {
+                fs::write(dest, []).map(|()| 0).map_err(|e| e.to_string())
+            }
+        }
+        Err(err) => {
+            drop(writer);
+            let _ = fs::remove_file(dest);
+            Err(err.to_string())
+        }
+    }
+}
+
+fn export_local_archive_file(
+    analyzer: &Analyzer,
+    archive_path: &str,
+    layer_digest: &str,
+    media_type: &str,
+    file_path: &str,
+    dest: &Path,
+) -> Result<u64, String> {
+    analyzer
+        .read_local_file(
+            archive_path,
+            layer_digest,
+            media_type,
+            file_path,
+            FILE_EXPORT_LIMIT,
+        )
+        .map_err(|err| err.to_string())
+        .and_then(|bytes| {
+            let len = bytes.len() as u64;
+            fs::write(dest, &bytes)
+                .map(|()| len)
+                .map_err(|err| err.to_string())
+        })
+}
+
+fn export_layer_file_sync(
+    analyzer: &Analyzer,
+    image_ref: &str,
+    layer_digest: &str,
+    media_type: &str,
+    file_path: &str,
+    dest: &Path,
+) -> Result<u64, String> {
+    let info = parse_image_info(image_ref);
+    if info.registry != REGISTRY_LOCAL_FILE {
+        return stream_cached_blob_to_file(analyzer, layer_digest, media_type, file_path, dest);
+    }
+    if layer_digest.starts_with("sha256:")
+        && analyzer.has_layer_blob(layer_digest)
+        && let Ok(written) =
+            stream_cached_blob_to_file(analyzer, layer_digest, media_type, file_path, dest)
+    {
+        return Ok(written);
+    }
+    export_local_archive_file(
+        analyzer,
+        &info.name,
+        layer_digest,
+        media_type,
+        file_path,
+        dest,
+    )
+}
+
 fn format_image_target(image: &str, arch: Option<&str>) -> String {
     let trimmed = image.trim();
     let kind = image_source_kind(trimmed);
@@ -627,7 +703,22 @@ fn format_image_target(image: &str, arch: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use diving_core::CacheConfig;
+    use tar::{Builder as TarBuilder, Header as TarHeader};
+    use tempfile::TempDir;
+
     use super::*;
+
+    fn single_file_tar(path: &str, contents: &[u8]) -> Vec<u8> {
+        let mut builder = TarBuilder::new(Vec::new());
+        let mut header = TarHeader::new_gnu();
+        header.set_path(path).expect("tar path");
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, contents).expect("append entry");
+        builder.into_inner().expect("finish tar")
+    }
 
     #[test]
     fn format_image_target_sets_replaces_and_preserves_query_params() {
@@ -709,6 +800,127 @@ mod tests {
         assert!(
             !err.starts_with("无法读取本地镜像归档："),
             "analyze error must stay raw for live EN/ZH formatting, got: {err}"
+        );
+    }
+
+    #[test]
+    fn local_file_cached_sha256_blob_streams_first_then_falls_back_to_archive() {
+        let dir = TempDir::new().expect("temp dir");
+        let layer_dir = dir.path().join("layers");
+        let analysis_dir = dir.path().join("analysis");
+        let analyzer = Analyzer::builder()
+            .cache(CacheConfig::persistent(&layer_dir, &analysis_dir))
+            .allow_local_file(true)
+            .build()
+            .expect("persistent analyzer");
+
+        // Local docker-save archive holding the fallback file content.
+        let archive_layer = single_file_tar("etc/app.conf", b"from-local-archive");
+        let archive_tar = dir.path().join("image.tar");
+        {
+            let mut outer = TarBuilder::new(File::create(&archive_tar).expect("create outer tar"));
+            let mut h = TarHeader::new_gnu();
+            h.set_path("layer0.tar").expect("layer path");
+            h.set_size(archive_layer.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            outer
+                .append(&h, &archive_layer[..])
+                .expect("append layer0.tar");
+            outer.finish().expect("finish outer tar");
+        }
+        let image_ref = format!("file://{}", archive_tar.display());
+
+        // Seed a cached sha256 layer blob whose digest matches the cached layer path.
+        let cached_digest = format!("sha256:{}", "a".repeat(64));
+        let blob_path = analyzer.layer_blob_path(&cached_digest).expect("blob path");
+        fs::create_dir_all(blob_path.parent().expect("blob parent")).expect("mkdir blob parent");
+        fs::write(
+            &blob_path,
+            single_file_tar("etc/app.conf", b"from-cached-blob"),
+        )
+        .expect("seed cached blob");
+
+        let (head, total) =
+            read_preview_head(&analyzer, &image_ref, &cached_digest, "", "etc/app.conf")
+                .expect("preview head from cached blob");
+        assert_eq!(head, b"from-cached-blob");
+        assert_eq!(total, b"from-cached-blob".len() as u64);
+
+        let exported_cached = dir.path().join("exported-cached.conf");
+        let written = export_layer_file_sync(
+            &analyzer,
+            &image_ref,
+            &cached_digest,
+            "",
+            "etc/app.conf",
+            &exported_cached,
+        )
+        .expect("export from cached blob");
+        assert_eq!(written, b"from-cached-blob".len() as u64);
+        assert_eq!(
+            fs::read(&exported_cached).expect("read cached export"),
+            b"from-cached-blob"
+        );
+
+        // Removing the cached blob forces fallback to the local archive member.
+        fs::remove_file(&blob_path).expect("evict cached blob");
+        let missing_sha_digest = "layer0.tar";
+        let (fallback_head, _) = read_preview_head(
+            &analyzer,
+            &image_ref,
+            missing_sha_digest,
+            "",
+            "etc/app.conf",
+        )
+        .expect("fallback preview head");
+        assert_eq!(fallback_head, b"from-local-archive");
+
+        // Also test a `sha256:` digest missing from the blob cache when the local archive maps it.
+        let non_blob_tar = dir.path().join("legacy-sha.tar");
+        let sha_entry_name = format!("sha256:{}", "b".repeat(64));
+        let manifest_json = format!(
+            r#"[{{"Config":"config.json","RepoTags":["demo:v1"],"Layers":["{sha_entry_name}"]}}]"#
+        );
+        let config_json = br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["sha256:bbbb"]},"config":{}}"#;
+        {
+            let mut outer = TarBuilder::new(File::create(&non_blob_tar).expect("create sha tar"));
+            for (name, body) in [
+                ("manifest.json", manifest_json.as_bytes()),
+                ("config.json", &config_json[..]),
+                (sha_entry_name.as_str(), &archive_layer[..]),
+            ] {
+                let mut h = TarHeader::new_gnu();
+                h.set_path(name).expect("entry path");
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                outer.append(&h, body).expect("append entry");
+            }
+            outer.finish().expect("finish sha tar");
+        }
+        let sha_ref = format!("file://{}", non_blob_tar.display());
+        let evicted_digest = format!("sha256:{}", "b".repeat(64));
+        assert!(!analyzer.has_layer_blob(&evicted_digest));
+        let (fallback_sha_head, _) =
+            read_preview_head(&analyzer, &sha_ref, &evicted_digest, "", "etc/app.conf")
+                .expect("sha256 digest falls back to local archive when blob cache misses");
+        assert_eq!(fallback_sha_head, b"from-local-archive");
+
+        let exported_fallback = dir.path().join("exported-fallback.conf");
+        let written_fallback = export_layer_file_sync(
+            &analyzer,
+            &sha_ref,
+            &evicted_digest,
+            "",
+            "etc/app.conf",
+            &exported_fallback,
+        )
+        .expect("export falls back to local archive when blob cache misses");
+        assert_eq!(written_fallback, b"from-local-archive".len() as u64);
+        assert_eq!(
+            fs::read(&exported_fallback).expect("read fallback export"),
+            b"from-local-archive"
         );
     }
 }

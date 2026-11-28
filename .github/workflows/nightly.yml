@@ -313,6 +313,11 @@ jobs:
         env:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
           DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
           SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -432,6 +437,11 @@ jobs:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
           DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
           TARGET_ARCH: ${{ matrix.platform.arch }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
         run: |
           set -euo pipefail
           out_dir="${RUNNER_TEMP}/diving-app-out"
@@ -536,6 +546,11 @@ jobs:
           APP_VERSION: ${{ needs.check.outputs.app_version }}
           DIVING_APP_VERSION: ${{ needs.check.outputs.app_version }}
           TARGET_ARCH: ${{ matrix.platform.arch }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          CARGO_PROFILE_RELEASE_PANIC: "abort"
         run: |
           $ErrorActionPreference = 'Stop'
           $outDir = Join-Path $env:RUNNER_TEMP 'diving-app-out'

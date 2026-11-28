@@ -119,6 +119,17 @@
   cursor: pointer;
   user-select: none;
   line-height: 1.2;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.logo:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .logo span {
@@ -167,14 +178,6 @@
 .mcpButton:focus-visible {
   border-color: var(--accent);
   outline: none;
-}
-
-/* The fixed GitHub corner covers the header's right edge once the centered
-   content column (--content-max) reaches it; keep the MCP button clear. */
-@media (max-width: 1248px) {
-  .headerInner.withCorner {
-    padding-right: 52px;
-  }
 }
 
 /* On phones the search bar cannot share a row with the logo without
@@ -448,29 +451,27 @@
   overflow: hidden;
 }
 
-.panelHeader {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
-}
-
-.panelTitle {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-}
-
-.panelBody {
-  padding: 16px 18px;
-}
-
-.panelBody.flush {
+.panelLinkBtn,
+.treemapTableLink {
+  border: none;
+  background: transparent;
   padding: 0;
+  font: inherit;
+  color: var(--accent-deep);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.panelLinkBtn:hover,
+.treemapTableLink:hover {
+  color: var(--accent);
+}
+
+.panelLinkBtn:focus-visible,
+.treemapTableLink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* override ant Card to match panel */
@@ -676,38 +677,7 @@
   border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
 }
 
-/* —— layer explorer —— */
-.layerToolbar {
-  margin-bottom: 4px;
-}
-
-.layerToolbar .ant-form-item {
-  margin-bottom: 12px;
-}
-
-.layerCmd {
-  margin-bottom: 14px;
-  padding: 12px 14px;
-  background: var(--bg-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-}
-
-.layerCmd .label {
-  font-weight: 600;
-  color: var(--ink-muted);
-  margin-right: 6px;
-}
-
-.layerCmd .cmd {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--ink-secondary);
-  word-break: break-all;
-}
-
-/* file tree */
+/* —— file tree —— */
 .fileTreeHeaderOnly {
   margin: 0;
   padding: 0;
@@ -819,12 +789,30 @@
   background: var(--surface-hover);
 }
 
+.virtualFileTreeRow:focus,
+.virtualFileTreeRow:focus-visible {
+  outline: none;
+  background: var(--surface-active);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .fileTree .icon {
   display: inline-flex;
   align-items: center;
+  width: 18px;
+  flex-shrink: 0;
   padding: 0 4px 0 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
   vertical-align: middle;
   color: var(--ink-muted);
+}
+
+.fileTree .iconSpacer {
+  display: inline-block;
+  width: 18px;
+  flex-shrink: 0;
 }
 
 .fileTree .modified {
@@ -836,11 +824,30 @@
 
 .fileTree .download {
   display: none;
+  align-items: center;
   margin-left: 8px;
+  padding: 2px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
   vertical-align: middle;
 }
-.virtualFileTreeRow:hover .download {
+
+.fileTree .download:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.virtualFileTreeRow:hover .download,
+.virtualFileTreeRow:focus-within .download {
   display: inline-flex;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .fileTree .download {
+    display: inline-flex;
+  }
 }
 
 /* —— data tables —— */
@@ -982,6 +989,16 @@
   background: var(--bg-muted);
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--accent);
+}
+
+.recommendationHint code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--ink);
 }
 
 .recommendationPaths {
@@ -1327,21 +1344,6 @@
 }
 
 /* —— image diff —— */
-.reportToolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-.reportToolbar code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ink-secondary);
-}
-
 .compareIntro {
   color: var(--ink-secondary);
 }
@@ -1740,42 +1742,79 @@
   background: var(--ok);
 }
 
-/* —— recent images dock —— */
-.analyzeImages {
-  position: fixed;
-  bottom: 16px;
-  right: 16px;
-  width: min(320px, calc(100vw - 32px));
-  max-height: 240px;
-  overflow: auto;
-  background: var(--bg-elevated) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius) !important;
-  box-shadow: var(--shadow-lg) !important;
-  z-index: 50;
+/* —— recent images & API token modal —— */
+.landingRecent {
+  margin-top: 24px;
+  padding: 14px 16px;
+  text-align: left;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
-.analyzeImages .ant-list-header {
-  font-size: 12px;
+.landingRecentHeader {
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: var(--ink-muted);
-  border-bottom: 1px solid var(--border);
-  padding: 10px 14px !important;
+  margin-bottom: 10px;
 }
 
-.analyzeImages .ant-list-item {
-  padding: 8px 14px !important;
+.landingRecentChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recentImageLink {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-secondary);
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.recentImageLink:hover {
+  border-color: var(--accent);
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+}
+
+.recentPopoverList {
+  width: min(320px, calc(100vw - 48px));
+  max-height: 280px;
+  overflow: auto;
+}
+
+.recentPopoverList .ant-list-item {
+  padding: 6px 2px !important;
   border-color: var(--border) !important;
 }
 
-.analyzeImages a {
+.recentPopoverList a {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-secondary);
   word-break: break-all;
 }
-.analyzeImages a:hover {
+
+.recentPopoverList a:hover {
   color: var(--accent);
+}
+
+.apiTokenModalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 /* —— ant overrides —— */
@@ -1809,17 +1848,27 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
+  justify-content: space-between;
+  gap: 8px 16px;
   padding: 10px 14px;
   background: var(--surface-raised);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
 }
 
+.kpiMetrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
 .kpiItem {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
+  min-width: 0;
 }
 
 .kpiLabel {
@@ -1867,7 +1916,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-left: auto;
+}
+
+@media (max-width: 900px) {
+  .kpiDivider {
+    display: none;
+  }
 }
 
 /* —— 2-pane master-detail workspace —— */

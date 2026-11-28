@@ -6,10 +6,12 @@ use diving_core::{
     BaseLayerMode, BaseLayerSkipReason, ChangeSet, DiffLayer, ImageDiff, ParityStatus,
     Recommendation,
 };
+use nsh_core::AccessibilityState;
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, DiffErrorState, DiffFileTab, SharedRef, classify_layer_opcode, format_bytes,
+    AppRoute, AppState, DiffErrorState, DiffFileTab, SharedRef, classify_layer_opcode, format_bytes,
 };
 use crate::features::arch_select_items;
 use crate::i18n::{
@@ -18,10 +20,10 @@ use crate::i18n::{
 };
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, SelectItem, TabOption, UiSize, diverge_down,
-    diverge_up, font_mono_family, info, radius_control, radius_inset, theme, ui_badge, ui_banner,
-    ui_button, ui_checkbox, ui_dialog, ui_empty_state, ui_field, ui_input, ui_opcode_pill,
-    ui_panel, ui_panel_titled, ui_select, ui_separator, ui_skeleton, ui_spinner, ui_tabs,
-    ui_tooltip,
+    diverge_up, font_mono_family, info, radius_control, radius_inset, surface_active, theme,
+    ui_badge, ui_banner, ui_button, ui_checkbox, ui_dialog, ui_empty_state, ui_field, ui_input,
+    ui_opcode_pill, ui_panel, ui_panel_titled, ui_select, ui_separator, ui_skeleton, ui_spinner,
+    ui_tabs, ui_tooltip,
 };
 
 const MINUS_SIGN: char = '−';
@@ -1394,6 +1396,55 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
         }
     });
     let is_empty = computed(move || bucket_data.with(|(_, _, files)| files.is_empty()));
+    let selected_file_key = signal(None::<String>);
+    let list_focused = signal(false);
+    let list_ref = element_ref();
+    let copy_state = state.clone();
+
+    list_ref.on_focus_in(move || list_focused.set(true));
+    list_ref.on_focus_out(move || list_focused.set(false));
+    cleanup(move || list_focused.set(false));
+
+    let active_state = state.clone();
+    let list_active = computed(move || {
+        list_focused.get()
+            && !active_state.any_overlay_open()
+            && active_state.route.get() == AppRoute::Diff
+    });
+    let nav_copy_state = copy_state.clone();
+    effect(move || {
+        if !list_active.get() {
+            return;
+        }
+        let nav_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: true,
+            for_focus: true,
+            ..Default::default()
+        };
+        let up_list = list_ref;
+        on_key_with("up", nav_opts, move |_| {
+            step_diff_file_selection(&bucket_data, selected_file_key, &up_list, -1);
+        });
+        let down_list = list_ref;
+        on_key_with("down", nav_opts, move |_| {
+            step_diff_file_selection(&bucket_data, selected_file_key, &down_list, 1);
+        });
+        let act_opts = KeyOptions {
+            when: When::NotEditing,
+            repeat: false,
+            for_focus: true,
+            ..Default::default()
+        };
+        let enter_state = nav_copy_state.clone();
+        on_key_with("enter", act_opts, move |_| {
+            activate_diff_file_row(&bucket_data, selected_file_key, &enter_state, None);
+        });
+        let space_state = nav_copy_state.clone();
+        on_key_with("space", act_opts, move |_| {
+            activate_diff_file_row(&bucket_data, selected_file_key, &space_state, None);
+        });
+    });
 
     ui_panel_titled(
         move || SharedString::from(format!("{} ({total})", t(lang.get(), "diff.files_section"))),
@@ -1466,6 +1517,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                 )
                 .into_element();
             }
+            let row_copy_state = copy_state.clone();
 
             view()
                 .flex_col()
@@ -1500,6 +1552,8 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                             virtual_list(
                                 move || bucket_data.with(|(_, _, files)| files.len()),
                                 move |at| {
+                                    let click_state = row_copy_state.clone();
+                                    let key_state = row_copy_state.clone();
                                     view()
                                         .w_full()
                                         .h(px(DIFF_FILE_ROW_HEIGHT))
@@ -1507,8 +1561,78 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                         .items_center()
                                         .gap_2()
                                         .px_2()
+                                        .role(AccessibilityRole::Button)
+                                        .focusable(true)
+                                        .accessibility_state(move || {
+                                            let row_key = bucket_data.with(|(_, _, files)| {
+                                                files
+                                                    .get(at.index())
+                                                    .map(|r| format!("{}:{}", r.layer, r.path))
+                                            });
+                                            let is_sel = row_key.is_some()
+                                                && row_key == selected_file_key.get();
+                                            AccessibilityState {
+                                                selected: is_sel,
+                                                ..AccessibilityState::default()
+                                            }
+                                        })
+                                        .selected(|s| s.bg(surface_active))
+                                        .bg(move || {
+                                            let row_key = bucket_data.with(|(_, _, files)| {
+                                                files
+                                                    .get(at.index())
+                                                    .map(|r| format!("{}:{}", r.layer, r.path))
+                                            });
+                                            if row_key.is_some()
+                                                && row_key == selected_file_key.get()
+                                            {
+                                                surface_active()
+                                            } else {
+                                                theme().background
+                                            }
+                                        })
+                                        .focus_visible(|s| {
+                                            s.outline(px(2.0)).outline_color(move || theme().ring)
+                                        })
+                                        .hover(|s| s.bg(move || theme().accent))
                                         .border_b_1()
                                         .border_color(move || theme().border.opacity(0.45))
+                                        .on_focus(move || {
+                                            if let Some(key) =
+                                                bucket_data.with_untracked(|(_, _, files)| {
+                                                    files
+                                                        .get(at.index())
+                                                        .map(|r| format!("{}:{}", r.layer, r.path))
+                                                })
+                                            {
+                                                selected_file_key.set(Some(key));
+                                            }
+                                        })
+                                        .on_key_down(move |ev: &KeyEvent| {
+                                            if matches!(ev.key.as_str(), "Enter" | "Space" | " ") {
+                                                activate_diff_file_row(
+                                                    &bucket_data,
+                                                    selected_file_key,
+                                                    &key_state,
+                                                    Some(at.index()),
+                                                );
+                                            }
+                                        })
+                                        .on_press(move || {
+                                            if let Some((key, path)) =
+                                                bucket_data.with(|(_, _, files)| {
+                                                    files.get(at.index()).map(|r| {
+                                                        (
+                                                            format!("{}:{}", r.layer, r.path),
+                                                            r.path.clone(),
+                                                        )
+                                                    })
+                                                })
+                                            {
+                                                selected_file_key.set(Some(key));
+                                                copy_diff_path(&click_state, &path);
+                                            }
+                                        })
                                         .child(ui_badge(
                                             move || {
                                                 SharedString::from(bucket_data.with(
@@ -1651,6 +1775,7 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                                         )
                                 },
                             )
+                            .element_ref(&list_ref)
                             .flex_1()
                             .min_h(px(0.0))
                             .estimated_item_size(px(DIFF_FILE_ROW_HEIGHT))
@@ -1667,6 +1792,64 @@ fn file_changes_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement
                 .into_element()
         }),
     )
+}
+
+fn step_diff_file_selection(
+    bucket_data: &Memo<(usize, usize, SharedRef<Vec<diving_core::FileChange>>)>,
+    selected_file_key: Signal<Option<String>>,
+    list_ref: &ElementRef,
+    delta: isize,
+) {
+    bucket_data.with_untracked(|(_, _, files)| {
+        if files.is_empty() {
+            return;
+        }
+        let cur_pos = selected_file_key.get_untracked().and_then(|sel| {
+            files
+                .iter()
+                .position(|r| format!("{}:{}", r.layer, r.path) == sel)
+        });
+        let next_pos = match cur_pos {
+            Some(pos) => (pos as isize + delta).clamp(0, (files.len() - 1) as isize) as usize,
+            None if delta >= 0 => 0,
+            None => files.len() - 1,
+        };
+        if let Some(row) = files.get(next_pos) {
+            selected_file_key.set(Some(format!("{}:{}", row.layer, row.path)));
+            list_ref.scroll_to_index(next_pos as u32, Percentage(0.5), px(0.0), false);
+        }
+    });
+}
+
+fn activate_diff_file_row(
+    bucket_data: &Memo<(usize, usize, SharedRef<Vec<diving_core::FileChange>>)>,
+    selected_file_key: Signal<Option<String>>,
+    state: &AppState,
+    fallback_idx: Option<usize>,
+) {
+    let found = bucket_data.with_untracked(|(_, _, files)| {
+        if let Some(sel) = selected_file_key.get_untracked()
+            && let Some(row) = files
+                .iter()
+                .find(|r| format!("{}:{}", r.layer, r.path) == sel)
+        {
+            return Some((sel, row.path.clone()));
+        }
+        fallback_idx
+            .and_then(|idx| files.get(idx))
+            .map(|r| (format!("{}:{}", r.layer, r.path), r.path.clone()))
+    });
+    if let Some((key, path)) = found {
+        selected_file_key.set(Some(key));
+        copy_diff_path(state, &path);
+    }
+}
+
+fn copy_diff_path(state: &AppState, path: &str) {
+    let full = format!("/{path}");
+    drop(set_clipboard(full.clone()));
+    let copied = t(state.lang.get_untracked(), "common.copied");
+    state.show_status_notice(format!("{copied}: {full}"));
 }
 
 fn recommendations_diff_panel(state: AppState, diff: Arc<ImageDiff>) -> impl IntoElement {
@@ -1883,7 +2066,12 @@ mod tests {
             ..Default::default()
         };
         state.diff_result.set(Some(SharedRef::new(diff)));
-        diff_workspace(state)
+        let status = state.status_notice;
+        view()
+            .flex_1()
+            .flex_col()
+            .child(text(move || status.get().unwrap_or_default()))
+            .child(diff_workspace(state))
     }
 
     #[component]
@@ -1978,7 +2166,12 @@ mod tests {
             ..Default::default()
         };
         state.diff_result.set(Some(SharedRef::new(diff)));
-        diff_workspace(state)
+        let status = state.status_notice;
+        view()
+            .flex_1()
+            .flex_col()
+            .child(text(move || status.get().unwrap_or_default()))
+            .child(diff_workspace(state))
     }
 
     #[test]
@@ -2226,5 +2419,43 @@ mod tests {
         .expect("stale pre-filter truncation banner hidden when all 2 unexpected files fit");
         assert!(app.shows("/etc/app.conf"));
         assert!(app.shows("/etc/other.conf"));
+    }
+
+    #[test]
+    fn diff_file_rows_are_focusable_and_keyboard_operable() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(900.0)),
+            ..EngineConfig::new(windowed_root::<DiffVirtualScrollHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start diff keyboard row harness");
+        app.wait_for_within("/usr/share/item-000.dat", Duration::from_secs(3))
+            .expect("diff file row visible");
+
+        for _ in 0..32 {
+            app.press_key("tab").expect("tab into diff file rows");
+            if app.screen().selected("role:button[/item-000\\.dat/]") == Ok(true) {
+                break;
+            }
+        }
+        assert_eq!(
+            app.screen().selected("role:button[/item-000\\.dat/]"),
+            Ok(true)
+        );
+        app.press_key("down").expect("move down to item-001");
+        app.wait_until(
+            "item-001 selected via arrow key",
+            Duration::from_secs(2),
+            |s| s.selected("role:button[/item-001\\.dat/]") == Ok(true),
+        )
+        .expect("second diff file row selected");
+        app.press_key("space")
+            .expect("space copies active item-001 path");
+        app.wait_for_within("Copied: /usr/share/item-001.dat", Duration::from_secs(2))
+            .expect("copied toast shown for item-001");
     }
 }

@@ -3,8 +3,11 @@
 
 import {
   Fragment,
+  KeyboardEvent,
   memo,
+  MouseEvent,
   PointerEvent,
+  ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -14,15 +17,20 @@ import {
 } from "react";
 import {
   Alert,
+  Button,
   Card,
   Input,
+  InputRef,
   List,
+  message,
   Modal,
+  Popover,
   Select,
   Spin,
   Typography,
 } from "antd";
 import prettyBytes from "pretty-bytes";
+import { authFetch, getApiToken, parseLatestImageRef } from "./api";
 import i18nGet from "./i18n";
 import {
   buildFinalTree,
@@ -128,21 +136,77 @@ export const SizeMicroBar = ({
   );
 };
 
-const fileUrl = (api: string, layer: Layer, path: string) =>
-  `./api/${api}?digest=${encodeURIComponent(
-    layer.digest,
-  )}&mediaType=${encodeURIComponent(layer.mediaType)}&file=${encodeURIComponent(
-    path,
-  )}`;
+const fileUrl = (
+  api: string,
+  layer: Layer,
+  path: string,
+  imageName?: string,
+) => {
+  const params = new URLSearchParams({
+    digest: layer.digest,
+    mediaType: layer.mediaType,
+    file: path,
+  });
+  if (imageName) {
+    params.set("image", imageName);
+  }
+  return `./api/${api}?${params.toString()}`;
+};
+
+const triggerProtectedDownload = async (
+  e: MouseEvent<HTMLAnchorElement>,
+  url: string,
+  filename: string,
+  authRequired?: boolean,
+) => {
+  if (!getApiToken() && !authRequired) {
+    return;
+  }
+  e.preventDefault();
+  try {
+    const resp = await authFetch(url);
+    if (!resp.ok) {
+      if (resp.status === 401) {
+        return;
+      }
+      let msg = resp.statusText;
+      try {
+        const data = (await resp.json()) as { message?: string };
+        if (data?.message) msg = data.message;
+      } catch {
+        /* ignore non-JSON error */
+      }
+      message.error(msg || "Download failed", 6);
+      return;
+    }
+    const blob = await resp.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+  } catch (err) {
+    message.error((err as Error)?.message || "Download failed", 6);
+  }
+};
 
 /** Read-only look at one file of a layer: text, or a hex dump for binaries. */
 const FilePreviewModal = ({
   layer,
   row,
+  imageName,
+  apiTokenVersion = 0,
+  authRequired = false,
   onClose,
 }: {
   layer: Layer;
   row: FileTreeRow | null;
+  imageName?: string;
+  apiTokenVersion?: number;
+  authRequired?: boolean;
   onClose: () => void;
 }) => {
   const [preview, setPreview] = useState<FilePreview | null>(null);
@@ -155,7 +219,7 @@ const FilePreviewModal = ({
     setPreview(null);
     setError("");
     let cancelled = false;
-    fetch(fileUrl("file-preview", layer, row.key))
+    authFetch(fileUrl("file-preview", layer, row.key, imageName))
       .then(async (resp) => {
         const data = await resp.json();
         if (!resp.ok) {
@@ -168,7 +232,7 @@ const FilePreviewModal = ({
     return () => {
       cancelled = true;
     };
-  }, [layer, row]);
+  }, [layer, row, imageName, apiTokenVersion]);
 
   let notice = "";
   if (preview?.binary) {
@@ -176,6 +240,7 @@ const FilePreviewModal = ({
   } else if (preview?.truncated) {
     notice = i18nGet("previewTruncated");
   }
+  const downloadHref = row ? fileUrl("file", layer, row.key, imageName) : "#";
   return (
     <Modal
       className="filePreview"
@@ -192,7 +257,13 @@ const FilePreviewModal = ({
             {row.uid}:{row.gid}
           </span>
           <span>{prettyBytes(row.size)}</span>
-          <a href={fileUrl("file", layer, row.key)}>
+          <a
+            href={downloadHref}
+            download={row.name}
+            onClick={(e) =>
+              triggerProtectedDownload(e, downloadHref, row.name, authRequired)
+            }
+          >
             {getDownloadIcon()} {i18nGet("previewDownload")}
           </a>
         </p>
@@ -210,12 +281,20 @@ export const VirtualFileTree = ({
   rows,
   layer,
   onToggleExpand,
+  resetKey,
+  imageName,
+  apiTokenVersion = 0,
+  authRequired = false,
   showMetaColumns = false,
   emptyMessage,
 }: {
   rows: FileTreeRow[];
   layer: Layer;
   onToggleExpand: (key: string) => void;
+  resetKey: string;
+  imageName?: string;
+  apiTokenVersion?: number;
+  authRequired?: boolean;
   showMetaColumns?: boolean;
   emptyMessage?: string;
   isDark?: boolean;
@@ -223,6 +302,8 @@ export const VirtualFileTree = ({
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [previewRow, setPreviewRow] = useState<FileTreeRow | null>(null);
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  const pendingFocusKeyRef = useRef<string | null>(null);
   const fluidMaxHeight = useFluidTreeHeight();
 
   const onScroll = useCallback(() => {
@@ -236,7 +317,146 @@ export const VirtualFileTree = ({
       scrollerRef.current.scrollTop = 0;
     }
     setScrollTop(0);
-  }, [rows]);
+    setFocusedKey(null);
+  }, [resetKey]);
+
+  const focusedIndex = useMemo(() => {
+    if (rows.length === 0) return -1;
+    if (focusedKey) {
+      const idx = rows.findIndex((r) => r.key === focusedKey);
+      if (idx >= 0) return idx;
+    }
+    return 0;
+  }, [rows, focusedKey]);
+
+  const contentHeight = Math.max(
+    rows.length * FILE_TREE_ROW_HEIGHT,
+    FILE_TREE_ROW_HEIGHT,
+  );
+  const viewportHeight = Math.min(contentHeight, fluidMaxHeight);
+
+  useLayoutEffect(() => {
+    const maxScroll = Math.max(0, contentHeight - viewportHeight);
+    if (scrollTop > maxScroll) {
+      if (scrollerRef.current) {
+        scrollerRef.current.scrollTop = maxScroll;
+      }
+      setScrollTop(maxScroll);
+    }
+  }, [contentHeight, viewportHeight, scrollTop]);
+
+  useLayoutEffect(() => {
+    const pending = pendingFocusKeyRef.current;
+    if (!pending || !scrollerRef.current) {
+      return;
+    }
+    const items = scrollerRef.current.querySelectorAll<HTMLLIElement>(
+      '[role="treeitem"]',
+    );
+    const target = Array.from(items).find(
+      (el) => el.dataset.treeKey === pending,
+    );
+    if (target) {
+      pendingFocusKeyRef.current = null;
+      target.focus({ preventScroll: true });
+    }
+  });
+
+  const focusRowAt = useCallback(
+    (idx: number) => {
+      if (rows.length === 0) return;
+      const clamped = Math.max(0, Math.min(rows.length - 1, idx));
+      const targetRow = rows[clamped];
+      setFocusedKey(targetRow.key);
+      pendingFocusKeyRef.current = targetRow.key;
+      const el = scrollerRef.current;
+      if (el) {
+        const rowTop = clamped * FILE_TREE_ROW_HEIGHT;
+        const rowBottom = rowTop + FILE_TREE_ROW_HEIGHT;
+        if (rowTop < el.scrollTop) {
+          el.scrollTop = rowTop;
+          setScrollTop(rowTop);
+        } else if (rowBottom > el.scrollTop + viewportHeight) {
+          const nextScroll = Math.max(0, rowBottom - viewportHeight);
+          el.scrollTop = nextScroll;
+          setScrollTop(nextScroll);
+        }
+      }
+    },
+    [rows, viewportHeight],
+  );
+
+  const onTreeKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
+    if (rows.length === 0 || focusedIndex < 0) return;
+    const row = rows[focusedIndex];
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      focusRowAt(focusedIndex + 1);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      focusRowAt(focusedIndex - 1);
+      return;
+    }
+    if (e.key === "Home") {
+      e.preventDefault();
+      e.stopPropagation();
+      focusRowAt(0);
+      return;
+    }
+    if (e.key === "End") {
+      e.preventDefault();
+      e.stopPropagation();
+      focusRowAt(rows.length - 1);
+      return;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (row.isDir && !row.expanded) {
+        onToggleExpand(row.key);
+      } else if (
+        row.isDir &&
+        row.expanded &&
+        focusedIndex + 1 < rows.length &&
+        rows[focusedIndex + 1].depth > row.depth
+      ) {
+        focusRowAt(focusedIndex + 1);
+      }
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (row.isDir && row.expanded) {
+        onToggleExpand(row.key);
+      } else if (row.depth > 0) {
+        for (let i = focusedIndex - 1; i >= 0; i--) {
+          if (rows[i].depth < row.depth) {
+            focusRowAt(i);
+            break;
+          }
+        }
+      }
+      return;
+    }
+    if (
+      (e.key === "Enter" || e.key === " ") &&
+      e.target instanceof HTMLElement &&
+      e.target.getAttribute("role") === "treeitem"
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (row.isDir) {
+        onToggleExpand(row.key);
+      } else if (row.size > 0 && row.op !== opRemoved) {
+        setPreviewRow(row);
+      }
+    }
+  };
 
   const maxFileSize = useMemo(() => {
     let max = 0;
@@ -259,11 +479,6 @@ export const VirtualFileTree = ({
     );
   }
 
-  const contentHeight = Math.max(
-    rows.length * FILE_TREE_ROW_HEIGHT,
-    FILE_TREE_ROW_HEIGHT,
-  );
-  const viewportHeight = Math.min(contentHeight, fluidMaxHeight);
   const start = Math.max(
     0,
     Math.floor(scrollTop / FILE_TREE_ROW_HEIGHT) - FILE_TREE_OVERSCAN,
@@ -284,6 +499,9 @@ export const VirtualFileTree = ({
     >
       <ul
         className="fileTree virtualFileTree"
+        role="tree"
+        aria-label={i18nGet("fileTreeLabel")}
+        onKeyDown={onTreeKeyDown}
         style={{
           height: contentHeight,
           position: "relative",
@@ -305,9 +523,19 @@ export const VirtualFileTree = ({
           if (row.link) {
             name = `${name} → ${row.link}`;
           }
+          const isFocused = index === focusedIndex;
+          const dlHref = fileUrl("file", layer, row.key, imageName);
           return (
             <li
               key={row.key}
+              role="treeitem"
+              data-tree-key={row.key}
+              aria-level={row.depth + 1}
+              aria-expanded={row.isDir ? row.expanded : undefined}
+              aria-selected={isFocused}
+              tabIndex={isFocused ? 0 : -1}
+              onFocus={() => setFocusedKey(row.key)}
+              onClick={() => setFocusedKey(row.key)}
               className={`virtualFileTreeRow ${showMetaColumns ? "withMeta" : ""}`}
               style={{
                 position: "absolute",
@@ -353,38 +581,61 @@ export const VirtualFileTree = ({
                     ))}
                   </span>
                 )}
-                {row.isDir && (
-                  <a
-                    href="#"
+                {row.isDir ? (
+                  <button
+                    type="button"
                     className="icon"
+                    tabIndex={-1}
+                    aria-label={
+                      row.expanded
+                        ? i18nGet("collapseDirLabel")
+                        : i18nGet("expandDirLabel")
+                    }
                     onClick={(e) => {
-                      e.preventDefault();
+                      e.stopPropagation();
+                      setFocusedKey(row.key);
                       onToggleExpand(row.key);
                     }}
                   >
                     {row.expanded ? minusOutlined : plusOutlined}
-                  </a>
+                  </button>
+                ) : (
+                  <span className="iconSpacer" aria-hidden="true" />
                 )}
                 <span className="fileNameText" title={row.key}>
                   {name}
                 </span>
                 {!row.isDir && row.size > 0 && row.op !== opRemoved && (
                   <span className="rowActions">
-                    <a
-                      href="#"
+                    <button
+                      type="button"
                       className="download"
                       title={i18nGet("previewButton")}
+                      aria-label={`${i18nGet("previewButton")} ${row.name}`}
                       onClick={(e) => {
-                        e.preventDefault();
+                        e.stopPropagation();
+                        setFocusedKey(row.key);
                         setPreviewRow(row);
                       }}
                     >
                       {getPreviewIcon()}
-                    </a>
+                    </button>
                     <a
                       className="download"
                       title={i18nGet("previewDownload")}
-                      href={fileUrl("file", layer, row.key)}
+                      aria-label={`${i18nGet("previewDownload")} ${row.name}`}
+                      href={dlHref}
+                      download={row.name}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFocusedKey(row.key);
+                        triggerProtectedDownload(
+                          e,
+                          dlHref,
+                          row.name,
+                          authRequired,
+                        );
+                      }}
                     >
                       {getDownloadIcon()}
                     </a>
@@ -398,6 +649,9 @@ export const VirtualFileTree = ({
       <FilePreviewModal
         layer={layer}
         row={previewRow}
+        imageName={imageName}
+        apiTokenVersion={apiTokenVersion}
+        authRequired={authRequired}
         onClose={() => setPreviewRow(null)}
       />
     </div>
@@ -409,6 +663,7 @@ export const SearchBar = ({
   platforms,
   defaultImage,
   loading,
+  autoFocus = false,
   onArchChange,
   onSearch,
   size = "large",
@@ -418,10 +673,18 @@ export const SearchBar = ({
   platforms?: string[];
   defaultImage: string;
   loading: boolean;
+  autoFocus?: boolean;
   onArchChange: (arch: string) => void;
   onSearch: (image: string) => void;
   size?: "large" | "middle";
 }) => {
+  const [value, setValue] = useState(defaultImage);
+  const searchRef = useRef<InputRef>(null);
+
+  useEffect(() => {
+    setValue(defaultImage);
+  }, [defaultImage]);
+
   const choices =
     platforms && platforms.length > 0 ? platforms : ["amd64", "arm64"];
   const selectBefore = (
@@ -441,17 +704,33 @@ export const SearchBar = ({
   );
   return (
     <Search
+      ref={searchRef}
       addonBefore={selectBefore}
-      defaultValue={defaultImage}
-      key={defaultImage}
-      autoFocus={true}
+      value={value}
+      autoFocus={autoFocus}
       loading={loading}
       placeholder={i18nGet("imageInputPlaceholder")}
       allowClear
       enterButton={i18nGet("analyzeButton")}
       size={size}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          searchRef.current?.blur();
+        }
+      }}
       // antd also passes the event and the trigger source.
-      onSearch={(value) => onSearch(value)}
+      onSearch={(nextValue, _event, info) => {
+        if (info?.source === "clear") {
+          setValue("");
+          return;
+        }
+        searchRef.current?.blur();
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        onSearch(nextValue);
+      }}
     />
   );
 };
@@ -738,14 +1017,43 @@ export const DuplicateGroupsCard = memo(
   },
 );
 
+const renderInlineCode = (text: string): ReactNode =>
+  text.split(/(`[^`]+`)/g).map((part, idx) =>
+    part.startsWith("`") && part.endsWith("`") && part.length >= 2 ? (
+      <code key={idx}>{part.slice(1, -1)}</code>
+    ) : (
+      part
+    ),
+  );
+
 export const BigModifiedFilesCard = memo(
-  ({ files }: { files: ModifiedFile[]; isDark?: boolean }) => {
+  ({
+    files,
+    layers,
+  }: {
+    files: ModifiedFile[];
+    layers: Layer[];
+    isDark?: boolean;
+  }) => {
+    const layerNumberByDigest = useMemo(() => {
+      const map = new Map<string, number>();
+      layers.forEach((l, i) => {
+        if (l.digest && !map.has(l.digest)) {
+          map.set(l.digest, i + 1);
+        }
+      });
+      return map;
+    }, [layers]);
+
     if (files.length === 0) {
       return null;
     }
     const arr = files.slice(0).sort((a, b) => b.size - a.size);
     return (
-      <Card className="panel flushPanel" title={i18nGet("modifiedAddedLargeFileTitle")}>
+      <Card
+        className="panel flushPanel"
+        title={i18nGet("modifiedAddedLargeFileTitle")}
+      >
         <ul className="dataTable cols-bigmod">
           <li className="head">
             <span>{i18nGet("layerLabel")}</span>
@@ -753,14 +1061,16 @@ export const BigModifiedFilesCard = memo(
             <span>{i18nGet("pathLabel")}</span>
           </li>
           {arr.map((item) => {
-            let { digest } = item;
-            if (digest) {
-              digest = digest.replace("sha256:", "").substring(0, 8);
-            }
+            const layerNo = item.digest
+              ? layerNumberByDigest.get(item.digest)
+              : undefined;
+            const fallback = item.digest
+              ? item.digest.replace("sha256:", "").substring(0, 8).toUpperCase()
+              : "—";
             return (
-              <li key={item.path}>
-                <span className="monoCell">
-                  {(digest || "—").toUpperCase()}
+              <li key={`${item.digest}-${item.path}`}>
+                <span className="monoCell" title={item.digest || undefined}>
+                  {layerNo !== undefined ? String(layerNo) : fallback}
                 </span>
                 <span className="monoCell">{prettyBytes(item.size)}</span>
                 <span className="monoCell">/{item.path}</span>
@@ -790,7 +1100,10 @@ export const RecommendationsCard = memo(
       info: "var(--info)",
     };
     return (
-      <Card className="panel flushPanel span2" title={i18nGet("recommendationsTitle")}>
+      <Card
+        className="panel flushPanel span2"
+        title={i18nGet("recommendationsTitle")}
+      >
         <ul className="recommendationList">
           {recommendations.map((r, idx) => {
             const color = severityColor[r.severity] || "var(--info)";
@@ -802,7 +1115,7 @@ export const RecommendationsCard = memo(
                     style={{ backgroundColor: color }}
                   >
                     {r.severity.toUpperCase()} · {r.category}
-                    {r.heuristic ? " · heuristic" : ""}
+                    {r.heuristic ? ` · ${i18nGet("recHeuristicLabel")}` : ""}
                   </span>
                   <span className="recommendationTitle">{r.title}</span>
                   {r.estSavedBytes > 0 && (
@@ -814,7 +1127,8 @@ export const RecommendationsCard = memo(
                 <div className="recommendationDetail">{r.detail}</div>
                 {r.dockerfileHint && (
                   <div className="recommendationHint">
-                    <b>{i18nGet("recFixLabel")}:</b> {r.dockerfileHint}
+                    <b>{i18nGet("recFixLabel")}:</b>{" "}
+                    {renderInlineCode(r.dockerfileHint)}
                   </div>
                 )}
                 {r.paths && r.paths.length > 0 && (
@@ -899,44 +1213,177 @@ export const DockerfileCard = memo(
   },
 );
 
-export const LatestImagesList = memo(({ images }: { images: string[] }) => {
-  if (images.length === 0) {
-    return null;
-  }
-  return (
-    <List
-      className="analyzeImages"
-      bordered={true}
-      size="small"
-      header={<div>{i18nGet("latestAnalyzeImagesTitle")}</div>}
-      dataSource={images}
-      renderItem={(item) => (
-        <List.Item>
-          <Typography.Text>
-            <a
-              href="#"
-              onClick={(e) => {
-                const arr = item.split("?");
-                const image = arr[0];
-                let arch = "amd64";
-                if (arr[1]) {
-                  const result = /arch=(\S+)/.exec(arr[1]);
-                  if (result && result.length === 2) {
-                    arch = result[1];
+export const LatestImagesList = memo(
+  ({
+    images,
+    onSelect,
+  }: {
+    images: string[];
+    onSelect?: (image: string, arch: string) => void;
+  }) => {
+    if (images.length === 0) {
+      return null;
+    }
+    return (
+      <section className="landingRecent" aria-label={i18nGet("latestAnalyzeImagesTitle")}>
+        <div className="landingRecentHeader">
+          {i18nGet("latestAnalyzeImagesTitle")}
+        </div>
+        <div className="landingRecentChips">
+          {images.map((item) => {
+            const parsed = parseLatestImageRef(item);
+            return (
+              <a
+                key={item}
+                className="recentImageLink"
+                href={parsed.href}
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+                    return;
                   }
-                }
-                window.location.href = `/?image=${image}&arch=${arch}`;
-                e.preventDefault();
-              }}
-            >
-              {item}
-            </a>
-          </Typography.Text>
-        </List.Item>
-      )}
-    />
+                  if (onSelect) {
+                    e.preventDefault();
+                    onSelect(parsed.image, parsed.arch);
+                  }
+                }}
+              >
+                {item}
+              </a>
+            );
+          })}
+        </div>
+      </section>
+    );
+  },
+);
+
+export const RecentImagesPopover = memo(
+  ({
+    images,
+    onSelect,
+  }: {
+    images: string[];
+    onSelect: (image: string, arch: string) => void;
+  }) => {
+    const [open, setOpen] = useState(false);
+    if (images.length === 0) {
+      return null;
+    }
+    const content = (
+      <List
+        className="recentPopoverList"
+        size="small"
+        dataSource={images}
+        renderItem={(item) => {
+          const parsed = parseLatestImageRef(item);
+          return (
+            <List.Item>
+              <a
+                href={parsed.href}
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+                    return;
+                  }
+                  e.preventDefault();
+                  setOpen(false);
+                  onSelect(parsed.image, parsed.arch);
+                }}
+              >
+                {item}
+              </a>
+            </List.Item>
+          );
+        }}
+      />
+    );
+    return (
+      <Popover
+        content={content}
+        title={i18nGet("latestAnalyzeImagesTitle")}
+        trigger="click"
+        placement="bottomRight"
+        open={open}
+        onOpenChange={setOpen}
+      >
+        <Button size="small">{i18nGet("recentButton")}</Button>
+      </Popover>
+    );
+  },
+);
+
+export const ApiTokenModal = ({
+  open,
+  rejected,
+  hasToken,
+  onSave,
+  onClear,
+  onCancel,
+}: {
+  open: boolean;
+  rejected: boolean;
+  hasToken: boolean;
+  onSave: (token: string) => void;
+  onClear: () => void;
+  onCancel: () => void;
+}) => {
+  const [tokenInput, setTokenInput] = useState(() => getApiToken());
+
+  useEffect(() => {
+    if (open) {
+      setTokenInput(getApiToken());
+    }
+  }, [open]);
+
+  const submit = () => {
+    const trimmed = tokenInput.trim();
+    if (!trimmed) return;
+    onSave(trimmed);
+  };
+
+  return (
+    <Modal
+      open={open}
+      title={i18nGet("apiTokenTitle")}
+      onCancel={onCancel}
+      destroyOnHidden
+      footer={[
+        ...(hasToken
+          ? [
+              <Button key="clear" danger onClick={onClear}>
+                {i18nGet("apiTokenClear")}
+              </Button>,
+            ]
+          : []),
+        <Button key="cancel" onClick={onCancel}>
+          {i18nGet("apiTokenCancel")}
+        </Button>,
+        <Button
+          key="save"
+          type="primary"
+          disabled={!tokenInput.trim()}
+          onClick={submit}
+        >
+          {i18nGet("apiTokenSave")}
+        </Button>,
+      ]}
+    >
+      <div className="apiTokenModalBody">
+        <Alert
+          type={rejected ? "error" : "info"}
+          showIcon
+          title={i18nGet(rejected ? "apiTokenInvalid" : "apiTokenIntro")}
+        />
+        <Input.Password
+          autoFocus
+          value={tokenInput}
+          placeholder={i18nGet("apiTokenPlaceholder")}
+          onChange={(e) => setTokenInput(e.target.value)}
+          onPressEnter={submit}
+        />
+      </div>
+    </Modal>
   );
-});
+};
 
 const MCP_TOOLS = [
   ["analyze_image", "mcpToolAnalyzeImage"],
@@ -1351,19 +1798,17 @@ export const ImageTreemap = memo(
         className="panel span2"
         title={i18nGet("treemapTitle")}
         extra={
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              setShowTable(!showTable);
-            }}
+          <button
+            type="button"
+            className="panelLinkBtn"
+            onClick={() => setShowTable(!showTable)}
           >
             {i18nGet(showTable ? "treemapShowMap" : "treemapShowTable")}
-          </a>
+          </button>
         }
       >
         <div className="treemapBar">
-          <nav className="treemapCrumbs" aria-label="path">
+          <nav className="treemapCrumbs" aria-label={i18nGet("pathLabel")}>
             <button type="button" onClick={() => setPath([])}>
               /
             </button>
@@ -1403,15 +1848,13 @@ export const ImageTreemap = memo(
                 <tr key={tile.key}>
                   <td>
                     {tile.node?.children ? (
-                      <a
-                        href="#"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          open(tile);
-                        }}
+                      <button
+                        type="button"
+                        className="treemapTableLink"
+                        onClick={() => open(tile)}
                       >
                         {displayName(tile)}
-                      </a>
+                      </button>
                     ) : (
                       tile.name
                     )}
@@ -1503,62 +1946,64 @@ export const KpiStrip = memo(
     const tone = scoreTone(scoreOnly);
     return (
       <section className="kpiStrip" aria-label={i18nGet("imageSummaryTitle")}>
-        <div className="kpiItem">
-          <span className="kpiLabel">{i18nGet("imageScoreLabel")}</span>
-          <span className={`kpiValue kpiScore ${tone}`.trim()}>
-            {desc.score}
-          </span>
+        <div className="kpiMetrics">
+          <div className="kpiItem">
+            <span className="kpiLabel">{i18nGet("imageScoreLabel")}</span>
+            <span className={`kpiValue kpiScore ${tone}`.trim()}>
+              {desc.score}
+            </span>
+          </div>
+          <span className="kpiDivider" aria-hidden="true" />
+          <div className="kpiItem">
+            <span className="kpiLabel">{i18nGet("imageSizeLabel")}</span>
+            <span className="kpiValue mono">{desc.size}</span>
+          </div>
+          <span className="kpiDivider" aria-hidden="true" />
+          <div className="kpiItem">
+            <span className="kpiLabel">{i18nGet("wastedSizeLabel")}</span>
+            <span
+              className={`kpiValue mono ${desc.wastedSize !== "0 B" ? "warn" : ""}`}
+            >
+              {desc.wastedSize}
+            </span>
+          </div>
+          <span className="kpiDivider" aria-hidden="true" />
+          <div className="kpiItem">
+            <span className="kpiLabel">{i18nGet("osArchLabel")}</span>
+            <span className="kpiValue mono">{desc.osArch}</span>
+          </div>
+          {desc.baseOs && (
+            <>
+              <span className="kpiDivider" aria-hidden="true" />
+              <div className="kpiItem">
+                <span className="kpiLabel">{i18nGet("baseOsLabel")}</span>
+                <span className="kpiValue">{desc.baseOs}</span>
+              </div>
+            </>
+          )}
+          {desc.runUser && (
+            <>
+              <span className="kpiDivider" aria-hidden="true" />
+              <div className="kpiItem">
+                <span className="kpiLabel">{i18nGet("runAsUserLabel")}</span>
+                <span className="kpiValue mono">{desc.runUser}</span>
+              </div>
+            </>
+          )}
+          {desc.runtimeLibc && (
+            <>
+              <span className="kpiDivider" aria-hidden="true" />
+              <div className="kpiItem">
+                <span className="kpiLabel">{i18nGet("runtimeLibcLabel")}</span>
+                <span
+                  className={`kpiValue ${desc.runtimeLibcIssue ? "danger" : ""}`}
+                >
+                  {desc.runtimeLibc}
+                </span>
+              </div>
+            </>
+          )}
         </div>
-        <span className="kpiDivider" aria-hidden="true" />
-        <div className="kpiItem">
-          <span className="kpiLabel">{i18nGet("imageSizeLabel")}</span>
-          <span className="kpiValue mono">{desc.size}</span>
-        </div>
-        <span className="kpiDivider" aria-hidden="true" />
-        <div className="kpiItem">
-          <span className="kpiLabel">{i18nGet("wastedSizeLabel")}</span>
-          <span
-            className={`kpiValue mono ${desc.wastedSize !== "0 B" ? "warn" : ""}`}
-          >
-            {desc.wastedSize}
-          </span>
-        </div>
-        <span className="kpiDivider" aria-hidden="true" />
-        <div className="kpiItem">
-          <span className="kpiLabel">{i18nGet("osArchLabel")}</span>
-          <span className="kpiValue mono">{desc.osArch}</span>
-        </div>
-        {desc.baseOs && (
-          <>
-            <span className="kpiDivider" aria-hidden="true" />
-            <div className="kpiItem">
-              <span className="kpiLabel">{i18nGet("baseOsLabel")}</span>
-              <span className="kpiValue">{desc.baseOs}</span>
-            </div>
-          </>
-        )}
-        {desc.runUser && (
-          <>
-            <span className="kpiDivider" aria-hidden="true" />
-            <div className="kpiItem">
-              <span className="kpiLabel">{i18nGet("runAsUserLabel")}</span>
-              <span className="kpiValue mono">{desc.runUser}</span>
-            </div>
-          </>
-        )}
-        {desc.runtimeLibc && (
-          <>
-            <span className="kpiDivider" aria-hidden="true" />
-            <div className="kpiItem">
-              <span className="kpiLabel">{i18nGet("runtimeLibcLabel")}</span>
-              <span
-                className={`kpiValue ${desc.runtimeLibcIssue ? "danger" : ""}`}
-              >
-                {desc.runtimeLibc}
-              </span>
-            </div>
-          </>
-        )}
         {tags && tags.length > 0 && (
           <div className="kpiTags">
             {tags.map((t) => (
@@ -1764,7 +2209,9 @@ export const CommandInspector = memo(
     const codeLines = useMemo(() => {
       const lines: string[] = [];
       if (parsed.envArgs.length > 0) {
-        lines.push(`# BuildKit args: ${parsed.envArgs.join(" ")}`);
+        lines.push(
+          `# ${i18nGet("buildkitArgsPrefix")}: ${parsed.envArgs.join(" ")}`,
+        );
       }
       if (parsed.formatted) {
         lines.push(...parsed.formatted.split("\n"));

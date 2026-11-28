@@ -1,14 +1,9 @@
 use super::image_ref::{host_arch, platform_matches};
-use super::layer::hash_files_from_layer;
-use crate::store::CacheStore;
-use serde::{Deserialize, Serialize};
+use super::layer::normalize_tar_path;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::BufReader;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 pub static MEDIA_TYPE_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 pub static MEDIA_TYPE_DOCKER_SCHEMA2_MANIFEST: &str =
@@ -169,16 +164,26 @@ pub struct ImageExtraInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ImageConfig {
     pub architecture: String,
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub created: String,
+    #[serde(default)]
     pub history: Vec<ImageHistory>,
     pub os: String,
     pub rootfs: ImageRootfs,
     pub config: Option<ImageExtraInfo>,
 }
 
+fn null_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageHistory {
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub created: String,
     #[serde(rename = "created_by")]
     pub created_by: Option<String>,
@@ -219,37 +224,68 @@ pub struct FileTreeItem {
     pub children: Vec<FileTreeItem>,
 }
 
-fn add_file(items: &mut Vec<FileTreeItem>, name_list: &[&str], item: FileTreeItem) {
-    if name_list.is_empty() {
-        items.push(item);
+struct TreeNode<'a> {
+    item: FileTreeItem,
+    children: Vec<TreeNode<'a>>,
+    child_index: HashMap<&'a str, usize>,
+}
+
+impl<'a> TreeNode<'a> {
+    fn into_file_tree_item(self) -> FileTreeItem {
+        let mut item = self.item;
+        item.children = self
+            .children
+            .into_iter()
+            .map(TreeNode::into_file_tree_item)
+            .collect();
+        item
+    }
+}
+
+fn insert_tree_node<'a>(
+    nodes: &mut Vec<TreeNode<'a>>,
+    index: &mut HashMap<&'a str, usize>,
+    segments: &[&'a str],
+    leaf: FileTreeItem,
+) {
+    let Some((&name, rest)) = segments.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        let i = nodes.len();
+        index.entry(name).or_insert(i);
+        nodes.push(TreeNode {
+            item: leaf,
+            children: Vec::new(),
+            child_index: HashMap::new(),
+        });
         return;
     }
-    let name = name_list[0];
-    let found_index = match items.last() {
-        Some(last) if last.name == name => Some(items.len() - 1),
-        _ => items.iter().position(|dir| dir.name == name),
-    };
-    let index = match found_index {
-        Some(i) => {
-            items[i].size += item.size;
-            i
-        }
-        None => {
-            let op = if item.op == Op::Modified {
-                Op::Modified
-            } else {
-                Op::None
-            };
-            items.push(FileTreeItem {
+    let idx = if let Some(&i) = index.get(name) {
+        nodes[i].item.size += leaf.size;
+        i
+    } else {
+        let op = if leaf.op == Op::Modified {
+            Op::Modified
+        } else {
+            Op::None
+        };
+        let i = nodes.len();
+        index.insert(name, i);
+        nodes.push(TreeNode {
+            item: FileTreeItem {
                 name: name.to_string(),
-                size: item.size,
+                size: leaf.size,
                 op,
                 ..Default::default()
-            });
-            items.len() - 1
-        }
+            },
+            children: Vec::new(),
+            child_index: HashMap::new(),
+        });
+        i
     };
-    add_file(&mut items[index].children, &name_list[1..], item);
+    let child = &mut nodes[idx];
+    insert_tree_node(&mut child.children, &mut child.child_index, rest, leaf);
 }
 
 /// One file as it ends up in the running container: the topmost copy.
@@ -328,38 +364,39 @@ pub fn convert_files_to_file_tree(
     files: &[ImageFileInfo],
     modified_paths: &HashSet<String>,
 ) -> Vec<FileTreeItem> {
-    let mut file_tree: Vec<FileTreeItem> = vec![];
+    let mut nodes: Vec<TreeNode<'_>> = vec![];
+    let mut root_index: HashMap<&str, usize> = HashMap::new();
     let mut arr: Vec<&str> = Vec::with_capacity(8);
     for file in files.iter() {
+        let clean = normalize_tar_path(&file.path);
         arr.clear();
-        arr.extend(file.path.split('/'));
+        arr.extend(clean.split('/').filter(|s| !s.is_empty() && *s != "."));
         if arr.is_empty() {
             continue;
         }
         let mut op = Op::None;
         if file.is_whiteout.is_some() {
             op = Op::Removed;
-        } else if modified_paths.contains(file.path.as_str()) {
+        } else if modified_paths.contains(clean) || modified_paths.contains(file.path.as_str()) {
             op = Op::Modified;
         }
 
-        let size = arr.len();
-        add_file(
-            &mut file_tree,
-            &arr[0..size - 1],
-            FileTreeItem {
-                name: arr[size - 1].to_string(),
-                link: file.link.clone(),
-                size: file.size,
-                mode: file.mode.clone(),
-                uid: file.uid,
-                gid: file.gid,
-                op,
-                ..Default::default()
-            },
-        )
+        let leaf = FileTreeItem {
+            name: arr[arr.len() - 1].to_string(),
+            link: file.link.clone(),
+            size: file.size,
+            mode: file.mode.clone(),
+            uid: file.uid,
+            gid: file.gid,
+            op,
+            ..Default::default()
+        };
+        insert_tree_node(&mut nodes, &mut root_index, &arr, leaf);
     }
-    file_tree
+    nodes
+        .into_iter()
+        .map(TreeNode::into_file_tree_item)
+        .collect()
 }
 
 // ---- Cross-layer duplicate file detection ---------------------------
@@ -416,18 +453,70 @@ fn walk_for_dup(items: &[FileTreeItem], prefix: &str, layer_idx: usize, out: &mu
     }
 }
 
-pub(crate) fn detect_cross_layer_duplicates(
-    layers: &[ImageLayer],
+pub(crate) struct DupCandidatePlan {
+    leaves: Vec<DupLeaf>,
+    candidate_idxs: Vec<usize>,
+    pub(crate) by_layer: HashMap<usize, HashSet<String>>,
+}
+
+impl DupCandidatePlan {
+    pub(crate) fn finish(self, hashes: &HashMap<(usize, String), String>) -> Vec<DuplicateGroup> {
+        let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();
+        for &i in &self.candidate_idxs {
+            if let Some(h) = hashes.get(&(self.leaves[i].layer_idx, self.leaves[i].path.clone())) {
+                by_hash.entry(h.clone()).or_default().push(i);
+            }
+        }
+        let mut groups: Vec<DuplicateGroup> = Vec::new();
+        for (hash, idxs) in by_hash {
+            if idxs.len() < 2 {
+                continue;
+            }
+            let mut layer_set = HashSet::new();
+            for &i in &idxs {
+                layer_set.insert(self.leaves[i].layer_idx);
+            }
+            if layer_set.len() < 2 {
+                continue;
+            }
+            let size = self.leaves[idxs[0]].size;
+            let count = idxs.len();
+            let total_wasted = ((count as u64).saturating_sub(1)) * size;
+            let mut paths: Vec<DuplicatePath> = idxs
+                .iter()
+                .map(|&i| DuplicatePath {
+                    layer_index: self.leaves[i].layer_idx,
+                    path: self.leaves[i].path.clone(),
+                })
+                .collect();
+            paths.sort_by(|a, b| {
+                a.layer_index
+                    .cmp(&b.layer_index)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+            paths.truncate(DUP_PATHS_SAMPLE);
+            groups.push(DuplicateGroup {
+                hash,
+                size,
+                count,
+                total_wasted,
+                paths,
+            });
+        }
+        groups.sort_by_key(|g| Reverse(g.total_wasted));
+        groups
+    }
+}
+
+pub(crate) fn plan_cross_layer_duplicates(
     file_tree_list: &[Vec<FileTreeItem>],
-    store: &CacheStore,
-    layer_concurrency: usize,
-) -> Vec<DuplicateGroup> {
+) -> Option<DupCandidatePlan> {
     let mut leaves: Vec<DupLeaf> = Vec::new();
     for (idx, tree) in file_tree_list.iter().enumerate() {
         walk_for_dup(tree, "", idx, &mut leaves);
     }
     if leaves.len() < 2 {
-        return vec![];
+        return None;
     }
 
     let mut by_ns: HashMap<(String, u64), Vec<usize>> = HashMap::new();
@@ -452,7 +541,7 @@ pub(crate) fn detect_cross_layer_duplicates(
         candidate_idxs.extend(idxs);
     }
     if candidate_idxs.is_empty() {
-        return vec![];
+        return None;
     }
     candidate_idxs.sort_by_key(|&i| Reverse(leaves[i].size));
     candidate_idxs.truncate(MAX_DUP_CANDIDATES);
@@ -465,77 +554,11 @@ pub(crate) fn detect_cross_layer_duplicates(
             .insert(leaves[i].path.clone());
     }
 
-    let jobs: Vec<(usize, HashSet<String>)> = by_layer.into_iter().collect();
-    let workers = layer_concurrency.max(1).min(jobs.len());
-    let next_job = AtomicUsize::new(0);
-    let hash_jobs = || {
-        let mut hashed: Vec<((usize, String), String)> = Vec::new();
-        while let Some((layer_idx, paths)) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
-            let Some(layer) = layers.get(*layer_idx) else {
-                continue;
-            };
-            let Ok(file) = File::open(store.blob_path(&layer.digest)) else {
-                continue;
-            };
-            let reader = BufReader::new(file);
-            if let Ok(map) = hash_files_from_layer(reader, &layer.media_type, paths) {
-                hashed.extend(map.into_iter().map(|(p, h)| ((*layer_idx, p), h)));
-            }
-        }
-        hashed
-    };
-    let hashes: HashMap<(usize, String), String> = thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(hash_jobs)).collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().unwrap_or_default())
-            .collect()
-    });
-
-    let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();
-    for &i in &candidate_idxs {
-        if let Some(h) = hashes.get(&(leaves[i].layer_idx, leaves[i].path.clone())) {
-            by_hash.entry(h.clone()).or_default().push(i);
-        }
-    }
-    let mut groups: Vec<DuplicateGroup> = Vec::new();
-    for (hash, idxs) in by_hash {
-        if idxs.len() < 2 {
-            continue;
-        }
-        let mut layer_set = HashSet::new();
-        for &i in &idxs {
-            layer_set.insert(leaves[i].layer_idx);
-        }
-        if layer_set.len() < 2 {
-            continue;
-        }
-        let size = leaves[idxs[0]].size;
-        let count = idxs.len();
-        let total_wasted = ((count as u64).saturating_sub(1)) * size;
-        let mut paths: Vec<DuplicatePath> = idxs
-            .iter()
-            .map(|&i| DuplicatePath {
-                layer_index: leaves[i].layer_idx,
-                path: leaves[i].path.clone(),
-            })
-            .collect();
-        paths.sort_by(|a, b| {
-            a.layer_index
-                .cmp(&b.layer_index)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        paths.truncate(DUP_PATHS_SAMPLE);
-        groups.push(DuplicateGroup {
-            hash,
-            size,
-            count,
-            total_wasted,
-            paths,
-        });
-    }
-    groups.sort_by_key(|g| Reverse(g.total_wasted));
-    groups
+    Some(DupCandidatePlan {
+        leaves,
+        candidate_idxs,
+        by_layer,
+    })
 }
 
 #[cfg(test)]
@@ -726,5 +749,44 @@ mod tests {
         ];
         let tree = convert_files_to_file_tree(&files, &HashSet::new());
         assert_eq!(tree[0].size, 300);
+    }
+
+    #[test]
+    fn image_history_accepts_missing_or_null_created() {
+        use serde_json::from_str;
+
+        let missing: ImageHistory = from_str(r#"{"created_by":"RUN true"}"#).unwrap();
+        assert_eq!(missing.created, "");
+        assert_eq!(missing.created_by.as_deref(), Some("RUN true"));
+
+        let null_val: ImageHistory = from_str(r#"{"created":null,"empty_layer":true}"#).unwrap();
+        assert_eq!(null_val.created, "");
+        assert_eq!(null_val.empty_layer, Some(true));
+    }
+
+    #[test]
+    fn convert_files_strips_dot_slash_and_ignores_root_opaque() {
+        let files = vec![
+            ImageFileInfo {
+                path: "./".to_string(),
+                ..Default::default()
+            },
+            ImageFileInfo {
+                path: "".to_string(),
+                is_whiteout: Some(true),
+                is_opaque: Some(true),
+                ..Default::default()
+            },
+            ImageFileInfo {
+                path: "./etc/app.conf".to_string(),
+                size: 42,
+                ..Default::default()
+            },
+        ];
+        let tree = convert_files_to_file_tree(&files, &HashSet::new());
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name, "etc");
+        assert_eq!(tree[0].children[0].name, "app.conf");
+        assert_eq!(tree[0].children[0].size, 42);
     }
 }

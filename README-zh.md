@@ -17,13 +17,13 @@
 - ⚡ **快且独立** —— 单个静态二进制。可从 Docker Hub / 任意 V2 registry、本地 docker / podman 客户端、`docker save` 的 tar 包或 OCI archive / layout 读取镜像。分层自动缓存，下载中断自动续传。
 - 🔍 **逐层文件浏览** —— 交互式 TUI 遍历每一层的文件系统，新增 / 修改 / 删除的文件以颜色区分。
 - 📉 **浪费与膨胀检测** —— 效率评分、浪费字节、跨层重复文件、超大层、包管理器缓存、开发/构建产物、带调试信息的二进制，并反推 Dockerfile 做反模式 lint。
-- 🛡️ **安全卫生检查** —— 标记泄漏的密钥文件（`.env`、SSH / 云厂商密钥、证书）、`ENV`/label/Dockerfile 中的硬编码凭证（仅报字段名，绝不回显值）、setuid 与全局可写文件，以及以 root 运行的容器。
+- 🛡️ **安全卫生检查** —— 标记泄漏的密钥文件（`.env`、SSH / 云厂商密钥、证书）、小型文本/配置文件中的内嵌密钥（PEM 私钥、AWS/GitHub/Slack/Stripe/Google Token 与硬编码配置密钥）、`ENV`/label/Dockerfile 中的硬编码凭证（仅报字段名，绝不回显值）、setuid 与全局可写文件，以及以 root 运行的容器。
 - 🤖 **AI 优化报告** —— 把完整分析交给任意 OpenAI 兼容模型，得到按优先级排序的修复清单，并支持版本间的劣化对比。
 - 🔀 **镜像对比** —— 对比两个版本：哪里变大了、哪些层变了、哪些文件新增 / 删除 / 变大。
 - 🚦 **CI 卡口** —— 镜像效率 / 浪费字节不达标、超过体积上限，或比上个版本增长过多时让流水线失败。提供 GitHub Action，并把摘要写进 job summary。
-- 🌐 **终端 · Web · MCP · JSON / Markdown · 企微** —— 交互浏览、暴露 HTTP API 或供 AI agent 调用的 MCP 端点、导出报告，或推送到群聊。
+- 🌐 **终端 · 桌面端 · Web · MCP · JSON / Markdown · 消息推送** —— 在终端或原生桌面端交互浏览、暴露 HTTP API 或供 AI agent 调用的 MCP 端点、导出报告，或推送到群聊。
 
-> **能力边界说明：** diving 聚焦于体积、结构与基础安全检查（密钥泄漏、文件权限、是否以 root 运行等）。它扫描文件**路径**与镜像元数据 —— **不做** CVE/漏洞扫描，也**不扫描文件内容**。漏洞覆盖请配合 Trivy / grype / docker scout 使用。
+> **能力边界说明：** diving 聚焦于体积、结构与基础安全检查（密钥文件、小型文本/配置文件内嵌密钥、文件权限、是否以 root 运行等）。它扫描文件**路径**、镜像元数据以及小型文本/配置文件内容（≤ 1 MiB）—— **不做** CVE/漏洞扫描。漏洞覆盖请配合 Trivy / grype / docker scout 使用。
 
 ## 快速开始
 
@@ -36,9 +36,10 @@ cargo install diving                                                            
 diving redis:alpine
 ```
 
-**diving** 提供三种使用形态：
+**diving** 提供四种使用形态：
 
 - **命令行 / TUI / CI（`diving`）** —— 通过 `install.sh`、`cargo install diving`、`cargo install --git https://github.com/vicanso/diving-rs diving` 或 [release page](https://github.com/vicanso/diving-rs/releases) 安装，无需 Docker daemon。
+- **桌面客户端（`Diving Desktop`，`app/`）** —— 支持 macOS、Linux 与 Windows 的原生桌面应用，直接基于 `diving-core` 构建（无内嵌浏览器、无需独立服务端）。可从 [release page](https://github.com/vicanso/diving-rs/releases) 下载安装包，或执行 `make dev-app` / `make package-macos` 本地运行与打包。
 - **Web 服务 / MCP / Webhook（`vicanso/diving` / `diving-web`）** —— 通过 [Docker](#web-模式) 部署，或自行编译 `cargo build --release -p diving-web`。
 - **Rust 库（`diving-core`）** —— 将核心镜像分析引擎直接嵌入其它 Rust 服务（见[作为 Rust 库使用](#作为-rust-库使用diving-core)）。
 
@@ -183,7 +184,7 @@ CI=true diving --config .diving.yml myimage:latest
 | `output` | — | 同时把完整分析写到这里（`.json` 或 `.md`） |
 | `summary-file` | 临时文件 | 摘要写到哪里 |
 | `job-summary` | `true` | 把摘要追加到 job summary |
-| `version` | `latest` | 安装的 diving 版本，如 `v0.12.0` |
+| `version` | `latest` | 安装的 diving 版本，如 `v0.12.3` |
 | `args` | — | 额外的命令行参数，如 `--lang zh` |
 
 该步骤以 diving 的[退出码](#退出码)结束。输出 `summary-file` 是摘要文件的路径，但步骤失败时 GitHub 不会传出任何输出 —— 想在卡口失败时也把摘要发成 PR 评论，就自己指定路径：
@@ -475,11 +476,14 @@ Web 界面页头的 **MCP** 按钮会给出同样的接入说明，并按你当�
 
 Docker 镜像监听的是 `0.0.0.0`，要给远程 MCP 客户端使用，可以通过环境变量传入 token，例如 `docker run -e DIVING_MCP_TOKEN=<token> …`。同一台主机上的客户端直接用 `http://127.0.0.1:7001/mcp` 即可，不需要 token。
 
-## 敏感文件扫描
+## 敏感文件与密钥扫描
 
-分析过程中，diving 会对每个文件**路径**执行内置规则扫描（`.env` 文件、SSH 私钥、AWS/GCP 凭证、TLS 私钥、kubeconfig、`.htpasswd`、误拷入的 `.git` 目录等），命中结果以 **Security Warnings** 形式出现在报告中。（它扫描路径与元数据，不扫描文件内容。）
+分析过程中，diving 会同时执行两类互补检测，并将命中结果以 **Security Warnings** 形式出现在报告中：
 
-可通过创建 `~/.diving/sensitive-files` 扩展或屏蔽规则，每行一条：
+- **文件路径规则**：对每个文件路径执行内置规则扫描（`.env` 文件、SSH 私钥、AWS/GCP 凭证、TLS 私钥、kubeconfig、`.htpasswd`、误拷入的 `.git` 目录等）。
+- **文件内容密钥扫描**：在单遍 tar 解析时对小型非二进制文本与配置文件（≤ 1 MiB，跳过公共 CA 证书目录、`node_modules` 与系统/缓存目录，每层最多记录 64 条）扫描内嵌 PEM 私钥头（`-----BEGIN ... PRIVATE KEY-----`）、云厂商/平台 Token（AWS Access Key ID、GitHub / Slack / Stripe / Google API Token），以及 `.env`/YAML/TOML/INI/properties/conf 中的硬编码密钥赋值（`*_SECRET`、`*_PASSWORD`、`*_API_KEY`、`*_TOKEN`、`DATABASE_URL`、`AWS_SECRET_ACCESS_KEY`，自动忽略 `$VAR`、`{{...}}`、`changeme`、`example` 等占位符）。
+
+可通过创建 `~/.diving/sensitive-files` 扩展或屏蔽规则（`!` 忽略规则同时作用于路径检测与文件内容密钥检测），每行一条：
 
 | 行格式 | 作用 |
 |--------|------|

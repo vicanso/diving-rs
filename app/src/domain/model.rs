@@ -23,6 +23,7 @@ pub enum AppRoute {
     Landing,
     Inspector,
     Diff,
+    #[cfg(debug_assertions)]
     Gallery,
 }
 

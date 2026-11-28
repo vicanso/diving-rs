@@ -5,8 +5,8 @@ use nsh_core::element::desktop::{MenuItem, set_application_menu};
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppRoute, AppState, InspectorTab, visible_layer_indices};
-use crate::i18n::{UiLang, t};
+use crate::domain::{AppRoute, AppState, InspectorTab, UpdatePhase, visible_layer_indices};
+use crate::i18n::{UiLang, t, tf};
 
 /// Registers global keyboard bindings and reactive desktop menu items inside the root owner.
 pub fn install_desktop_menus_and_keys(state: AppState) {
@@ -27,6 +27,8 @@ pub fn install_application_menu(state: AppState) {
             let on_diff = menu_state.route.get() == AppRoute::Diff;
             let can_export = menu_state.can_export_markdown();
             let active_tab = menu_state.active_tab.get();
+            let update_phase = menu_state.update_phase.get();
+            let update_skipped = menu_state.update_skipped.get();
 
             let items = build_app_menu(
                 &menu_state,
@@ -37,6 +39,8 @@ pub fn install_application_menu(state: AppState) {
                 on_diff,
                 can_export,
                 active_tab,
+                &update_phase,
+                update_skipped.as_deref(),
             );
             set_application_menu(items);
         });
@@ -210,6 +214,8 @@ fn build_app_menu(
     on_diff: bool,
     can_export: bool,
     active_tab: InspectorTab,
+    update_phase: &UpdatePhase,
+    update_skipped: Option<&str>,
 ) -> Vec<MenuItem> {
     let open_file_s = state.clone();
     let open_folder_s = state.clone();
@@ -231,19 +237,62 @@ fn build_app_menu(
     let dark_s = state.clone();
     let en_s = state.clone();
     let zh_s = state.clone();
+    let check_upd_s = state.clone();
+    let act_upd_s = state.clone();
+    let skip_upd_s = state.clone();
+    let resume_upd_s = state.clone();
 
-    let app_menu = MenuItem::submenu(
-        t(lang, "app.title"),
-        [
-            MenuItem::role(MenuRole::About),
-            MenuItem::separator(),
-            MenuItem::role(MenuRole::Hide),
-            MenuItem::role(MenuRole::HideOthers),
-            MenuItem::role(MenuRole::ShowAll),
-            MenuItem::separator(),
-            MenuItem::role(MenuRole::Quit),
-        ],
+    let upd_label = state.update_menu_label(lang);
+    let upd_busy = matches!(
+        update_phase,
+        UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing { .. }
     );
+
+    let mut app_items = vec![MenuItem::role(MenuRole::About), MenuItem::separator()];
+    match update_phase {
+        UpdatePhase::Available { .. }
+        | UpdatePhase::Failed {
+            version: Some(_), ..
+        } => {
+            app_items.push(MenuItem::new(upd_label).on_select(move || act_upd_s.start_update()));
+            app_items.push(
+                MenuItem::new(t(lang, "update.action_skip"))
+                    .on_select(move || skip_upd_s.skip_available_update()),
+            );
+            app_items.push(
+                MenuItem::new(t(lang, "menu.check_updates"))
+                    .on_select(move || check_upd_s.check_for_updates()),
+            );
+        }
+        UpdatePhase::ReadyToRestart { .. } => {
+            app_items.push(
+                MenuItem::new(upd_label).on_select(move || act_upd_s.relaunch_after_update()),
+            );
+        }
+        _ => {
+            app_items.push(
+                MenuItem::new(upd_label)
+                    .disabled(upd_busy)
+                    .on_select(move || check_upd_s.check_for_updates()),
+            );
+            if let Some(skipped) = update_skipped {
+                app_items.push(
+                    MenuItem::new(tf(lang, "update.action_resume", &[skipped]))
+                        .on_select(move || resume_upd_s.resume_skipped_update()),
+                );
+            }
+        }
+    }
+    app_items.extend([
+        MenuItem::separator(),
+        MenuItem::role(MenuRole::Hide),
+        MenuItem::role(MenuRole::HideOthers),
+        MenuItem::role(MenuRole::ShowAll),
+        MenuItem::separator(),
+        MenuItem::role(MenuRole::Quit),
+    ]);
+
+    let app_menu = MenuItem::submenu(t(lang, "app.title"), app_items);
 
     let file_menu = MenuItem::submenu(
         t(lang, "menu.file"),

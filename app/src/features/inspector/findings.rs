@@ -12,6 +12,8 @@ use crate::ui::{
     ui_badge, ui_banner, ui_button, ui_empty_state, ui_panel_titled, ui_separator,
 };
 
+const FINDINGS_COLLAPSED_LIMIT: usize = 40;
+
 fn severity_badge_tone(severity: &str) -> BadgeTone {
     match severity.trim().to_ascii_lowercase().as_str() {
         "high" => BadgeTone::Danger,
@@ -19,6 +21,28 @@ fn severity_badge_tone(severity: &str) -> BadgeTone {
         "low" => BadgeTone::Info,
         _ => BadgeTone::Neutral,
     }
+}
+
+fn render_show_all_toggle(
+    show_all: Signal<bool>,
+    count: usize,
+    lang: Signal<UiLang>,
+) -> impl IntoElement {
+    view().pt_2().child(ui_button(
+        move || {
+            if show_all.get() {
+                SharedString::from(t(lang.get(), "findings.show_less"))
+            } else {
+                SharedString::from(tf(lang.get(), "findings.show_all", &[&count.to_string()]))
+            }
+        },
+        ButtonVariant::Ghost,
+        UiSize::Xs,
+        None,
+        false,
+        false,
+        move || show_all.set(!show_all.get_untracked()),
+    ))
 }
 
 /// Renders all 5 Findings panels in a responsive 2-column (>=1100pt) or 1-column layout.
@@ -390,6 +414,7 @@ fn wasted_panel(summary: Arc<DockerAnalyzeSummary>, lang: Signal<UiLang>) -> imp
 
 fn sensitive_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
     let count = res.sensitive_files.len();
+    let show_all = signal(false);
     ui_panel_titled(
         move || SharedString::from(format!("{} ({count})", t(lang.get(), "findings.sensitive"))),
         None,
@@ -402,54 +427,68 @@ fn sensitive_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
             )
             .into_element()
         } else {
-            view()
-                .flex_col()
-                .gap_2()
-                .children(res.sensitive_files.iter().enumerate().map(|(idx, item)| {
-                    let path = item.path.clone();
-                    let reason = strip_inline_markdown(&item.reason);
-                    let layer = format!("L{}", item.layer_index + 1);
-                    let size = format_bytes(item.size);
-                    view()
-                        .flex_col()
-                        .gap_1()
-                        .when(idx > 0, |v| v.pt_2().child(ui_separator()))
-                        .child(
+            dynamic(move || {
+                let limit = if show_all.get() {
+                    count
+                } else {
+                    FINDINGS_COLLAPSED_LIMIT
+                };
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .children(res.sensitive_files.iter().take(limit).enumerate().map(
+                        |(idx, item)| {
+                            let path = item.path.clone();
+                            let reason = strip_inline_markdown(&item.reason);
+                            let layer = format!("L{}", item.layer_index + 1);
+                            let size = format_bytes(item.size);
                             view()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
+                                .flex_col()
+                                .gap_1()
+                                .when(idx > 0, |v| v.pt_2().child(ui_separator()))
                                 .child(
-                                    text(path)
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .text_xs()
-                                        .font_family(font_mono_family())
-                                        .text_color(move || theme().foreground),
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            text(path)
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .text_xs()
+                                                .font_family(font_mono_family())
+                                                .text_color(move || theme().foreground),
+                                        )
+                                        .child(ui_badge(layer, BadgeTone::Warning))
+                                        .child(
+                                            text(size)
+                                                .text_xs()
+                                                .font_family(font_mono_family())
+                                                .tabular_nums()
+                                                .text_color(move || theme().muted_foreground),
+                                        ),
                                 )
-                                .child(ui_badge(layer, BadgeTone::Warning))
                                 .child(
-                                    text(size)
+                                    text(reason)
                                         .text_xs()
-                                        .font_family(font_mono_family())
-                                        .tabular_nums()
                                         .text_color(move || theme().muted_foreground),
-                                ),
-                        )
-                        .child(
-                            text(reason)
-                                .text_xs()
-                                .text_color(move || theme().muted_foreground),
-                        )
-                }))
-                .into_element()
+                                )
+                        },
+                    ))
+                    .when(count > FINDINGS_COLLAPSED_LIMIT, |col| {
+                        col.child(render_show_all_toggle(show_all, count, lang))
+                    })
+                    .into_element()
+            })
+            .into_element()
         },
     )
 }
 
 fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
     let count = res.duplicate_groups.len();
+    let show_all = signal(false);
     ui_panel_titled(
         move || {
             SharedString::from(format!(
@@ -467,15 +506,17 @@ fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
             )
             .into_element()
         } else {
-            view()
-                .flex_col()
-                .gap_2()
-                .children(
-                    res.duplicate_groups
-                        .iter()
-                        .take(30)
-                        .enumerate()
-                        .map(|(idx, grp)| {
+            dynamic(move || {
+                let limit = if show_all.get() {
+                    count
+                } else {
+                    FINDINGS_COLLAPSED_LIMIT
+                };
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .children(res.duplicate_groups.iter().take(limit).enumerate().map(
+                        |(idx, grp)| {
                             let first_path = grp
                                 .paths
                                 .first()
@@ -520,9 +561,14 @@ fn duplicates_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                                     .text_xs()
                                     .text_color(move || theme().muted_foreground),
                                 )
-                        }),
-                )
-                .into_element()
+                        },
+                    ))
+                    .when(count > FINDINGS_COLLAPSED_LIMIT, |col| {
+                        col.child(render_show_all_toggle(show_all, count, lang))
+                    })
+                    .into_element()
+            })
+            .into_element()
         },
     )
 }
@@ -584,26 +630,8 @@ fn big_files_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
                                     )
                             }),
                     )
-                    .when(count > 40, |col| {
-                        col.child(view().pt_2().child(ui_button(
-                            move || {
-                                if show_all.get() {
-                                    SharedString::from(t(lang.get(), "findings.show_less"))
-                                } else {
-                                    SharedString::from(tf(
-                                        lang.get(),
-                                        "findings.show_all",
-                                        &[&count.to_string()],
-                                    ))
-                                }
-                            },
-                            ButtonVariant::Ghost,
-                            UiSize::Xs,
-                            None,
-                            false,
-                            false,
-                            move || show_all.set(!show_all.get_untracked()),
-                        )))
+                    .when(count > FINDINGS_COLLAPSED_LIMIT, |col| {
+                        col.child(render_show_all_toggle(show_all, count, lang))
                     })
                     .into_element()
             })
@@ -615,6 +643,7 @@ fn big_files_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl 
 fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl IntoElement {
     let count = res.unstripped_binaries.len();
     let total_debug: u64 = res.unstripped_binaries.iter().map(|b| b.debug_bytes).sum();
+    let show_all = signal(false);
     ui_panel_titled(
         move || {
             SharedString::from(format!(
@@ -623,14 +652,17 @@ fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
             ))
         },
         Some(ui_badge(format_bytes(total_debug), BadgeTone::Info).into_element()),
-        view()
-            .flex_col()
-            .gap_2()
-            .children(
-                res.unstripped_binaries
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, bin)| {
+        dynamic(move || {
+            let limit = if show_all.get() {
+                count
+            } else {
+                FINDINGS_COLLAPSED_LIMIT
+            };
+            view()
+                .flex_col()
+                .gap_2()
+                .children(res.unstripped_binaries.iter().take(limit).enumerate().map(
+                    |(idx, bin)| {
                         let path = bin.path.clone();
                         let bin_size = format_bytes(bin.size);
                         let debug_size = format_bytes(bin.debug_bytes);
@@ -663,9 +695,14 @@ fn unstripped_panel(res: Arc<DockerAnalyzeResult>, lang: Signal<UiLang>) -> impl
                                 .tabular_nums()
                                 .text_color(move || theme().muted_foreground),
                             )
-                    }),
-            )
-            .into_element(),
+                    },
+                ))
+                .when(count > FINDINGS_COLLAPSED_LIMIT, |col| {
+                    col.child(render_show_all_toggle(show_all, count, lang))
+                })
+                .into_element()
+        })
+        .into_element(),
     )
 }
 
@@ -761,5 +798,84 @@ mod tests {
             .expect("ZH severity localized");
         assert!(app.shows("安全"));
         assert!(app.shows("1.0 KiB（调试信息 512 B）"));
+    }
+
+    #[component]
+    fn FindingsShowAllHarness() -> impl IntoElement {
+        use diving_core::{DuplicateGroup, DuplicatePath, SensitiveFileInfo};
+
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let sensitive_files = (0..45)
+            .map(|i| SensitiveFileInfo {
+                layer_index: 0,
+                path: format!("etc/secret-{i:02}.key"),
+                reason: "private key".to_owned(),
+                size: 64,
+            })
+            .collect();
+        let duplicate_groups = (0..45)
+            .map(|i| DuplicateGroup {
+                hash: format!("hash-{i:02}"),
+                size: 100,
+                count: 2,
+                total_wasted: 100,
+                paths: vec![DuplicatePath {
+                    layer_index: 0,
+                    path: format!("opt/dup-{i:02}.bin"),
+                }],
+            })
+            .collect();
+        let unstripped_binaries = (0..45)
+            .map(|i| UnstrippedBinary {
+                layer_index: 0,
+                path: format!("usr/bin/unstripped-{i:02}"),
+                size: 2048,
+                debug_bytes: 512,
+                symbol_bytes: 0,
+            })
+            .collect();
+        let res = Arc::new(DockerAnalyzeResult {
+            sensitive_files,
+            duplicate_groups,
+            unstripped_binaries,
+            ..Default::default()
+        });
+        let summary = Arc::new(res.summary());
+        findings_tab(state, res, summary)
+    }
+
+    #[test]
+    fn findings_show_all_toggles_cap_and_expand_sensitive_duplicates_and_unstripped() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(900.0)),
+            ..EngineConfig::new(windowed_root::<FindingsShowAllHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start findings show all harness");
+        app.wait_for_within("etc/secret-00.key", Duration::from_secs(2))
+            .expect("first sensitive entry rendered");
+
+        // All 3 sections start capped at 40 entries, hiding item 44.
+        assert!(!app.shows("etc/secret-44.key"));
+        assert!(!app.shows("opt/dup-44.bin"));
+        assert!(!app.shows("usr/bin/unstripped-44"));
+        assert!(app.shows("Show all (45)"));
+
+        // Expand each Show all (45) toggle one by one and confirm all 3 sections expand.
+        for _ in 0..3 {
+            app.press("role:button[Show all (45)] >> nth=0")
+                .expect("press Show all toggle");
+        }
+        app.wait_for_within("etc/secret-44.key", Duration::from_secs(2))
+            .expect("expanded sensitive files show item 44");
+        assert!(app.shows("opt/dup-44.bin"));
+        assert!(app.shows("usr/bin/unstripped-44"));
+        assert!(app.shows("Show fewer"));
     }
 }

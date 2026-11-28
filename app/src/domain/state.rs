@@ -2,11 +2,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::env::consts;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use chrono::Local;
 use diving_core::{
@@ -14,9 +16,11 @@ use diving_core::{
     ImagePreview, LocalContainerImage, LocalRuntime, ProgressEvent, build_recommendations,
 };
 use nsh_core::element::Owner;
+use nsh_core::element::desktop::quit;
 use nsh_core::file_dialog::{OpenDialog, SaveDialog};
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
+use tokio::sync::{mpsc::unbounded_channel, oneshot};
 
 use crate::domain::model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
@@ -28,6 +32,12 @@ use crate::domain::service::{
     AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
 };
 use crate::domain::treemap::FsNode;
+use crate::domain::updater::{
+    CURRENT_VERSION, InstallOutcome, UpdateCheck, asset_name, auto_check_disabled_by_env,
+    auto_check_due, check_latest_blocking, clear_skipped_version, download_and_verify_blocking,
+    install as install_update_package, nudge_notes, nudge_version, record_outcome, relaunch,
+    skip_version, skipped_version, sweep_installer_mounts,
+};
 use crate::i18n::{UiLang, format_user_error, t, tf};
 
 const KEY_LANG: &str = "diving.lang";
@@ -66,6 +76,53 @@ pub struct TreemapHoverInfo {
 pub struct DiffErrorState {
     pub base: Option<String>,
     pub target: Option<String>,
+}
+
+/// Lifecycle state for the GitHub Releases self-updater UI.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available {
+        version: String,
+        notes: String,
+    },
+    Downloading {
+        version: String,
+        received: u64,
+        total: u64,
+    },
+    Installing {
+        version: String,
+    },
+    ReadyToRestart {
+        version: String,
+        target: PathBuf,
+    },
+    OpenedInstaller {
+        version: String,
+        path: PathBuf,
+    },
+    Failed {
+        version: Option<String>,
+        message: String,
+    },
+}
+
+/// Returns `true` when the updater has an actionable update or restart waiting for the user.
+pub fn has_pending_update_indicator(phase: &UpdatePhase) -> bool {
+    matches!(
+        phase,
+        UpdatePhase::Available { .. } | UpdatePhase::ReadyToRestart { .. }
+    )
+}
+
+enum UpdateTaskEvent {
+    Progress { received: u64, total: u64 },
+    Installing,
+    Finished(Result<InstallOutcome, String>),
 }
 
 /// Shared reactive state provided via `provide_context`.
@@ -118,7 +175,13 @@ pub struct AppState {
     pub preview_error: Signal<Option<String>>,
     pub dockerfile_wrap: Signal<bool>,
     pub status_notice: Signal<Option<String>>,
+    pub status_notice_is_update: Signal<bool>,
     notice_seq: Signal<u64>,
+    pub update_phase: Signal<UpdatePhase>,
+    pub update_skipped: Signal<Option<String>>,
+    last_compact: Signal<bool>,
+    wide_sidebar_pref: Signal<bool>,
+    wide_meta_pref: Signal<bool>,
     pub search_input_ref: ElementRef,
     pub tree_filter_ref: ElementRef,
     pub treemap_path: Signal<Vec<String>>,
@@ -191,18 +254,24 @@ impl AppState {
             .and_then(|raw| serde_json::from_str::<Vec<RecentImageEntry>>(&raw).ok())
             .unwrap_or_default();
 
-        let compact_viewport = window().width < px(1080.0);
+        let compact_viewport = untracked(|| window().width) < px(1080.0);
+        let wide_sidebar_pref = Storage::get_item(KEY_APP_SIDEBAR_OPEN)
+            .map(|raw| raw != "false")
+            .unwrap_or(true);
         let saved_app_sidebar = if compact_viewport {
             false
         } else {
-            Storage::get_item(KEY_APP_SIDEBAR_OPEN)
-                .map(|raw| raw != "false")
-                .unwrap_or(true)
+            wide_sidebar_pref
         };
 
         let config_warning = service.config_warning().map(str::to_owned);
+        let initial_skipped = if auto_check_disabled_by_env() {
+            None
+        } else {
+            skipped_version()
+        };
 
-        Self {
+        let state = Self {
             service,
             route: signal(AppRoute::Landing),
             lang: signal(saved_lang),
@@ -250,7 +319,13 @@ impl AppState {
             preview_error: signal(None),
             dockerfile_wrap: signal(true),
             status_notice: signal(None),
+            status_notice_is_update: signal(false),
             notice_seq: signal(0),
+            update_phase: signal(UpdatePhase::Idle),
+            update_skipped: signal(initial_skipped),
+            last_compact: signal(compact_viewport),
+            wide_sidebar_pref: signal(wide_sidebar_pref),
+            wide_meta_pref: signal(true),
             search_input_ref: element_ref(),
             tree_filter_ref: element_ref(),
             treemap_path: signal(Vec::new()),
@@ -293,7 +368,9 @@ impl AppState {
             root_owner: Owner::current(),
             active_task: Rc::new(RefCell::new(None)),
             active_diff_task: Rc::new(RefCell::new(None)),
-        }
+        };
+        state.install_responsive_sync();
+        state
     }
 
     /// Spawns a UI async receiver on the root `App` owner so closing dialogs/menus never cancels it.
@@ -389,19 +466,62 @@ impl AppState {
     pub fn toggle_app_sidebar(&self) {
         let next = !self.app_sidebar_open.get_untracked();
         self.app_sidebar_open.set(next);
-        let _ = Storage::set_item(KEY_APP_SIDEBAR_OPEN, if next { "true" } else { "false" });
+        let wide = untracked(|| window().width) >= px(1080.0);
+        if wide {
+            self.wide_sidebar_pref.set(next);
+            let _ = Storage::set_item(KEY_APP_SIDEBAR_OPEN, if next { "true" } else { "false" });
+        }
+    }
+
+    /// Updates `tree_show_meta_cols`, persisting wide-mode preference when viewport `>= 1080pt`.
+    pub fn set_tree_show_meta_cols(&self, next: bool) {
+        self.tree_show_meta_cols.set(next);
+        if untracked(|| window().width) >= px(1080.0) {
+            self.wide_meta_pref.set(next);
+        }
+    }
+
+    fn install_responsive_sync(&self) {
+        let sync_state = self.clone();
+        effect(move || {
+            let compact = window().width < px(1080.0);
+            let prev = sync_state.last_compact.get_untracked();
+            if compact != prev {
+                sync_state.last_compact.set(compact);
+                if compact {
+                    sync_state.app_sidebar_open.set(false);
+                    sync_state.tree_show_meta_cols.set(false);
+                } else {
+                    sync_state
+                        .app_sidebar_open
+                        .set(sync_state.wide_sidebar_pref.get_untracked());
+                    sync_state
+                        .tree_show_meta_cols
+                        .set(sync_state.wide_meta_pref.get_untracked());
+                }
+            }
+        });
     }
 
     pub fn show_status_notice(&self, msg: String) {
+        self.show_status_notice_with_kind(msg, false);
+    }
+
+    fn show_status_notice_with_kind(&self, msg: String, is_update: bool) {
         let seq = self.notice_seq.get_untracked().wrapping_add(1);
         self.notice_seq.set(seq);
+        self.status_notice_is_update.set(is_update);
         self.status_notice.set(Some(msg));
         let timer_state = self.clone();
-        self.schedule_app_timeout(Duration::from_secs(5), move || {
-            if timer_state.notice_seq.get_untracked() == seq {
-                timer_state.status_notice.set(None);
-            }
-        });
+        self.schedule_app_timeout(
+            Duration::from_secs(if is_update { 10 } else { 5 }),
+            move || {
+                if timer_state.notice_seq.get_untracked() == seq {
+                    timer_state.status_notice.set(None);
+                    timer_state.status_notice_is_update.set(false);
+                }
+            },
+        );
     }
 
     /// Dismisses the active floating status notice immediately.
@@ -409,6 +529,7 @@ impl AppState {
         self.notice_seq
             .set(self.notice_seq.get_untracked().wrapping_add(1));
         self.status_notice.set(None);
+        self.status_notice_is_update.set(false);
     }
 
     /// Whether any modal dialog, sheet, or command palette is currently open.
@@ -475,6 +596,7 @@ impl AppState {
             AppRoute::Inspector | AppRoute::Landing => {
                 !self.current_image.get().is_empty() || !self.image_input.get().trim().is_empty()
             }
+            #[cfg(debug_assertions)]
             AppRoute::Gallery => false,
         }
     }
@@ -517,6 +639,7 @@ impl AppState {
         self.route.set(AppRoute::Landing);
     }
 
+    #[cfg(debug_assertions)]
     pub fn open_gallery(&self) {
         self.close_all_modals();
         self.route.set(AppRoute::Gallery);
@@ -535,6 +658,7 @@ impl AppState {
             AppRoute::Landing => {
                 self.search_input_ref.focus();
             }
+            #[cfg(debug_assertions)]
             AppRoute::Gallery => {}
         }
     }
@@ -1217,6 +1341,7 @@ impl AppState {
                     self.analyze_with_options(img, arch, true);
                 }
             }
+            #[cfg(debug_assertions)]
             AppRoute::Gallery => {}
         }
     }
@@ -1611,6 +1736,281 @@ impl AppState {
         self.local_picker_open.set(false);
         self.analyze(selected, None);
     }
+
+    /// Runs startup DMG mount cleanup and silent 48-hour background update check (no-op in tests).
+    pub fn startup_update_tasks(&self) {
+        if auto_check_disabled_by_env() {
+            return;
+        }
+        thread::spawn(sweep_installer_mounts);
+        if let Some(version) = nudge_version() {
+            let notes = nudge_notes().unwrap_or_default();
+            self.update_phase
+                .set(UpdatePhase::Available { version, notes });
+        }
+        if !auto_check_due(SystemTime::now()) {
+            return;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        thread::spawn(move || {
+            let outcome = check_latest_blocking();
+            record_outcome(SystemTime::now(), &outcome);
+            let _ = tx.send(outcome);
+        });
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let Ok(outcome) = rx.await else {
+                return;
+            };
+            if let UpdateCheck::Newer { version, notes } = outcome {
+                if skipped_version().as_deref() == Some(version.as_str()) {
+                    state.update_skipped.set(Some(version));
+                } else if matches!(
+                    state.update_phase.get_untracked(),
+                    UpdatePhase::Idle | UpdatePhase::UpToDate
+                ) {
+                    state
+                        .update_phase
+                        .set(UpdatePhase::Available { version, notes });
+                }
+            }
+        });
+    }
+
+    /// Triggers an immediate manual check against GitHub Releases and surfaces a status toast.
+    pub fn check_for_updates(&self) {
+        if matches!(
+            self.update_phase.get_untracked(),
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading { .. }
+                | UpdatePhase::Installing { .. }
+        ) {
+            return;
+        }
+        let lang = self.lang.get_untracked();
+        self.update_phase.set(UpdatePhase::Checking);
+        self.show_status_notice_with_kind(t(lang, "update.checking").to_owned(), true);
+
+        let (tx, rx) = oneshot::channel();
+        thread::spawn(move || {
+            let outcome = check_latest_blocking();
+            if !auto_check_disabled_by_env() {
+                record_outcome(SystemTime::now(), &outcome);
+            }
+            let _ = tx.send(outcome);
+        });
+
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let outcome = match rx.await {
+                Ok(out) => out,
+                Err(_) => UpdateCheck::Failed("update check task cancelled".to_owned()),
+            };
+            let cur_lang = state.lang.get_untracked();
+            match outcome {
+                UpdateCheck::Newer { version, notes } => {
+                    let notice = tf(
+                        cur_lang,
+                        "update.available_notice",
+                        &[CURRENT_VERSION, &version],
+                    );
+                    state
+                        .update_phase
+                        .set(UpdatePhase::Available { version, notes });
+                    state.show_status_notice_with_kind(notice, true);
+                }
+                UpdateCheck::UpToDate => {
+                    state.update_phase.set(UpdatePhase::UpToDate);
+                    let notice = tf(cur_lang, "update.up_to_date", &[CURRENT_VERSION]);
+                    state.show_status_notice_with_kind(notice, true);
+                }
+                UpdateCheck::Failed(message) => {
+                    state.update_phase.set(UpdatePhase::Failed {
+                        version: None,
+                        message: message.clone(),
+                    });
+                    let notice = tf(cur_lang, "update.failed", &[&message]);
+                    state.show_status_notice_with_kind(notice, true);
+                }
+            }
+        });
+    }
+
+    /// Downloads, verifies SHA-256, installs in place, and relaunches when ready.
+    pub fn start_update(&self) {
+        let version = match self.update_phase.get_untracked() {
+            UpdatePhase::Available { version, .. }
+            | UpdatePhase::Failed {
+                version: Some(version),
+                ..
+            } => version,
+            _ => return,
+        };
+        let lang = self.lang.get_untracked();
+        if asset_name().is_none() {
+            let msg = tf(lang, "update.unsupported", &[consts::OS, consts::ARCH]);
+            self.update_phase.set(UpdatePhase::Failed {
+                version: Some(version),
+                message: msg.clone(),
+            });
+            self.show_status_notice_with_kind(msg, true);
+            return;
+        }
+
+        self.update_phase.set(UpdatePhase::Downloading {
+            version: version.clone(),
+            received: 0,
+            total: 0,
+        });
+        let (tx, mut rx) = unbounded_channel();
+        let dl_version = version.clone();
+        thread::spawn(move || {
+            let mut last_sent = 0_u64;
+            let downloaded = download_and_verify_blocking(&dl_version, |received, total| {
+                if received == 0
+                    || received == total
+                    || received.saturating_sub(last_sent) >= 64 * 1024
+                {
+                    last_sent = received;
+                    let _ = tx.send(UpdateTaskEvent::Progress { received, total });
+                }
+            });
+            let path = match downloaded {
+                Ok(path) => path,
+                Err(err) => {
+                    let _ = tx.send(UpdateTaskEvent::Finished(Err(err)));
+                    return;
+                }
+            };
+            let _ = tx.send(UpdateTaskEvent::Installing);
+            let outcome = install_update_package(&path);
+            let _ = tx.send(UpdateTaskEvent::Finished(outcome));
+        });
+
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    UpdateTaskEvent::Progress { received, total } => {
+                        state.update_phase.set(UpdatePhase::Downloading {
+                            version: version.clone(),
+                            received,
+                            total,
+                        });
+                    }
+                    UpdateTaskEvent::Installing => {
+                        state.update_phase.set(UpdatePhase::Installing {
+                            version: version.clone(),
+                        });
+                    }
+                    UpdateTaskEvent::Finished(Ok(outcome)) => {
+                        let cur_lang = state.lang.get_untracked();
+                        match outcome {
+                            InstallOutcome::Relaunch { target }
+                            | InstallOutcome::QuitToInstall { target } => {
+                                state.update_phase.set(UpdatePhase::ReadyToRestart {
+                                    version: version.clone(),
+                                    target: target.clone(),
+                                });
+                                let notice = tf(cur_lang, "update.ready_restart", &[&version]);
+                                state.show_status_notice_with_kind(notice, true);
+                                relaunch(Some(&target));
+                                quit();
+                            }
+                            InstallOutcome::OpenedInstaller { path } => {
+                                state.update_phase.set(UpdatePhase::OpenedInstaller {
+                                    version: version.clone(),
+                                    path,
+                                });
+                                let notice = tf(cur_lang, "update.opened_installer", &[&version]);
+                                state.show_status_notice_with_kind(notice, true);
+                            }
+                        }
+                        break;
+                    }
+                    UpdateTaskEvent::Finished(Err(message)) => {
+                        let cur_lang = state.lang.get_untracked();
+                        state.update_phase.set(UpdatePhase::Failed {
+                            version: Some(version.clone()),
+                            message: message.clone(),
+                        });
+                        let notice = tf(cur_lang, "update.failed", &[&message]);
+                        state.show_status_notice_with_kind(notice, true);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Marks the currently offered update version as skipped so background checks stay quiet.
+    pub fn skip_available_update(&self) {
+        let version = match self.update_phase.get_untracked() {
+            UpdatePhase::Available { version, .. }
+            | UpdatePhase::Failed {
+                version: Some(version),
+                ..
+            } => version,
+            _ => return,
+        };
+        if !auto_check_disabled_by_env() {
+            skip_version(&version);
+        }
+        self.update_skipped.set(Some(version.clone()));
+        self.update_phase.set(UpdatePhase::Idle);
+        let lang = self.lang.get_untracked();
+        self.show_status_notice_with_kind(tf(lang, "update.skipped_notice", &[&version]), false);
+    }
+
+    /// Clears any skipped version marker and re-checks for updates immediately.
+    pub fn resume_skipped_update(&self) {
+        if !auto_check_disabled_by_env() {
+            clear_skipped_version();
+        }
+        self.update_skipped.set(None);
+        self.check_for_updates();
+    }
+
+    /// Triggers relaunch if an update is already staged and awaiting restart.
+    pub fn relaunch_after_update(&self) {
+        if let UpdatePhase::ReadyToRestart { target, .. } = self.update_phase.get_untracked() {
+            relaunch(Some(&target));
+            quit();
+        }
+    }
+
+    /// Returns the concise localized label for the primary updater command across menus/palette.
+    pub fn update_menu_label(&self, lang: UiLang) -> String {
+        match self.update_phase.get() {
+            UpdatePhase::Checking => t(lang, "update.checking").to_owned(),
+            UpdatePhase::Available { version, .. } => {
+                tf(lang, "update.action_install_version", &[&version])
+            }
+            UpdatePhase::Downloading {
+                version,
+                received,
+                total,
+            } => {
+                let progress = if total > 0 {
+                    let pct = ((received as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+                    format!("{pct:.0}%")
+                } else {
+                    format_bytes(received)
+                };
+                tf(lang, "update.downloading", &[&version, &progress])
+            }
+            UpdatePhase::Installing { version } => tf(lang, "update.installing", &[&version]),
+            UpdatePhase::ReadyToRestart { .. } => t(lang, "update.restart_now").to_owned(),
+            UpdatePhase::Failed {
+                version: Some(_), ..
+            } => t(lang, "update.retry").to_owned(),
+            UpdatePhase::Idle
+            | UpdatePhase::UpToDate
+            | UpdatePhase::OpenedInstaller { .. }
+            | UpdatePhase::Failed { version: None, .. } => t(lang, "menu.check_updates").to_owned(),
+        }
+    }
 }
 
 fn format_progress_event_text(lang: UiLang, ev: &ProgressEvent) -> String {
@@ -1900,5 +2300,59 @@ mod tests {
         let mut app = Headless::start(config).expect("start compare dialog state harness");
         app.wait_for_within("compare-dialog-state-ok", Duration::from_secs(2))
             .expect("compare dialog state assertions passed");
+    }
+
+    #[component]
+    fn ResponsiveSyncHarness() -> impl IntoElement {
+        use crate::ui::{ButtonVariant, UiSize, ui_button};
+
+        let state = AppState::new(DivingService::new());
+        let sidebar = state.app_sidebar_open;
+        let meta = state.tree_show_meta_cols;
+        let toggle_meta = state.clone();
+
+        view()
+            .flex_col()
+            .child(text(move || {
+                format!("sidebar={};meta={}", sidebar.get(), meta.get())
+            }))
+            .child(ui_button(
+                "ToggleMeta",
+                ButtonVariant::Ghost,
+                UiSize::Xs,
+                None,
+                false,
+                false,
+                move || {
+                    toggle_meta
+                        .set_tree_show_meta_cols(!toggle_meta.tree_show_meta_cols.get_untracked())
+                },
+            ))
+    }
+
+    #[test]
+    fn responsive_viewport_syncs_sidebar_and_meta_columns_across_960_and_1440() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(windowed_root::<ResponsiveSyncHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start responsive sync harness");
+        app.wait_for_within("sidebar=false;meta=false", Duration::from_secs(2))
+            .expect("960pt starts with compact sidebar=false & meta=false");
+
+        app.set_viewport(Size::new(Points(1440.0), Points(900.0)))
+            .expect("resize to 1440x900");
+        app.wait_for_within("sidebar=true;meta=true", Duration::from_secs(2))
+            .expect("1440pt restores sidebar=true & meta=true");
+
+        app.set_viewport(Size::new(Points(960.0), Points(640.0)))
+            .expect("resize back to 960x640");
+        app.wait_for_within("sidebar=false;meta=false", Duration::from_secs(2))
+            .expect("960pt collapses sidebar=false & meta=false again");
     }
 }

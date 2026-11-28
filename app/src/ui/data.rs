@@ -8,7 +8,7 @@ use crate::ui::motion::{FAST, dur};
 use crate::ui::theme::{
     border_strong, danger, danger_soft, font_mono_family, info, info_soft, op_bg, op_color,
     opcode_bg, opcode_color, radius_inset, radius_lg, size_bar_fill, size_bar_track, success,
-    success_soft, warning, warning_soft,
+    success_soft, treemap_slot, warning, warning_soft,
 };
 
 /// Semantic tone for `ui_badge`. Defaults to `Neutral`.
@@ -200,8 +200,10 @@ pub fn ui_status_badge(kind: FileOpKind) -> impl IntoElement {
         )
 }
 
-/// Horizontal proportional micro-bar used in LayerTimeline and FileTree rows.
-pub fn ui_size_bar(ratio: f32, width: Points) -> impl IntoElement {
+fn render_size_bar<F>(ratio: f32, width: Points, fill: F) -> impl IntoElement
+where
+    F: Fn() -> AdaptiveColor + 'static,
+{
     let clamped = ratio.clamp(0.0, 1.0);
     view()
         .w(width)
@@ -210,13 +212,18 @@ pub fn ui_size_bar(ratio: f32, width: Points) -> impl IntoElement {
         .bg(size_bar_track)
         .overflow_hidden()
         .accessibility_elements_hidden(true)
-        .child(
-            view()
-                .h_full()
-                .w(relative(clamped))
-                .rounded_full()
-                .bg(move || size_bar_fill(clamped)),
-        )
+        .child(view().h_full().w(relative(clamped)).rounded_full().bg(fill))
+}
+
+/// Horizontal proportional micro-bar used in LayerTimeline and FileTree rows.
+pub fn ui_size_bar(ratio: f32, width: Points) -> impl IntoElement {
+    let clamped = ratio.clamp(0.0, 1.0);
+    render_size_bar(clamped, width, move || size_bar_fill(clamped))
+}
+
+/// Horizontal proportional micro-bar tinted with the matching Treemap layer slot color.
+pub fn ui_treemap_size_bar(ratio: f32, width: Points, color_slot: usize) -> impl IntoElement {
+    render_size_bar(ratio, width, move || treemap_slot(color_slot))
 }
 
 /// Single hairline horizontal separator owned by its container.

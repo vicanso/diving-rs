@@ -16,6 +16,7 @@ pub use blob::{
     clear_blob_files, enforce_layer_cache_limit, is_safe_blob_id, save_blob_to_file, sha256_hex,
     sha256_hex_of_file, tmp_sibling_path,
 };
+pub(crate) use blob::{sha256_hex_of_reader, touch_blob_times};
 pub use recent_cache::RecentCache;
 
 /// Default TTL for both layer blob and analysis caches (90 days).
