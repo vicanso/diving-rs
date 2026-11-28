@@ -216,6 +216,18 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ),
     // Inspector workspace & layers
     ("layers.title", "Layers", "镜像层"),
+    ("layers.order_desc", "#N→1", "#N→1"),
+    ("layers.order_asc", "#1→N", "#1→N"),
+    (
+        "layers.order_desc_tip",
+        "Upper layers first (#N → #1) — click for build order",
+        "上层优先（#N → #1）— 点击切换构建顺序",
+    ),
+    (
+        "layers.order_asc_tip",
+        "Build order (#1 → #N) — click for upper layers first",
+        "构建顺序（#1 → #N）— 点击切换上层优先",
+    ),
     ("layers.filter_all", "All", "全部"),
     ("layers.filter_files", "Files", "含文件"),
     ("layers.filter_large", "> 1 MB", "> 1 MB"),

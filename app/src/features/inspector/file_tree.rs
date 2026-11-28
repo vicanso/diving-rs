@@ -1306,11 +1306,11 @@ mod tests {
             .expect("file tree rows rendered");
         assert!(app.shows("layer=0;file=;preview="));
 
-        // Before FileTree is focused, Down/Up step layers globally.
-        app.press_key("down").expect("step down to layer 1");
+        // Before FileTree is focused, Up/Down step layers visually (Desc: layer 1 above layer 0).
+        app.press_key("up").expect("step up to layer 1");
         app.wait_for_within("layer=1;file=;preview=", Duration::from_secs(2))
             .expect("layer stepped to 1");
-        app.press_key("up").expect("step back up to layer 0");
+        app.press_key("down").expect("step back down to layer 0");
         app.wait_for_within("layer=0;file=;preview=", Duration::from_secs(2))
             .expect("layer stepped back to 0");
         app.wait_for_within("app.conf", Duration::from_secs(2))
@@ -1354,8 +1354,8 @@ mod tests {
 
         // Moving focus back out of FileTree (Shift+Tab onto toolbar `Collapse all`) restores global layer stepping.
         app.press_key("shift+tab").expect("tab back out of tree");
-        app.press_key("down")
-            .expect("step layer down once outside file tree");
+        app.press_key("up")
+            .expect("step layer up once outside file tree");
         app.wait_for_within("layer=1;file=;preview=etc/app.conf", Duration::from_secs(2))
             .expect("leaving FileTree focus must restore global layer stepping");
     }

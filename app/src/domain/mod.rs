@@ -10,14 +10,14 @@ pub mod updater;
 pub use model::{
     AppRoute, DiffFileTab, FileKind, FilePreviewContent, FileProvenanceHit, FileTreeFilter,
     FileTreeRow, ImageSourceKind, IndexedTree, IndexedTreeNode, InspectorTab, LARGE_LAYER_BYTES,
-    LayerFileCounts, LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode,
+    LayerFileCounts, LayerFilterMode, LayerSortOrder, RecentImageEntry, SharedRef, TreemapViewMode,
     WhatIfProjection, build_indexed_tree, classify_file_entry, classify_file_kind,
     classify_file_preview, classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
-    extract_registry_host_from_image, findings_total_count, flatten_file_tree,
-    flatten_indexed_tree, format_bytes, format_command_lines, format_runtime_compat,
-    image_source_kind, is_registry_auth_or_tls_error, layer_matches_filter, relocalize_image_diff,
-    remove_recent, search_file_provenance, symlink_preview_content, upsert_recent,
-    visible_layer_indices,
+    default_selected_layer, extract_registry_host_from_image, findings_total_count,
+    flatten_file_tree, flatten_indexed_tree, format_bytes, format_command_lines,
+    format_runtime_compat, image_source_kind, is_registry_auth_or_tls_error, layer_matches_filter,
+    relocalize_image_diff, remove_recent, search_file_provenance, symlink_preview_content,
+    upsert_recent, visible_layer_indices,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
 pub use shell_fmt::{ParsedLayerCommand, format_dockerfile, parse_layer_command};

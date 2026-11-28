@@ -1,5 +1,6 @@
 use self::files::FileTreeCache;
 use self::image_detail::ImageDetailWidgetOption;
+use self::layers::LayerOrder;
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -50,6 +51,7 @@ struct WidgetState {
     active_list: Vec<&'static str>,
     active: &'static str,
     selected_layer: usize,
+    layer_order: LayerOrder,
     layers_state: TableState,
     layers_page: usize,
     size: u64,
@@ -133,9 +135,35 @@ impl WidgetState {
         self.files_state.select(Some(next));
     }
 
+    fn visual_row_of_layer(&self, layer_idx: usize) -> usize {
+        let len = self.layers.len();
+        if len == 0 {
+            return 0;
+        }
+        let clamped = layer_idx.min(len - 1);
+        match self.layer_order {
+            LayerOrder::Desc => len - 1 - clamped,
+            LayerOrder::Asc => clamped,
+        }
+    }
+
+    fn layer_of_visual_row(&self, row_idx: usize) -> usize {
+        let len = self.layers.len();
+        if len == 0 {
+            return 0;
+        }
+        let clamped = row_idx.min(len - 1);
+        match self.layer_order {
+            LayerOrder::Desc => len - 1 - clamped,
+            LayerOrder::Asc => clamped,
+        }
+    }
+
     fn select_layer_by(&mut self, offset: i64) {
         let max_idx = self.layers.len().saturating_sub(1) as i64;
-        let next = (self.selected_layer as i64 + offset).clamp(0, max_idx) as usize;
+        let cur_row = self.visual_row_of_layer(self.selected_layer) as i64;
+        let next_row = (cur_row + offset).clamp(0, max_idx) as usize;
+        let next = self.layer_of_visual_row(next_row);
         if next != self.selected_layer {
             self.selected_layer = next;
             self.files_state.select(None);
@@ -171,9 +199,12 @@ impl WidgetState {
             if self.file_count > 0 {
                 self.files_state.select(Some(0));
             }
-        } else if self.is_layers_widget_active() && self.selected_layer != 0 {
-            self.selected_layer = 0;
-            self.files_state.select(None);
+        } else if self.is_layers_widget_active() {
+            let first = self.layer_of_visual_row(0);
+            if self.selected_layer != first {
+                self.selected_layer = first;
+                self.files_state.select(None);
+            }
         } else if self.is_image_detail_widget_active() {
             self.image_detail_scroll = 0;
         }
@@ -185,7 +216,8 @@ impl WidgetState {
                 self.files_state.select(Some(self.file_count - 1));
             }
         } else if self.is_layers_widget_active() {
-            let last = self.layers.len().saturating_sub(1);
+            let last_row = self.layers.len().saturating_sub(1);
+            let last = self.layer_of_visual_row(last_row);
             if self.selected_layer != last {
                 self.selected_layer = last;
                 self.files_state.select(None);
@@ -235,16 +267,28 @@ pub fn run_app(result: DockerAnalyzeResult, lang: Lang) -> Result<(), Box<dyn Er
     let hidden = AtomicBool::default();
 
     let summary = result.summary();
+    let layer_order = LayerOrder::default();
+    let initial_layer = result
+        .layers
+        .iter()
+        .rposition(|l| !l.empty)
+        .unwrap_or_else(|| result.layers.len().saturating_sub(1));
+    let initial_row = if result.layers.is_empty() {
+        0
+    } else {
+        result.layers.len() - 1 - initial_layer
+    };
     let mut layers_state = TableState::default();
     if !result.layers.is_empty() {
-        layers_state.select(Some(0));
+        layers_state.select(Some(initial_row));
     }
     let mut state = WidgetState {
         name: result.name,
         arch: result.arch,
         os: result.os,
         layers: result.layers,
-        selected_layer: 0,
+        selected_layer: initial_layer,
+        layer_order,
         layers_state,
         layers_page: 5,
         file_tree_list: result.file_tree_list,
@@ -381,6 +425,7 @@ fn handle_key_event(state: &mut WidgetState, key: KeyEvent) -> KeyAction {
         KeyCode::Char('0') => state.change_file_tree_mode(0),
         KeyCode::Char('1') => state.change_file_tree_mode(1),
         KeyCode::Char('2') => state.change_file_tree_mode(2),
+        KeyCode::Char('r') => state.layer_order = state.layer_order.toggle(),
         KeyCode::Esc => {
             if !state.search_query.is_empty() {
                 state.search_query.clear();
@@ -400,7 +445,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
     state.layers_state.select(if state.layers.is_empty() {
         None
     } else {
-        Some(state.selected_layer)
+        Some(state.visual_row_of_layer(state.selected_layer))
     });
 
     let root_chunks = Layout::default()
@@ -437,6 +482,7 @@ fn draw_widgets(f: &mut Frame, state: &mut WidgetState) {
             is_active: state.is_layers_widget_active(),
             lang: state.lang,
             max_height: max_layers_height,
+            order: state.layer_order,
         },
     );
 
@@ -668,6 +714,7 @@ mod tests {
             recommendations: recs,
             active_list: vec![LAYERS_WIDGET, IMAGE_DETAIL_WIDGET, FILES_WIDGET],
             active: LAYERS_WIDGET,
+            selected_layer: 1,
             lang: Lang::En,
             ..Default::default()
         };
@@ -685,16 +732,32 @@ mod tests {
                 .join("\n")
         };
 
-        // Hint bar shown on initial draw; `j`/`End`/`Home` navigate layers.
+        // Hint bar shown on initial draw; `j`/`End`/`Home` navigate layers in Desc order (`1` on top).
         let initial = draw_text(&mut term, &mut state);
         assert!(initial.contains("q Quit"), "{initial}");
+        assert!(initial.contains("r Order"), "{initial}");
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(state.selected_layer, 0);
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::Home));
+        assert_eq!(state.selected_layer, 1);
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::End));
+        assert_eq!(state.selected_layer, 0);
+
+        // `r` toggles to Asc order (`0` on top), reversing visual stepping cleanly.
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(state.layer_order, LayerOrder::Asc);
         handle_key_event(&mut state, KeyEvent::from(KeyCode::Char('j')));
         assert_eq!(state.selected_layer, 1);
         handle_key_event(&mut state, KeyEvent::from(KeyCode::Home));
         assert_eq!(state.selected_layer, 0);
         handle_key_event(&mut state, KeyEvent::from(KeyCode::End));
         assert_eq!(state.selected_layer, 1);
-        handle_key_event(&mut state, KeyEvent::from(KeyCode::Home));
+
+        // Toggle back to Desc and jump to bottom (`0`) before searching its file tree.
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(state.layer_order, LayerOrder::Desc);
+        handle_key_event(&mut state, KeyEvent::from(KeyCode::End));
+        assert_eq!(state.selected_layer, 0);
 
         // Tab to Image Details and verify scroll advances/returns cleanly.
         handle_key_event(&mut state, KeyEvent::from(KeyCode::Tab));

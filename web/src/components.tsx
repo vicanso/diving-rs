@@ -51,6 +51,7 @@ import {
 import {
   getDownloadIcon,
   getPreviewIcon,
+  getSortOrderIcon,
   minusOutlined,
   plusOutlined,
 } from "./icons";
@@ -61,6 +62,8 @@ import {
   ImageDescriptions,
   ImagePreview,
   Layer,
+  LayerFilterMode,
+  LayerOrder,
   McpStatus,
   ModifiedFile,
   Recommendation,
@@ -860,8 +863,18 @@ const fill = (template: string, values: Record<string, string>) =>
 /** The layer list from the manifest, shown while a first analysis reads
  *  the layers; replaced by the full report when it is done. */
 export const ImagePreviewCard = memo(
-  ({ preview }: { preview: ImagePreview }) => {
+  ({
+    preview,
+    layerOrder = "desc",
+  }: {
+    preview: ImagePreview;
+    layerOrder?: LayerOrder;
+  }) => {
     const fileLayers = preview.layers.filter((l) => !l.empty).length;
+    const orderedLayers = useMemo(() => {
+      const indexed = preview.layers.map((layer, index) => ({ layer, index }));
+      return layerOrder === "desc" ? indexed.reverse() : indexed;
+    }, [preview.layers, layerOrder]);
     return (
       <Card
         className="panel"
@@ -880,9 +893,9 @@ export const ImagePreviewCard = memo(
           })}
         </p>
         <ol className="previewLayers">
-          {preview.layers.map((layer, i) => (
-            <li key={i} className={layer.empty ? "empty" : undefined}>
-              <span>{i + 1}</span>
+          {orderedLayers.map(({ layer, index }) => (
+            <li key={index} className={layer.empty ? "empty" : undefined}>
+              <span>{index + 1}</span>
               <span>{layer.empty ? "" : prettyBytes(layer.size)}</span>
               <code title={layer.cmd}>{layer.cmd || "—"}</code>
             </li>
@@ -2020,8 +2033,6 @@ export const KpiStrip = memo(
 
 // ---- Master Pane: Persistent Layer Timeline ----
 
-type LayerFilterMode = "all" | "files" | "large";
-
 const opcodeClass = (op: LayerOpcode) => {
   switch (op) {
     case "FROM":
@@ -2044,14 +2055,21 @@ export const LayerTimeline = memo(
     layers,
     fileTreeList,
     currentLayer,
+    filter,
+    onFilterChange,
+    layerOrder,
+    onToggleLayerOrder,
     onSelectLayer,
   }: {
     layers: Layer[];
     fileTreeList: FileTreeList[][];
     currentLayer: number;
+    filter: LayerFilterMode;
+    onFilterChange: (mode: LayerFilterMode) => void;
+    layerOrder: LayerOrder;
+    onToggleLayerOrder: () => void;
     onSelectLayer: (index: number) => void;
   }) => {
-    const [filter, setFilter] = useState<LayerFilterMode>("all");
     const activeRef = useRef<HTMLButtonElement | null>(null);
 
     useEffect(() => {
@@ -2059,7 +2077,7 @@ export const LayerTimeline = memo(
         block: "nearest",
         behavior: "smooth",
       });
-    }, [currentLayer]);
+    }, [currentLayer, layerOrder]);
 
     const parsedLayers = useMemo(() => {
       let maxSize = 0;
@@ -2091,43 +2109,67 @@ export const LayerTimeline = memo(
     }, [parsedLayers]);
 
     const visibleItems = useMemo(() => {
+      let base = parsedLayers.items;
       if (filter === "files") {
-        return parsedLayers.items.filter((i) => i.hasFiles);
+        base = base.filter((i) => i.hasFiles);
+      } else if (filter === "large") {
+        base = base.filter((i) => i.isLarge);
       }
-      if (filter === "large") {
-        return parsedLayers.items.filter((i) => i.isLarge);
-      }
-      return parsedLayers.items;
-    }, [parsedLayers, filter]);
+      return layerOrder === "desc" ? [...base].reverse() : base;
+    }, [parsedLayers, filter, layerOrder]);
 
     return (
       <section className="layerTimeline" aria-label={i18nGet("layersTitle")}>
         <div className="layerTimelineHeader">
           <div className="layerTimelineTitleRow">
             <span className="layerTimelineTitle">{i18nGet("layersTitle")}</span>
-            <span className="layerTimelineMeta">
-              {layers.length} · {prettyBytes(parsedLayers.totalCompressed)}
-            </span>
+            <div className="layerTimelineRight">
+              <span className="layerTimelineMeta">
+                {layers.length} · {prettyBytes(parsedLayers.totalCompressed)}
+              </span>
+              <button
+                type="button"
+                className="layerSortBtn"
+                onClick={onToggleLayerOrder}
+                title={
+                  layerOrder === "desc"
+                    ? i18nGet("layerOrderDescTip")
+                    : i18nGet("layerOrderAscTip")
+                }
+                aria-label={
+                  layerOrder === "desc"
+                    ? i18nGet("layerOrderDescTip")
+                    : i18nGet("layerOrderAscTip")
+                }
+              >
+                {getSortOrderIcon()}
+                <span>
+                  {layerOrder === "desc"
+                    ? i18nGet("layerOrderDesc")
+                    : i18nGet("layerOrderAsc")}
+                </span>
+              </button>
+            </div>
           </div>
           <div className="layerFilterPills" role="group">
             <button
               type="button"
               className={`filterPill ${filter === "all" ? "active" : ""}`}
-              onClick={() => setFilter("all")}
+              onClick={() => onFilterChange("all")}
             >
               {i18nGet("filterAll")} ({counts.all})
             </button>
             <button
               type="button"
               className={`filterPill ${filter === "files" ? "active" : ""}`}
-              onClick={() => setFilter("files")}
+              onClick={() => onFilterChange("files")}
             >
               {i18nGet("filterHasFiles")} ({counts.files})
             </button>
             <button
               type="button"
               className={`filterPill ${filter === "large" ? "active" : ""}`}
-              onClick={() => setFilter("large")}
+              onClick={() => onFilterChange("large")}
             >
               {i18nGet("filterLarge")} ({counts.large})
             </button>

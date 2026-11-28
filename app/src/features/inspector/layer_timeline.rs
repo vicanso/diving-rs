@@ -6,20 +6,23 @@ use diving_core::DockerAnalyzeResult;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, LayerFilterMode, classify_layer_opcode, format_bytes, layer_matches_filter,
+    AppState, LayerFilterMode, LayerSortOrder, classify_layer_opcode, format_bytes,
+    layer_matches_filter,
 };
 use crate::i18n::t;
 use crate::ui::{
-    IconName, SegmentOption, UiSize, font_mono_family, radius_inset, surface_active, text_tertiary,
-    theme, ui_context_menu, ui_empty_state, ui_menu_item, ui_opcode_pill, ui_segmented,
-    ui_size_bar,
+    ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family, radius_inset, surface_active,
+    text_tertiary, theme, ui_button, ui_context_menu, ui_empty_state, ui_menu_item, ui_opcode_pill,
+    ui_segmented, ui_size_bar, ui_tooltip,
 };
 
 /// Renders the master `LayerTimeline` sidebar panel.
 pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
     let lang = state.lang;
     let layer_filter = state.layer_filter;
+    let layer_order = state.layer_order;
     let selected_layer = state.selected_layer;
+    let sort_state = state.clone();
 
     let layer_count = res.layers.len();
     let total_compressed: u64 = res.layers.iter().map(|l| l.size).sum();
@@ -29,11 +32,16 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
 
     let filtered_entries = computed(move || {
         let mode = layer_filter.get();
-        all_entries
+        let order = layer_order.get();
+        let mut items: Vec<_> = all_entries
             .iter()
             .filter(|(_, layer)| layer_matches_filter(layer, mode))
             .cloned()
-            .collect::<Vec<_>>()
+            .collect();
+        if order == LayerSortOrder::Desc {
+            items.reverse();
+        }
+        items
     });
 
     view()
@@ -55,6 +63,7 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                         .flex_row()
                         .items_center()
                         .justify_between()
+                        .gap_1p5()
                         .child(
                             text(move || t(lang.get(), "layers.title"))
                                 .role(AccessibilityRole::Header)
@@ -63,17 +72,51 @@ pub fn layer_timeline_panel(state: AppState, res: Arc<DockerAnalyzeResult>) -> i
                                 .text_color(move || theme().foreground),
                         )
                         .child(
-                            text(move || {
-                                format!(
-                                    "{}/{layer_count} · {}",
-                                    filtered_entries.get().len(),
-                                    format_bytes(total_compressed)
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    text(move || {
+                                        format!(
+                                            "{}/{layer_count} · {}",
+                                            filtered_entries.get().len(),
+                                            format_bytes(total_compressed)
+                                        )
+                                    })
+                                    .text_xs()
+                                    .font_family(font_mono_family())
+                                    .tabular_nums()
+                                    .text_color(move || theme().muted_foreground),
                                 )
-                            })
-                            .text_xs()
-                            .font_family(font_mono_family())
-                            .tabular_nums()
-                            .text_color(move || theme().muted_foreground),
+                                .child(
+                                    view()
+                                        .tooltip(ui_tooltip(move || {
+                                            let key = if layer_order.get() == LayerSortOrder::Desc {
+                                                "layers.order_desc_tip"
+                                            } else {
+                                                "layers.order_asc_tip"
+                                            };
+                                            SharedString::from(t(lang.get(), key))
+                                        }))
+                                        .child(ui_button(
+                                            move || {
+                                                let key =
+                                                    if layer_order.get() == LayerSortOrder::Desc {
+                                                        "layers.order_desc"
+                                                    } else {
+                                                        "layers.order_asc"
+                                                    };
+                                                SharedString::from(t(lang.get(), key))
+                                            },
+                                            ButtonVariant::Ghost,
+                                            UiSize::Xs,
+                                            Some(IconName::SortOrder),
+                                            false,
+                                            false,
+                                            move || sort_state.toggle_layer_order(),
+                                        )),
+                                ),
                         ),
                 )
                 .child(view().self_start().child(ui_segmented(
@@ -304,5 +347,80 @@ mod tests {
             segmented_width > 60.0 && segmented_width < 260.0,
             "expected compact segmented track width, got {segmented_width}"
         );
+    }
+
+    #[component]
+    fn TwoLayerTimelineHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        provide_context(state.clone());
+        let res = DockerAnalyzeResult {
+            layers: vec![
+                ImageLayer {
+                    digest: "sha256:base".to_owned(),
+                    cmd: "FROM alpine".to_owned(),
+                    size: 1024,
+                    unpack_size: 2048,
+                    empty: false,
+                    ..Default::default()
+                },
+                ImageLayer {
+                    digest: "sha256:app".to_owned(),
+                    cmd: "COPY app /app".to_owned(),
+                    size: 4096,
+                    unpack_size: 8192,
+                    empty: false,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        view()
+            .w(px(340.0))
+            .h(px(480.0))
+            .bg(move || theme().background)
+            .child(layer_timeline_panel(state, Arc::new(res)))
+    }
+
+    #[test]
+    fn layer_timeline_defaults_to_reverse_order_and_toggles_order() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(960.0), Points(640.0)),
+            ..EngineConfig::new(windowed_root::<TwoLayerTimelineHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start two-layer timeline harness");
+        app.wait_for_within("#N→1", Duration::from_secs(2))
+            .expect("default reverse sort button shown");
+
+        let row_y = |app: &Headless, badge: &str| -> f32 {
+            app.screen()
+                .layout_nodes()
+                .into_iter()
+                .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == badge))
+                .map(|n| n.bounds.origin.y.0)
+                .unwrap_or_else(|| panic!("missing badge {badge}"))
+        };
+
+        assert!(
+            row_y(&app, "02") < row_y(&app, "01"),
+            "layer 02 should appear above layer 01 by default"
+        );
+
+        app.press("#N→1").expect("toggle to build order");
+        app.wait_for_within("#1→N", Duration::from_secs(2))
+            .expect("toggle label updated to #1→N");
+        assert!(
+            row_y(&app, "01") < row_y(&app, "02"),
+            "layer 01 should appear above layer 02 after Asc toggle"
+        );
+
+        app.press("#1→N").expect("restore default reverse order");
+        app.wait_for_within("#N→1", Duration::from_secs(2))
+            .expect("restored #N→1");
     }
 }

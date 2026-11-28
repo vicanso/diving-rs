@@ -71,6 +71,8 @@ import {
   ImagePreview,
   LatestImages,
   Layer,
+  LayerFilterMode,
+  LayerOrder,
   McpStatus,
   ModifiedFile,
   Recommendation,
@@ -211,6 +213,56 @@ const showRequestError = (err: unknown, fallback: string) => {
   message.error(msg || fallback, 10);
 };
 
+const LAYER_ORDER_KEY = "diving.layerOrder";
+
+const loadLayerOrder = (): LayerOrder => {
+  try {
+    return window.localStorage.getItem(LAYER_ORDER_KEY) === "asc"
+      ? "asc"
+      : "desc";
+  } catch {
+    return "desc";
+  }
+};
+
+const defaultLayerIndex = (layers: Layer[], order: LayerOrder): number => {
+  if (layers.length === 0) {
+    return 0;
+  }
+  if (order === "desc") {
+    for (let i = layers.length - 1; i >= 0; i--) {
+      if (!layers[i].empty) {
+        return i;
+      }
+    }
+    return layers.length - 1;
+  }
+  const first = layers.findIndex((l) => !l.empty);
+  return first >= 0 ? first : 0;
+};
+
+const visibleLayerIndices = (
+  layers: Layer[],
+  fileTreeList: FileTreeList[][],
+  filter: LayerFilterMode,
+  order: LayerOrder,
+): number[] => {
+  const indices: number[] = [];
+  for (let i = 0; i < layers.length; i++) {
+    if (filter === "files" && (fileTreeList[i]?.length || 0) === 0) {
+      continue;
+    }
+    if (filter === "large" && (layers[i].size || 0) < 1024 * 1024) {
+      continue;
+    }
+    indices.push(i);
+  }
+  if (order === "desc") {
+    indices.reverse();
+  }
+  return indices;
+};
+
 const App = () => {
   const { mode: themeMode, isDark, cycleMode: cycleTheme } = useThemeMode();
   const [initial] = useState(readQuery);
@@ -220,6 +272,19 @@ const App = () => {
   const [report, setReport] = useState<ReportState | null>(null);
   const [reportVersion, setReportVersion] = useState(0);
   const [currentLayer, setCurrentLayer] = useState(0);
+  const [layerFilter, setLayerFilter] = useState<LayerFilterMode>("all");
+  const [layerOrder, setLayerOrder] = useState<LayerOrder>(loadLayerOrder);
+  const toggleLayerOrder = useCallback(() => {
+    setLayerOrder((prev) => {
+      const next: LayerOrder = prev === "desc" ? "asc" : "desc";
+      try {
+        window.localStorage.setItem(LAYER_ORDER_KEY, next);
+      } catch {
+        /* ignore storage failures */
+      }
+      return next;
+    });
+  }, []);
   const [viewOption, setViewOption] = useState<FileTreeViewOption>(
     DEFAULT_VIEW_OPTION,
   );
@@ -353,7 +418,8 @@ const App = () => {
         supportedArchs: data.supportedArchs || [],
       });
       setReportVersion((v) => v + 1);
-      setCurrentLayer(0);
+      setLayerFilter("all");
+      setCurrentLayer(defaultLayerIndex(data.layers || [], layerOrder));
       setDiff(null);
       fetchLatestImages();
     } catch (err: unknown) {
@@ -534,12 +600,26 @@ const App = () => {
       ) {
         return;
       }
-      if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setCurrentLayer((i) => Math.min(report.layers.length - 1, i + 1));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setCurrentLayer((i) => Math.max(0, i - 1));
+        const visible = visibleLayerIndices(
+          report.layers,
+          report.fileTreeList,
+          layerFilter,
+          layerOrder,
+        );
+        if (visible.length === 0) {
+          return;
+        }
+        const delta = e.key === "ArrowDown" ? 1 : -1;
+        setCurrentLayer((cur) => {
+          const pos = visible.indexOf(cur);
+          if (pos < 0) {
+            return delta >= 0 ? visible[0] : visible[visible.length - 1];
+          }
+          const nextPos = Math.max(0, Math.min(visible.length - 1, pos + delta));
+          return visible[nextPos];
+        });
       } else if (e.key === "/") {
         e.preventDefault();
         fileSearchRef.current?.focus();
@@ -547,7 +627,7 @@ const App = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [report, preview, tokenModalOpen]);
+  }, [report, preview, tokenModalOpen, layerOrder, layerFilter]);
 
   const deferredOption = useDeferredValue(viewOption);
   const fileTreeRows = useMemo(() => {
@@ -839,7 +919,7 @@ const App = () => {
         {preview && (
           <Content>
             <div className="contentWrapper reportStack">
-              <ImagePreviewCard preview={preview} />
+              <ImagePreviewCard preview={preview} layerOrder={layerOrder} />
             </div>
           </Content>
         )}
@@ -914,6 +994,10 @@ const App = () => {
                     layers={report.layers}
                     fileTreeList={report.fileTreeList}
                     currentLayer={currentLayer}
+                    filter={layerFilter}
+                    onFilterChange={setLayerFilter}
+                    layerOrder={layerOrder}
+                    onToggleLayerOrder={toggleLayerOrder}
                     onSelectLayer={(idx) => {
                       setCurrentLayer(idx);
                       setMobilePane("workspace");

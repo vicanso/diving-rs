@@ -637,6 +637,14 @@ mod tests {
 
         open_local_tar_in_app(&mut app, tmp.path());
 
+        // Default reverse order selects upper Layer #3; step down twice to inspect Layer #1 symlink.
+        app.wait_for_within("#3", Duration::from_secs(3))
+            .expect("initial selection on topmost Layer #3");
+        app.press_key("down").expect("step down to Layer #2");
+        app.press_key("down").expect("step down to Layer #1");
+        app.wait_for_within("#1", Duration::from_secs(3))
+            .expect("selected Layer #1");
+
         // Symlink preview shows target rather than empty.
         app.press("Expand all").expect("expand layer 1");
         app.wait_for_within("sh -> busybox", Duration::from_secs(3))

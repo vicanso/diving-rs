@@ -2018,6 +2018,35 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.layerTimelineRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.layerSortBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.layerSortBtn:hover {
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border-color: var(--border-default);
 }
 
 .layerTimelineTitle {

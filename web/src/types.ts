@@ -59,6 +59,9 @@ export interface Layer {
   empty: boolean;
 }
 
+export type LayerOrder = "desc" | "asc";
+export type LayerFilterMode = "all" | "files" | "large";
+
 export interface FileTreeList {
   key: string;
   name: string;

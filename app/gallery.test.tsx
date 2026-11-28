@@ -55,7 +55,7 @@ test("inspector renders light theme screenshot on macos", async () => {
   await app.press("Analyze");
   await app.waitFor("Layers");
   await app.press("Expand all");
-  await app.waitFor("app.conf");
+  await app.waitFor("payload.bin");
   await captureIfGraphical(app, ".nsh/out/inspector-light.png");
 });
 
@@ -70,7 +70,7 @@ test("inspector renders dark theme screenshot on macos", async () => {
   await app.press("Analyze");
   await app.waitFor("Layers");
   await app.press("Expand all");
-  await app.waitFor("app.conf");
+  await app.waitFor("payload.bin");
   await captureIfGraphical(app, ".nsh/out/inspector-dark.png");
 });
 

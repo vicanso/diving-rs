@@ -161,7 +161,13 @@ fn landing_analyzes_local_tar_and_inspects_files_findings_and_dockerfile() {
     assert!(app.shows("Image Size"));
     assert!(app.shows("Wasted"));
     assert!(app.shows("File Tree (3)"));
-    assert!(app.shows("+3 / ~0 / −0"));
+    // Default reverse order selects upper Layer #3 first, then step down to Layer #1.
+    assert!(app.shows("+2 / ~0 / −1"));
+
+    app.press_key("down").expect("step down to Layer #2");
+    app.press_key("down").expect("step down to Layer #1");
+    app.wait_for_within("+3 / ~0 / −0", Duration::from_secs(3))
+        .expect("select Layer #1 showing 3 added files");
 
     app.press("Expand all").expect("expand all file tree dirs");
     app.wait_for_within("app.conf", Duration::from_secs(3))
@@ -481,22 +487,34 @@ fn keyboard_arrow_keys_step_through_layers() {
     app.wait_for_within("Layers", Duration::from_secs(10))
         .expect("enter Inspector");
 
-    assert!(app.shows("#1"));
-    assert!(app.shows("COPY layer1 /"));
+    assert!(app.shows("#3"));
+    assert!(app.shows("COPY app/ /app"));
 
     app.press_key("down").expect("step down to Layer #2");
     app.wait_for_within("#2", Duration::from_secs(3))
         .expect("select Layer #2");
     assert!(app.shows("ENV APP_ENV=production"));
 
-    app.press_key("down").expect("step down to Layer #3");
-    app.wait_for_within("#3", Duration::from_secs(3))
-        .expect("select Layer #3");
-    assert!(app.shows("COPY app/ /app"));
+    app.press_key("down").expect("step down to Layer #1");
+    app.wait_for_within("#1", Duration::from_secs(3))
+        .expect("select Layer #1");
+    assert!(app.shows("COPY layer1 /"));
 
     app.press_key("up").expect("step back up to Layer #2");
     app.wait_for_within("#2", Duration::from_secs(3))
         .expect("re-select Layer #2");
+
+    app.press("#N→1").expect("toggle layer order to Asc");
+    app.wait_for_within("#1→N", Duration::from_secs(2))
+        .expect("update toggle label to #1→N");
+    app.press_key("down")
+        .expect("in Asc order, down moves from #2 to #3");
+    app.wait_for_within("#3", Duration::from_secs(3))
+        .expect("select Layer #3 after Asc toggle");
+
+    app.press("#1→N").expect("restore default Desc layer order");
+    app.wait_for_within("#N→1", Duration::from_secs(2))
+        .expect("restore toggle label to #N→1");
 }
 
 fn write_fixture_if_env(var: &str, default_rel_path: &str, bytes: &[u8]) {

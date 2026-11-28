@@ -194,7 +194,11 @@ fn step_selected_layer(state: &AppState, delta: isize) {
     let Some(res) = state.result.get_untracked() else {
         return;
     };
-    let visible = visible_layer_indices(&res.layers, state.layer_filter.get_untracked());
+    let visible = visible_layer_indices(
+        &res.layers,
+        state.layer_filter.get_untracked(),
+        state.layer_order.get_untracked(),
+    );
     if visible.is_empty() {
         return;
     }

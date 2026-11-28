@@ -26,9 +26,9 @@ use tokio::sync::{mpsc::unbounded_channel, oneshot};
 
 use crate::domain::model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
-    InspectorTab, LayerFilterMode, RecentImageEntry, SharedRef, TreemapViewMode, format_bytes,
-    image_source_kind, relocalize_image_diff, remove_recent, symlink_preview_content,
-    upsert_recent,
+    InspectorTab, LayerFilterMode, LayerSortOrder, RecentImageEntry, SharedRef, TreemapViewMode,
+    default_selected_layer, format_bytes, image_source_kind, relocalize_image_diff, remove_recent,
+    symlink_preview_content, upsert_recent,
 };
 use crate::domain::service::{
     AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
@@ -47,6 +47,7 @@ const KEY_APPEARANCE: &str = "diving.appearance";
 const KEY_SIDEBAR_WIDTH: &str = "diving.layers_pane_width";
 const KEY_APP_SIDEBAR_OPEN: &str = "diving.app_sidebar_open";
 const KEY_RECENT_IMAGES: &str = "diving.recent_images";
+const KEY_LAYER_SORT_ORDER: &str = "diving.layer_sort_order";
 const KEY_COMMAND_WRAP: &str = "diving.command_wrap";
 const KEY_COMMAND_RAW: &str = "diving.command_raw";
 const KEY_DOCKERFILE_WRAP: &str = "diving.dockerfile_wrap";
@@ -231,6 +232,7 @@ pub struct AppState {
     pub final_tree: Signal<Option<SharedRef<FsNode>>>,
     pub active_tab: Signal<InspectorTab>,
     pub layer_filter: Signal<LayerFilterMode>,
+    pub layer_order: Signal<LayerSortOrder>,
     pub selected_layer: Signal<usize>,
     pub command_expanded: Signal<bool>,
     pub command_wrap: Signal<bool>,
@@ -377,6 +379,9 @@ impl AppState {
         let saved_dockerfile_raw = Storage::get_item(KEY_DOCKERFILE_RAW)
             .map(|raw| raw == "true")
             .unwrap_or(false);
+        let saved_layer_order = Storage::get_item(KEY_LAYER_SORT_ORDER)
+            .map(|raw| LayerSortOrder::from_storage_str(&raw))
+            .unwrap_or_default();
 
         let state = Self {
             service,
@@ -405,6 +410,7 @@ impl AppState {
             final_tree: signal(None),
             active_tab: signal(InspectorTab::FileTree),
             layer_filter: signal(LayerFilterMode::All),
+            layer_order: signal(saved_layer_order),
             selected_layer: signal(0),
             command_expanded: signal(false),
             command_wrap: signal(saved_command_wrap),
@@ -630,6 +636,13 @@ impl AppState {
     pub fn set_dockerfile_raw(&self, next: bool) {
         self.dockerfile_raw.set(next);
         let _ = Storage::set_item(KEY_DOCKERFILE_RAW, if next { "true" } else { "false" });
+    }
+
+    /// Toggles layer list display order (`#N→1` vs `#1→N`) and persists the preference.
+    pub fn toggle_layer_order(&self) {
+        let next = self.layer_order.get_untracked().toggle();
+        self.layer_order.set(next);
+        let _ = Storage::set_item(KEY_LAYER_SORT_ORDER, next.as_storage_str());
     }
 
     fn install_responsive_sync(&self) {
@@ -1041,7 +1054,7 @@ impl AppState {
         summary: SharedRef<DockerAnalyzeSummary>,
         res: Arc<DockerAnalyzeResult>,
     ) {
-        let first_non_empty = res.layers.iter().position(|l| !l.empty).unwrap_or(0);
+        let initial_layer = default_selected_layer(&res.layers, self.layer_order.get_untracked());
         let next_result_seq = self.result_seq.get_untracked().wrapping_add(1);
         self.result_seq.set(next_result_seq);
         self.close_all_modals();
@@ -1073,7 +1086,7 @@ impl AppState {
         // Reset per-image inspector state
         self.active_tab.set(InspectorTab::FileTree);
         self.layer_filter.set(LayerFilterMode::All);
-        self.selected_layer.set(first_non_empty);
+        self.selected_layer.set(initial_layer);
         self.command_expanded.set(false);
         self.tree_keyword.set(String::new());
         self.tree_modifications_only.set(false);

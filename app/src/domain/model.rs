@@ -68,6 +68,39 @@ pub enum InspectorTab {
     Dockerfile,
 }
 
+/// Display ordering for `LayerTimeline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayerSortOrder {
+    /// Upper layers first (`#N → #1`), matching `docker history`.
+    #[default]
+    Desc,
+    /// Dockerfile build order (`#1 → #N`).
+    Asc,
+}
+
+impl LayerSortOrder {
+    pub fn as_storage_str(self) -> &'static str {
+        match self {
+            Self::Desc => "desc",
+            Self::Asc => "asc",
+        }
+    }
+
+    pub fn from_storage_str(raw: &str) -> Self {
+        match raw.trim() {
+            "asc" => Self::Asc,
+            _ => Self::Desc,
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Desc => Self::Asc,
+            Self::Asc => Self::Desc,
+        }
+    }
+}
+
 /// Filter modes for `LayerTimeline`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LayerFilterMode {
@@ -89,14 +122,33 @@ pub fn layer_matches_filter(layer: &ImageLayer, mode: LayerFilterMode) -> bool {
     }
 }
 
-/// Returns the 0-based indices of layers visible under `mode`.
-pub fn visible_layer_indices(layers: &[ImageLayer], mode: LayerFilterMode) -> Vec<usize> {
-    layers
+/// Selects the initial layer index according to the active [`LayerSortOrder`].
+pub fn default_selected_layer(layers: &[ImageLayer], order: LayerSortOrder) -> usize {
+    match order {
+        LayerSortOrder::Desc => layers
+            .iter()
+            .rposition(|l| !l.empty)
+            .unwrap_or_else(|| layers.len().saturating_sub(1)),
+        LayerSortOrder::Asc => layers.iter().position(|l| !l.empty).unwrap_or(0),
+    }
+}
+
+/// Returns the 0-based indices of layers visible under `mode` in `order` visual sequence.
+pub fn visible_layer_indices(
+    layers: &[ImageLayer],
+    mode: LayerFilterMode,
+    order: LayerSortOrder,
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = layers
         .iter()
         .enumerate()
         .filter(|(_, layer)| layer_matches_filter(layer, mode))
         .map(|(idx, _)| idx)
-        .collect()
+        .collect();
+    if order == LayerSortOrder::Desc {
+        indices.reverse();
+    }
+    indices
 }
 
 /// Re-computes localized recommendation diffs on an existing [`ImageDiff`] after language switch.
@@ -1379,16 +1431,34 @@ mod tests {
                 unpack_size: LARGE_LAYER_BYTES,
                 ..Default::default()
             },
+            ImageLayer {
+                empty: true,
+                unpack_size: 0,
+                ..Default::default()
+            },
         ];
         assert_eq!(
-            visible_layer_indices(&layers, LayerFilterMode::All),
-            [0, 1, 2]
+            visible_layer_indices(&layers, LayerFilterMode::All, LayerSortOrder::Desc),
+            [3, 2, 1, 0]
         );
         assert_eq!(
-            visible_layer_indices(&layers, LayerFilterMode::HasFiles),
+            visible_layer_indices(&layers, LayerFilterMode::HasFiles, LayerSortOrder::Desc),
+            [2, 1]
+        );
+        assert_eq!(
+            visible_layer_indices(&layers, LayerFilterMode::Large, LayerSortOrder::Desc),
+            [2]
+        );
+        assert_eq!(
+            visible_layer_indices(&layers, LayerFilterMode::All, LayerSortOrder::Asc),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(
+            visible_layer_indices(&layers, LayerFilterMode::HasFiles, LayerSortOrder::Asc),
             [1, 2]
         );
-        assert_eq!(visible_layer_indices(&layers, LayerFilterMode::Large), [2]);
+        assert_eq!(default_selected_layer(&layers, LayerSortOrder::Desc), 2);
+        assert_eq!(default_selected_layer(&layers, LayerSortOrder::Asc), 1);
     }
 
     #[test]
