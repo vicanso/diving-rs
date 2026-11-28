@@ -6,7 +6,7 @@ use std::time::Duration;
 use diving_core::DockerAnalyzeResult;
 use nsh_core::prelude::*;
 
-use crate::domain::AppState;
+use crate::domain::{AppState, format_dockerfile};
 use crate::i18n::{UiLang, t};
 use crate::ui::{
     BadgeTone, ButtonVariant, IconName, UiSize, font_mono_family, radius_inset, theme, ui_badge,
@@ -17,18 +17,32 @@ use crate::ui::{
 pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl IntoElement {
     let lang = state.lang;
     let wrap = state.dockerfile_wrap;
+    let raw = state.dockerfile_raw;
     let copied = signal(false);
     let copy_seq = signal(0_u64);
     let show_meta = signal(false);
 
     let empty_dockerfile = res.dockerfile.trim().is_empty();
-    let dockerfile_for_copy = res.dockerfile.clone();
-    let dockerfile_for_export = res.dockerfile.clone();
-    let dockerfile_for_view = res.dockerfile.clone();
+    let raw_dockerfile = res.dockerfile.clone();
+    let formatted_dockerfile = format_dockerfile(&raw_dockerfile);
+    let raw_for_copy = raw_dockerfile.clone();
+    let fmt_for_copy = formatted_dockerfile.clone();
+    let raw_for_export = raw_dockerfile.clone();
+    let fmt_for_export = formatted_dockerfile.clone();
+    let active_content = computed(move || {
+        let body = if raw.get() {
+            raw_dockerfile.clone()
+        } else {
+            formatted_dockerfile.clone()
+        };
+        (!body.is_empty()).then(|| SharedString::from(body))
+    });
     let user = res.user.clone();
     let envs = res.envs.clone();
     let labels = res.labels.clone();
     let meta_count = envs.len() + labels.len();
+    let wrap_state = state.clone();
+    let raw_state = state.clone();
     let export_state = state;
 
     view()
@@ -93,7 +107,13 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                             move || SharedString::from(t(lang.get(), "dockerfile.wrap")),
                             wrap,
                             empty_dockerfile,
-                            move |next| wrap.set(next),
+                            move |next| wrap_state.set_dockerfile_wrap(next),
+                        ))
+                        .child(ui_switch(
+                            move || SharedString::from(t(lang.get(), "dockerfile.raw")),
+                            raw,
+                            empty_dockerfile,
+                            move |next| raw_state.set_dockerfile_raw(next),
                         )),
                 )
                 .child(
@@ -103,7 +123,8 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                         .gap_2()
                         .child(dynamic(move || {
                             let is_copied = copied.get();
-                            let payload = dockerfile_for_copy.clone();
+                            let raw_payload = raw_for_copy.clone();
+                            let fmt_payload = fmt_for_copy.clone();
                             ui_button(
                                 move || {
                                     SharedString::from(if copied.get() {
@@ -122,6 +143,11 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                                 empty_dockerfile,
                                 false,
                                 move || {
+                                    let payload = if raw.get_untracked() {
+                                        &raw_payload
+                                    } else {
+                                        &fmt_payload
+                                    };
                                     if payload.trim().is_empty() {
                                         return;
                                     }
@@ -145,7 +171,14 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                             Some(IconName::Download),
                             empty_dockerfile,
                             false,
-                            move || export_state.export_dockerfile(dockerfile_for_export.clone()),
+                            move || {
+                                let payload = if raw.get_untracked() {
+                                    raw_for_export.clone()
+                                } else {
+                                    fmt_for_export.clone()
+                                };
+                                export_state.export_dockerfile(payload);
+                            },
                         )),
                 ),
         )
@@ -183,7 +216,7 @@ pub fn dockerfile_tab(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl In
                 .min_h(px(0.0))
                 .p_4()
                 .child(ui_code_viewer(
-                    Some(SharedString::from(dockerfile_for_view)),
+                    active_content,
                     Some(SharedString::from("Dockerfile")),
                     wrap,
                     "Reconstructed Dockerfile viewer",
@@ -412,7 +445,60 @@ mod tests {
             state.dockerfile_wrap.get_untracked(),
             "dockerfile_wrap must default to true"
         );
+        assert!(
+            !state.dockerfile_raw.get_untracked(),
+            "dockerfile_raw must default to false"
+        );
         provide_context(state.clone());
         dockerfile_tab(state, sample_res(""))
+    }
+
+    #[test]
+    fn formatted_dockerfile_renders_by_default_and_raw_toggle_restores_original() {
+        let clipboard = Arc::new(MemoryClipboard::new(None));
+        let raw_df = "FROM alpine:3.20 # buildkit\nRUN apk update && apk add curl";
+
+        #[component]
+        fn RawSwitchHarness() -> impl IntoElement {
+            let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+            let state = AppState::new(DivingService::with_analyzer(analyzer));
+            provide_context(state.clone());
+            dockerfile_tab(
+                state,
+                sample_res("FROM alpine:3.20 # buildkit\nRUN apk update && apk add curl"),
+            )
+        }
+
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            clock: Clock::manual(SystemTime::UNIX_EPOCH),
+            clipboard: Some(clipboard.clone()),
+            ..EngineConfig::new(windowed_root::<RawSwitchHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start raw switch harness");
+        app.wait_for_within("Image Metadata (2)", Duration::from_secs(2))
+            .expect("toolbar rendered");
+        assert!(app.shows("FROM alpine:3.20"));
+        assert!(app.shows("RUN apk update && \\"));
+        assert!(
+            app.screen().texts().contains(&"    apk add curl"),
+            "missing indented apk add curl in {:?}",
+            app.screen().texts()
+        );
+
+        app.press("Raw").expect("enable Raw switch");
+        app.wait_for_within("FROM alpine:3.20 # buildkit", Duration::from_secs(2))
+            .expect("raw dockerfile rendered");
+        app.press("Copy").expect("copy raw dockerfile");
+        assert_eq!(clipboard.text().as_deref(), Some(raw_df));
+
+        app.press("Raw").expect("disable Raw switch");
+        app.wait_for_within("RUN apk update && \\", Duration::from_secs(2))
+            .expect("formatted dockerfile restored");
     }
 }

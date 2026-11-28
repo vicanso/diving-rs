@@ -13,6 +13,7 @@ use diving_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::domain::shell_fmt::parse_layer_command;
 use crate::i18n::{UiLang, t, tf};
 use crate::ui::{BadgeTone, FileOpKind, LayerOpcodeKind};
 
@@ -178,111 +179,13 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// Strips container shell/BuildKit noise and classifies a layer instruction opcode.
 pub fn classify_layer_opcode(raw_cmd: &str) -> (LayerOpcodeKind, String) {
-    let mut s = raw_cmd.trim();
-    if let Some(stripped) = s.strip_suffix("# buildkit") {
-        s = stripped.trim_end();
-    }
-
-    let mut had_nop = false;
-    let mut had_sh = false;
-    if let Some(rest) = s.strip_prefix("/bin/sh -c ") {
-        had_sh = true;
-        s = rest.trim_start();
-    }
-    if let Some(rest) = s.strip_prefix("#(nop) ") {
-        had_nop = true;
-        s = rest.trim_start();
-    } else if let Some(rest) = s.strip_prefix("#(nop)") {
-        had_nop = true;
-        s = rest.trim_start();
-    }
-
-    // BuildKit prefixed runs like `|2 A=1 B=2 /bin/sh -c cmd`
-    if let Some(after_pipe) = s.strip_prefix('|') {
-        let mut digits_end = 0;
-        for (idx, ch) in after_pipe.char_indices() {
-            if ch.is_ascii_digit() {
-                digits_end = idx + ch.len_utf8();
-            } else {
-                break;
-            }
-        }
-        if digits_end > 0
-            && after_pipe[digits_end..].starts_with(' ')
-            && let Some(sh_pos) = after_pipe.find("/bin/sh -c ")
-        {
-            had_sh = true;
-            s = after_pipe[sh_pos + "/bin/sh -c ".len()..].trim_start();
-        }
-    }
-
-    let cleaned = collapse_spaces(s);
-    if cleaned.is_empty() {
-        return (LayerOpcodeKind::Meta, "(metadata)".to_owned());
-    }
-
-    let first_word = cleaned
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-
-    let kind = match first_word.as_str() {
-        "FROM" => LayerOpcodeKind::From,
-        "RUN" => LayerOpcodeKind::Run,
-        "COPY" | "ADD" => LayerOpcodeKind::Copy,
-        "CMD" | "ENTRYPOINT" => LayerOpcodeKind::Cmd,
-        "ENV" | "LABEL" | "WORKDIR" | "USER" | "EXPOSE" | "VOLUME" | "ARG" | "SHELL"
-        | "STOPSIGNAL" | "HEALTHCHECK" | "ONBUILD" | "MAINTAINER" => LayerOpcodeKind::Meta,
-        _ if had_nop => LayerOpcodeKind::Meta,
-        _ if had_sh => LayerOpcodeKind::Run,
-        _ => LayerOpcodeKind::Run,
-    };
-
-    (kind, cleaned)
+    let parsed = parse_layer_command(raw_cmd);
+    (parsed.opcode, parsed.summary)
 }
 
-fn collapse_spaces(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_space = false;
-    for ch in input.chars() {
-        if ch.is_whitespace() {
-            if !prev_space {
-                out.push(' ');
-                prev_space = true;
-            }
-        } else {
-            out.push(ch);
-            prev_space = false;
-        }
-    }
-    out.trim().to_owned()
-}
-
-/// Splits chained shell `&&` segments onto readable indented lines for `CommandInspector`.
+/// Formats a layer command into quote-aware indented lines for `CommandInspector`.
 pub fn format_command_lines(raw_cmd: &str) -> Vec<String> {
-    let (_, cleaned) = classify_layer_opcode(raw_cmd);
-    if !cleaned.contains(" && ") {
-        return vec![cleaned];
-    }
-    let parts: Vec<&str> = cleaned.split(" && ").collect();
-    if parts.len() <= 1 {
-        return vec![cleaned];
-    }
-    parts
-        .iter()
-        .enumerate()
-        .map(|(idx, part)| {
-            let trimmed = part.trim();
-            if idx == 0 {
-                format!("{trimmed} &&")
-            } else if idx + 1 < parts.len() {
-                format!("  {trimmed} &&")
-            } else {
-                format!("  {trimmed}")
-            }
-        })
-        .collect()
+    parse_layer_command(raw_cmd).formatted_lines
 }
 
 /// Active filter options applied to a single layer's `FileTreeItem` slice.

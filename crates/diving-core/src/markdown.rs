@@ -3,7 +3,10 @@ use chrono::DateTime;
 use std::cmp::Reverse;
 
 use crate::i18n::{self, Lang};
-use crate::image::{final_filesystem, DockerAnalyzeResult, FileTreeItem, Op, WasteChange};
+use crate::image::{
+    clean_dockerfile_history_line, final_filesystem, DockerAnalyzeResult, FileTreeItem, Op,
+    WasteChange,
+};
 
 pub(crate) fn icon(severity: &str) -> &'static str {
     match severity {
@@ -158,23 +161,7 @@ pub fn to_summary_markdown(
 }
 
 fn cmd_to_dockerfile_line(cmd: &str) -> Option<String> {
-    if cmd.is_empty() {
-        return None;
-    }
-    let cmd = if cmd.starts_with('|') {
-        cmd.find("/bin/sh -c ")
-            .map(|pos| &cmd[pos..])
-            .unwrap_or(cmd)
-    } else {
-        cmd
-    };
-    if let Some(rest) = cmd.strip_prefix("/bin/sh -c #(nop) ") {
-        Some(rest.trim().to_string())
-    } else if let Some(rest) = cmd.strip_prefix("/bin/sh -c ") {
-        Some(format!("RUN {rest}"))
-    } else {
-        Some(cmd.to_string())
-    }
+    clean_dockerfile_history_line(cmd)
 }
 
 struct FileEntry {

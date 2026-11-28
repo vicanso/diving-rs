@@ -45,6 +45,10 @@ const KEY_APPEARANCE: &str = "diving.appearance";
 const KEY_SIDEBAR_WIDTH: &str = "diving.layers_pane_width";
 const KEY_APP_SIDEBAR_OPEN: &str = "diving.app_sidebar_open";
 const KEY_RECENT_IMAGES: &str = "diving.recent_images";
+const KEY_COMMAND_WRAP: &str = "diving.command_wrap";
+const KEY_COMMAND_RAW: &str = "diving.command_raw";
+const KEY_DOCKERFILE_WRAP: &str = "diving.dockerfile_wrap";
+const KEY_DOCKERFILE_RAW: &str = "diving.dockerfile_raw";
 const MAX_RECENT_IMAGES: usize = 12;
 
 /// Metadata identifying the currently inspected file in `FilePreviewSheet`.
@@ -157,6 +161,7 @@ pub struct AppState {
     pub selected_layer: Signal<usize>,
     pub command_expanded: Signal<bool>,
     pub command_wrap: Signal<bool>,
+    pub command_raw: Signal<bool>,
     pub tree_keyword: Signal<String>,
     pub tree_modifications_only: Signal<bool>,
     pub tree_min_size: Signal<u64>,
@@ -174,6 +179,7 @@ pub struct AppState {
     pub preview_content: Signal<Option<FilePreviewContent>>,
     pub preview_error: Signal<Option<String>>,
     pub dockerfile_wrap: Signal<bool>,
+    pub dockerfile_raw: Signal<bool>,
     pub status_notice: Signal<Option<String>>,
     pub status_notice_is_update: Signal<bool>,
     notice_seq: Signal<u64>,
@@ -270,6 +276,18 @@ impl AppState {
         } else {
             skipped_version()
         };
+        let saved_command_wrap = Storage::get_item(KEY_COMMAND_WRAP)
+            .map(|raw| raw != "false")
+            .unwrap_or(true);
+        let saved_command_raw = Storage::get_item(KEY_COMMAND_RAW)
+            .map(|raw| raw == "true")
+            .unwrap_or(false);
+        let saved_dockerfile_wrap = Storage::get_item(KEY_DOCKERFILE_WRAP)
+            .map(|raw| raw != "false")
+            .unwrap_or(true);
+        let saved_dockerfile_raw = Storage::get_item(KEY_DOCKERFILE_RAW)
+            .map(|raw| raw == "true")
+            .unwrap_or(false);
 
         let state = Self {
             service,
@@ -300,7 +318,8 @@ impl AppState {
             layer_filter: signal(LayerFilterMode::All),
             selected_layer: signal(0),
             command_expanded: signal(false),
-            command_wrap: signal(false),
+            command_wrap: signal(saved_command_wrap),
+            command_raw: signal(saved_command_raw),
             tree_keyword: signal(String::new()),
             tree_modifications_only: signal(false),
             tree_min_size: signal(0),
@@ -317,7 +336,8 @@ impl AppState {
             preview_loading: signal(false),
             preview_content: signal(None),
             preview_error: signal(None),
-            dockerfile_wrap: signal(true),
+            dockerfile_wrap: signal(saved_dockerfile_wrap),
+            dockerfile_raw: signal(saved_dockerfile_raw),
             status_notice: signal(None),
             status_notice_is_update: signal(false),
             notice_seq: signal(0),
@@ -479,6 +499,32 @@ impl AppState {
         if untracked(|| window().width) >= px(1080.0) {
             self.wide_meta_pref.set(next);
         }
+    }
+
+    /// Toggles line wrapping inside `CommandInspector` and persists the preference.
+    pub fn toggle_command_wrap(&self) {
+        let next = !self.command_wrap.get_untracked();
+        self.command_wrap.set(next);
+        let _ = Storage::set_item(KEY_COMMAND_WRAP, if next { "true" } else { "false" });
+    }
+
+    /// Toggles between auto-formatted and raw `created_by` output in `CommandInspector`.
+    pub fn toggle_command_raw(&self) {
+        let next = !self.command_raw.get_untracked();
+        self.command_raw.set(next);
+        let _ = Storage::set_item(KEY_COMMAND_RAW, if next { "true" } else { "false" });
+    }
+
+    /// Updates `dockerfile_wrap` and persists the preference.
+    pub fn set_dockerfile_wrap(&self, next: bool) {
+        self.dockerfile_wrap.set(next);
+        let _ = Storage::set_item(KEY_DOCKERFILE_WRAP, if next { "true" } else { "false" });
+    }
+
+    /// Updates `dockerfile_raw` and persists the preference.
+    pub fn set_dockerfile_raw(&self, next: bool) {
+        self.dockerfile_raw.set(next);
+        let _ = Storage::set_item(KEY_DOCKERFILE_RAW, if next { "true" } else { "false" });
     }
 
     fn install_responsive_sync(&self) {

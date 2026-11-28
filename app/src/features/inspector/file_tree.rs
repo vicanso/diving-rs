@@ -10,8 +10,8 @@ use nsh_core::prelude::*;
 
 use crate::domain::{
     AppRoute, AppState, FileTreeFilter, FileTreeRow, IndexedTree, InspectorTab, SharedRef,
-    build_indexed_tree, classify_layer_opcode, count_layer_file_ops, flatten_indexed_tree,
-    format_bytes, format_command_lines,
+    build_indexed_tree, count_layer_file_ops, flatten_indexed_tree, format_bytes,
+    parse_layer_command,
 };
 use crate::features::sidebar::APP_SIDEBAR_WIDTH;
 use crate::i18n::{UiLang, t, tf};
@@ -97,6 +97,7 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
     let selected_layer = state.selected_layer;
     let command_expanded = state.command_expanded;
     let command_wrap = state.command_wrap;
+    let command_raw = state.command_raw;
     let copied = signal(false);
     let copy_seq = signal(0_u64);
 
@@ -121,18 +122,31 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                 .file_tree_list
                 .get(idx)
                 .map_or_else(Default::default, |t| count_layer_file_ops(t));
-            let (opcode, _) = classify_layer_opcode(&layer.cmd);
-            let lines = format_command_lines(&layer.cmd);
+            let parsed = parse_layer_command(&layer.cmd);
+            let opcode = parsed.opcode;
+            let raw_mode = command_raw.get();
+            let lines = if raw_mode {
+                let trimmed = layer.cmd.trim();
+                if trimmed.is_empty() {
+                    vec!["(metadata)".to_owned()]
+                } else {
+                    trimmed.lines().map(str::to_owned).collect()
+                }
+            } else {
+                parsed.formatted_lines
+            };
             let total_lines = lines.len();
-            let show_all = command_expanded.get() || total_lines <= 6;
+            let show_all = command_expanded.get() || total_lines <= 8;
             let visible_lines: Vec<String> = if show_all {
                 lines
             } else {
-                lines.into_iter().take(6).collect()
+                lines.into_iter().take(8).collect()
             };
-            let hidden_count = total_lines.saturating_sub(6);
+            let hidden_count = total_lines.saturating_sub(8);
             let digest_to_copy = layer.digest.clone();
             let digest_empty = digest_to_copy.is_empty();
+            let raw_state = state.clone();
+            let wrap_state = state.clone();
 
             view()
                 .flex_col()
@@ -200,11 +214,30 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                                     ))
                                 })
                                 .child(dynamic(move || {
+                                    let variant = if raw_mode {
+                                        ButtonVariant::Default
+                                    } else {
+                                        ButtonVariant::Ghost
+                                    };
+                                    let click_state = raw_state.clone();
+                                    ui_button(
+                                        move || SharedString::from(t(lang.get(), "cmd.raw")),
+                                        variant,
+                                        UiSize::Xs,
+                                        None,
+                                        false,
+                                        false,
+                                        move || click_state.toggle_command_raw(),
+                                    )
+                                    .into_element()
+                                }))
+                                .child(dynamic(move || {
                                     let variant = if command_wrap.get() {
                                         ButtonVariant::Default
                                     } else {
                                         ButtonVariant::Ghost
                                     };
+                                    let click_state = wrap_state.clone();
                                     ui_button(
                                         move || SharedString::from(t(lang.get(), "cmd.wrap")),
                                         variant,
@@ -212,7 +245,7 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                                         None,
                                         false,
                                         false,
-                                        move || command_wrap.update(|v| *v = !*v),
+                                        move || click_state.toggle_command_wrap(),
                                     )
                                     .into_element()
                                 }))
@@ -263,10 +296,17 @@ fn command_inspector(state: AppState, res: Arc<DockerAnalyzeResult>) -> impl Int
                         .rounded(radius_inset)
                         .bg(move || theme().muted)
                         .children(visible_lines.into_iter().map(move |line| {
+                            let is_comment = !raw_mode && line.starts_with("# ARG ");
                             text(line)
                                 .text_xs()
                                 .font_family(font_mono_family())
-                                .text_color(move || theme().foreground)
+                                .text_color(move || {
+                                    if is_comment {
+                                        theme().muted_foreground
+                                    } else {
+                                        theme().foreground
+                                    }
+                                })
                                 .number_of_lines(
                                     move || if command_wrap.get() { 0_u32 } else { 1_u32 },
                                 )
@@ -1378,5 +1418,86 @@ mod tests {
             height > 0.0 && height <= 88.0,
             "compact filter_toolbar wrapped beyond 2 rows (height={height:.1})"
         );
+    }
+
+    #[component]
+    fn CommandWrapRawHarness() -> impl IntoElement {
+        let analyzer = Analyzer::builder().build().expect("ephemeral analyzer");
+        let state = AppState::new(DivingService::with_analyzer(analyzer));
+        assert!(
+            state.command_wrap.get_untracked(),
+            "command_wrap must default to true"
+        );
+        assert!(
+            !state.command_raw.get_untracked(),
+            "command_raw must default to false"
+        );
+        let res = Arc::new(DockerAnalyzeResult {
+            layers: vec![ImageLayer {
+                digest: "sha256:redis".to_owned(),
+                cmd: r#"RUN |2 URL=https://example.com SHA=abc /bin/sh -c set -eux; sed -ri 's!cd jemalloc && ./configure !x!' Makefile; if [ "$A" = "1" ]; then make all; fi # buildkit"#.to_owned(),
+                size: 120,
+                unpack_size: 240,
+                empty: false,
+                ..Default::default()
+            }],
+            file_tree_list: vec![Vec::new()],
+            ..Default::default()
+        });
+        view()
+            .flex_1()
+            .flex_col()
+            .child(command_inspector(state.clone(), res))
+            .child(text(move || {
+                format!(
+                    "wrap={};raw={}",
+                    state.command_wrap.get(),
+                    state.command_raw.get()
+                )
+            }))
+    }
+
+    #[test]
+    fn command_inspector_defaults_wrap_on_and_toggles_raw_formatting() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<CommandWrapRawHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start command wrap/raw harness");
+        app.wait_for_within("wrap=true;raw=false", Duration::from_secs(2))
+            .expect("wrap=true and raw=false by default");
+        app.wait_for_within("# ARG URL=https://example.com", Duration::from_secs(2))
+            .expect("BuildKit ARG extracted");
+        assert!(
+            app.shows("sed -ri 's!cd jemalloc && ./configure !x!' Makefile; \\"),
+            "missing sed line in {:?}",
+            app.screen().texts()
+        );
+        assert!(
+            app.screen().texts().contains(&"    make all; \\"),
+            "missing indented make line in {:?}",
+            app.screen().texts()
+        );
+
+        app.press("Raw").expect("toggle Raw mode");
+        app.wait_for_within("wrap=true;raw=true", Duration::from_secs(2))
+            .expect("command_raw toggled on");
+        assert!(
+            app.screen()
+                .texts()
+                .iter()
+                .any(|t| t.contains("# buildkit")),
+            "missing raw buildkit suffix in {:?}",
+            app.screen().texts()
+        );
+
+        app.press("Wrap").expect("toggle Wrap off");
+        app.wait_for_within("wrap=false;raw=true", Duration::from_secs(2))
+            .expect("command_wrap toggled off");
     }
 }

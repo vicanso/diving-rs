@@ -2,6 +2,7 @@
 
 pub mod model;
 pub mod service;
+pub mod shell_fmt;
 pub mod state;
 pub mod treemap;
 pub mod updater;
@@ -18,6 +19,7 @@ pub use model::{
     visible_layer_indices,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
+pub use shell_fmt::{ParsedLayerCommand, format_dockerfile, parse_layer_command};
 pub use state::{
     AppState, DiffErrorState, PreviewTarget, TreemapHoverInfo, UpdatePhase,
     has_pending_update_indicator,

@@ -1115,10 +1115,10 @@ export const parseLayerCommand = (
     };
   }
 
-  // Strip `/bin/sh -c #(nop) ` prefix common in Docker history.
-  text = text.replace(/^\/bin\/sh\s+-c\s+#\(nop\)\s+/i, "").trim();
+  // Strip `/bin/{sh,bash,ash} -c #(nop) ` prefix common in Docker history.
+  text = text.replace(/^\/bin\/(?:sh|bash|ash)\s+-c\s+#\(nop\)\s+/i, "").trim();
 
-  // Check for BuildKit `RUN |N ARG=VAL ... /bin/sh -c ...` or `|N ARG=VAL ...`
+  // Check for BuildKit `RUN |N ARG=VAL ... /bin/{sh,bash,ash} -c ...` or `|N ARG=VAL ...`
   const envArgs: string[] = [];
   let explicitOp = "";
 
@@ -1130,8 +1130,10 @@ export const parseLayerCommand = (
     text = text.slice(opMatch[0].length).trim();
   }
 
-  // Strip BuildKit `|N KEY=VALUE ... /bin/sh -c ` boilerplate.
-  const bkMatch = text.match(/^\|(\d+)\s+([\s\S]*?)\s+\/bin\/sh\s+-c\s+([\s\S]*)$/);
+  // Strip BuildKit `|N KEY=VALUE ... /bin/{sh,bash,ash} -c ` boilerplate.
+  const bkMatch = text.match(
+    /^\|(\d+)\s+([\s\S]*?)\s+\/bin\/(?:sh|bash|ash)\s+-c\s+([\s\S]*)$/,
+  );
   if (bkMatch) {
     const argCount = parseInt(bkMatch[1], 10);
     const argBlob = bkMatch[2].trim();
@@ -1145,7 +1147,7 @@ export const parseLayerCommand = (
     text = bkMatch[3].trim();
     if (!explicitOp) explicitOp = "RUN";
   } else {
-    const shMatch = text.match(/^\/bin\/sh\s+-c\s+([\s\S]*)$/);
+    const shMatch = text.match(/^\/bin\/(?:sh|bash|ash)\s+-c\s+([\s\S]*)$/);
     if (shMatch) {
       text = shMatch[1].trim();
       if (!explicitOp) explicitOp = "RUN";

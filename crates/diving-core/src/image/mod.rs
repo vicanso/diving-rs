@@ -34,4 +34,4 @@ pub use registry::is_private_or_loopback_host;
 pub(crate) use registry::RegistryCaches;
 pub(crate) use registry_auth::{load_docker_config, DockerConfig};
 pub use registry_auth::{registry_host, resolve_explicit, RegistryCredentials};
-pub(crate) use scan::is_root_user;
+pub(crate) use scan::{clean_dockerfile_history_line, is_root_user};

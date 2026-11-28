@@ -1152,7 +1152,7 @@ export const RecommendationsCard = memo(
 export const DockerfileCard = memo(
   ({ dockerfile }: { dockerfile: string; isDark?: boolean }) => {
     const [showRaw, setShowRaw] = useState(false);
-    const [wrap, setWrap] = useState(false);
+    const [wrap, setWrap] = useState(true);
     const [copied, setCopied] = useState(false);
 
     const formatted = useMemo(
@@ -2191,7 +2191,7 @@ export const CommandInspector = memo(
     fileCounts: LayerFileCounts;
   }) => {
     const [expanded, setExpanded] = useState(false);
-    const [wrap, setWrap] = useState(false);
+    const [wrap, setWrap] = useState(true);
     const [copiedCmd, setCopiedCmd] = useState(false);
     const [copiedDigest, setCopiedDigest] = useState(false);
 

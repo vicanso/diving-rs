@@ -126,28 +126,109 @@ pub(crate) fn probe_base_os(manifest: &ImageManifest, store: &CacheStore) -> Str
     String::new()
 }
 
+/// Normalizes a single OCI history `created_by` command into a Dockerfile line.
+///
+/// Strips trailing `# buildkit`, unwraps `|<N> ... /bin/{sh,bash,ash} -c`
+/// (with or without a leading `RUN `), and preserves `#(nop)` directives.
+pub(crate) fn clean_dockerfile_history_line(raw: &str) -> Option<String> {
+    let mut trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(without_bk) = strip_buildkit_comment_suffix(trimmed) {
+        trimmed = without_bk;
+        if trimmed.is_empty() {
+            return None;
+        }
+    }
+    let after_run = strip_ci_prefix(trimmed, "RUN ")
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    let unwrapped = if starts_with_buildkit_pipe_prefix(after_run) {
+        find_shell_c_segment(after_run).unwrap_or(trimmed)
+    } else if has_shell_c_prefix(after_run) {
+        after_run
+    } else {
+        trimmed
+    };
+    if let Some(body) = strip_shell_c_prefix(unwrapped) {
+        if let Some(nop_rest) = strip_nop_directive(body) {
+            let clean = nop_rest.trim();
+            return (!clean.is_empty()).then(|| clean.to_owned());
+        }
+        let body = body.trim();
+        return (!body.is_empty()).then(|| format!("RUN {body}"));
+    }
+    Some(trimmed.to_owned())
+}
+
+fn strip_ci_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &s[prefix.len()..])
+}
+
+fn strip_buildkit_comment_suffix(s: &str) -> Option<&str> {
+    let trimmed = s.trim_end();
+    let suffix = "# buildkit";
+    if trimmed.len() < suffix.len() {
+        return None;
+    }
+    let pos = trimmed.len() - suffix.len();
+    if !trimmed.is_char_boundary(pos) || !trimmed[pos..].eq_ignore_ascii_case(suffix) {
+        return None;
+    }
+    if pos == 0 || trimmed[..pos].ends_with(char::is_whitespace) {
+        Some(trimmed[..pos].trim_end())
+    } else {
+        None
+    }
+}
+
+fn starts_with_buildkit_pipe_prefix(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('|') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && rest[digits..].starts_with(char::is_whitespace)
+}
+
+fn strip_shell_c_prefix(s: &str) -> Option<&str> {
+    for prefix in ["/bin/sh -c ", "/bin/bash -c ", "/bin/ash -c "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn has_shell_c_prefix(s: &str) -> bool {
+    strip_shell_c_prefix(s).is_some()
+}
+
+fn find_shell_c_segment(s: &str) -> Option<&str> {
+    for marker in [" /bin/sh -c ", " /bin/bash -c ", " /bin/ash -c "] {
+        if let Some(pos) = s.find(marker) {
+            return Some(&s[pos + 1..]);
+        }
+    }
+    None
+}
+
+fn strip_nop_directive(s: &str) -> Option<&str> {
+    let trimmed = s.trim_start();
+    trimmed.strip_prefix("#(nop)").map(|rest| rest.trim_start())
+}
+
 pub(crate) fn reconstruct_dockerfile(history: &[ImageHistory]) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(history.len());
     for h in history {
-        let raw = match h.created_by.as_deref() {
-            None | Some("") => continue,
-            Some(s) => s,
+        let Some(raw) = h.created_by.as_deref() else {
+            continue;
         };
-        let raw = if raw.starts_with('|') {
-            raw.find("/bin/sh -c ")
-                .map(|pos| &raw[pos..])
-                .unwrap_or(raw)
-        } else {
-            raw
-        };
-        let line = if let Some(rest) = raw.strip_prefix("/bin/sh -c #(nop) ") {
-            rest.trim().to_string()
-        } else if let Some(rest) = raw.strip_prefix("/bin/sh -c ") {
-            format!("RUN {rest}")
-        } else {
-            raw.to_string()
-        };
-        lines.push(line);
+        if let Some(line) = clean_dockerfile_history_line(raw) {
+            lines.push(line);
+        }
     }
     lines.join("\n")
 }
@@ -587,5 +668,30 @@ mod tests {
                 "{user:?} should not be treated as root"
             );
         }
+    }
+
+    #[test]
+    fn clean_dockerfile_history_line_strips_buildkit_run_pipe_and_nop() {
+        assert_eq!(
+            clean_dockerfile_history_line("RUN |2 A=1 B=2 /bin/sh -c echo hi # buildkit"),
+            Some("RUN echo hi".to_string())
+        );
+        assert_eq!(
+            clean_dockerfile_history_line("|1 FLAG=on /bin/bash -c apk add curl # buildkit"),
+            Some("RUN apk add curl".to_string())
+        );
+        assert_eq!(
+            clean_dockerfile_history_line("/bin/sh -c #(nop)  ENV APP_ENV=prod"),
+            Some("ENV APP_ENV=prod".to_string())
+        );
+        assert_eq!(
+            clean_dockerfile_history_line("/bin/sh -c apt-get update"),
+            Some("RUN apt-get update".to_string())
+        );
+        assert_eq!(
+            clean_dockerfile_history_line("ENV TOKEN=foo# buildkit"),
+            Some("ENV TOKEN=foo# buildkit".to_string())
+        );
+        assert_eq!(clean_dockerfile_history_line("   "), None);
     }
 }
