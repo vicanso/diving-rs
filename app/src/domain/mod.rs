@@ -8,11 +8,13 @@ pub mod treemap;
 pub mod updater;
 
 pub use model::{
-    AppRoute, DiffFileTab, FileKind, FilePreviewContent, FileProvenanceHit, FileTreeFilter,
-    FileTreeRow, ImageSourceKind, IndexedTree, IndexedTreeNode, InspectorTab, LARGE_LAYER_BYTES,
-    LayerFileCounts, LayerFilterMode, LayerSortOrder, RecentImageEntry, SharedRef, TreemapViewMode,
-    WhatIfProjection, build_indexed_tree, classify_file_entry, classify_file_kind,
-    classify_file_preview, classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
+    AppRoute, ArchiveEntryPreview, ArchivePreviewMeta, DiffFileTab, FileKind, FilePreviewContent,
+    FileProvenanceHit, FileTreeFilter, FileTreeRow, ImagePreviewMeta, ImageSourceKind, IndexedTree,
+    IndexedTreeNode, InspectorTab, LARGE_LAYER_BYTES, LayerFileCounts, LayerFilterMode,
+    LayerSortOrder, MediaPreviewMeta, PreviewField, RecentImageEntry, SharedRef,
+    StructuredPreviewMeta, StructuredSection, TreemapViewMode, WhatIfProjection,
+    build_indexed_tree, classify_file_entry, classify_file_kind, classify_file_preview,
+    classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
     default_selected_layer, extract_registry_host_from_image, findings_total_count,
     flatten_file_tree, flatten_indexed_tree, format_bytes, format_command_lines,
     format_runtime_compat, image_source_kind, is_registry_auth_or_tls_error, layer_matches_filter,

@@ -147,13 +147,79 @@ export interface ImageDescriptions {
   runUser: string;
 }
 
+export type FilePreviewKind =
+  | "empty"
+  | "text"
+  | "image"
+  | "svg"
+  | "media"
+  | "archive"
+  | "structured"
+  | "binary";
+
+export interface ImagePreviewMeta {
+  format: string;
+  mime: string;
+  width?: number;
+  height?: number;
+  detail?: string;
+}
+
+export interface MediaPreviewMeta {
+  mediaType: "audio" | "video" | string;
+  format: string;
+  mime: string;
+  detail?: string;
+}
+
+export interface ArchiveEntryPreview {
+  path: string;
+  size: number;
+  compressedSize?: number;
+  mode: string;
+  isDir: boolean;
+}
+
+export interface ArchivePreviewMeta {
+  format: string;
+  totalEntries: number;
+  totalUncompressedSize: number;
+  truncatedEntries: boolean;
+  entries: ArchiveEntryPreview[];
+}
+
+export interface PreviewField {
+  label: string;
+  value: string;
+}
+
+export interface StructuredSection {
+  title: string;
+  items: string[];
+}
+
+export interface StructuredPreviewMeta {
+  format: string;
+  summary: string;
+  fields: PreviewField[];
+  sections: StructuredSection[];
+}
+
 export interface FilePreview {
   size: number;
   binary: boolean;
   /** Whether `content` covers less than the whole file. */
   truncated: boolean;
-  /** The text, or a hex dump of the first bytes of a binary file. */
+  /** The text / SVG markup, or a hex dump of the first bytes of a binary file. */
   content: string;
+  kind?: FilePreviewKind;
+  language?: string;
+  compression?: string;
+  formattedContent?: string;
+  image?: ImagePreviewMeta;
+  media?: MediaPreviewMeta;
+  archive?: ArchivePreviewMeta;
+  structured?: StructuredPreviewMeta;
 }
 
 export interface McpStatus {

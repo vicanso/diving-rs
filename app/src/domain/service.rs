@@ -15,7 +15,7 @@ use diving_core::{
     AnalyzeOptions, Analyzer, CleanupStats, DiffOptions, DockerAnalyzeResult, Error as CoreError,
     ImageDiff, ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions,
     ProgressEvent, REGISTRY_LOCAL_FILE, RegistryRule, diff_images_with_options, list_local_images,
-    parse_image_info, to_diff_markdown, to_markdown,
+    parse_image_info, preview_read_limit, to_diff_markdown, to_markdown,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
@@ -27,7 +27,6 @@ use crate::domain::model::{
 };
 use crate::domain::treemap::{FsNode, build_final_tree};
 
-const FILE_PREVIEW_LIMIT: u64 = 128 * 1024;
 const FILE_EXPORT_LIMIT: u64 = 100 * 1024 * 1024;
 
 /// Progress, preview, completion, or failure event streamed from `DivingService::start_analyze`.
@@ -600,27 +599,21 @@ fn read_preview_head(
     media_type: &str,
     file_path: &str,
 ) -> Result<(Vec<u8>, u64), String> {
+    let limit = preview_read_limit(file_path);
     let info = parse_image_info(image_ref);
     if info.registry != REGISTRY_LOCAL_FILE {
         return analyzer
-            .read_file_head(layer_digest, media_type, file_path, FILE_PREVIEW_LIMIT)
+            .read_file_head(layer_digest, media_type, file_path, limit)
             .map_err(|err| err.to_string());
     }
     if layer_digest.starts_with("sha256:")
         && analyzer.has_layer_blob(layer_digest)
-        && let Ok(head) =
-            analyzer.read_file_head(layer_digest, media_type, file_path, FILE_PREVIEW_LIMIT)
+        && let Ok(head) = analyzer.read_file_head(layer_digest, media_type, file_path, limit)
     {
         return Ok(head);
     }
     analyzer
-        .read_local_file_head(
-            &info.name,
-            layer_digest,
-            media_type,
-            file_path,
-            FILE_PREVIEW_LIMIT,
-        )
+        .read_local_file_head(&info.name, layer_digest, media_type, file_path, limit)
         .map_err(|err| err.to_string())
 }
 

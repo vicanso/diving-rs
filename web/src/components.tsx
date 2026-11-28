@@ -19,14 +19,17 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Input,
   InputRef,
   List,
   message,
   Modal,
   Popover,
+  Segmented,
   Select,
   Spin,
+  Tag,
   Typography,
 } from "antd";
 import prettyBytes from "pretty-bytes";
@@ -196,7 +199,46 @@ const triggerProtectedDownload = async (
   }
 };
 
-/** Read-only look at one file of a layer: text, or a hex dump for binaries. */
+const MAX_WEB_MEDIA_PREVIEW_BYTES = 32 * 1024 * 1024;
+
+const formatStructuredText = (meta: FilePreview["structured"]): string => {
+  if (!meta) return "";
+  const lines = [`${meta.format} — ${meta.summary}`];
+  if (meta.fields.length > 0) {
+    lines.push("");
+    for (const f of meta.fields) {
+      lines.push(`${f.label.padEnd(18, " ")} ${f.value}`);
+    }
+  }
+  for (const sec of meta.sections) {
+    if (sec.items.length === 0) continue;
+    lines.push("", `[${sec.title}]`);
+    for (const item of sec.items) {
+      lines.push(`  ${item}`);
+    }
+  }
+  return lines.join("\n");
+};
+
+const formatArchiveText = (meta: FilePreview["archive"]): string => {
+  if (!meta) return "";
+  const lines = [
+    `${meta.format} (${meta.totalEntries} entries, ${prettyBytes(meta.totalUncompressedSize)})`,
+    "",
+  ];
+  for (const e of meta.entries) {
+    lines.push(`${e.mode} ${prettyBytes(e.size).padStart(10, " ")}  ${e.path}`);
+  }
+  if (meta.truncatedEntries) {
+    lines.push(
+      "",
+      `... showing first ${meta.entries.length} of ${meta.totalEntries} entries`,
+    );
+  }
+  return lines.join("\n");
+};
+
+/** Read-only look at one file of a layer: rich images/SVG/archives/binaries, or text/hex. */
 const FilePreviewModal = ({
   layer,
   row,
@@ -214,6 +256,12 @@ const FilePreviewModal = ({
 }) => {
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [error, setError] = useState("");
+  const [mode, setMode] = useState<"primary" | "secondary">("primary");
+  const [wrapText, setWrapText] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaError, setMediaError] = useState("");
 
   useEffect(() => {
     if (!row) {
@@ -221,6 +269,10 @@ const FilePreviewModal = ({
     }
     setPreview(null);
     setError("");
+    setMode("primary");
+    setCopied(false);
+    setMediaUrl(null);
+    setMediaError("");
     let cancelled = false;
     authFetch(fileUrl("file-preview", layer, row.key, imageName))
       .then(async (resp) => {
@@ -237,13 +289,167 @@ const FilePreviewModal = ({
     };
   }, [layer, row, imageName, apiTokenVersion]);
 
+  useEffect(() => {
+    if (!row || !preview) {
+      setMediaUrl(null);
+      setMediaLoading(false);
+      setMediaError("");
+      return;
+    }
+    const kind = preview.kind ?? (preview.binary ? "binary" : "text");
+    let createdUrl: string | null = null;
+    let cancelled = false;
+
+    if (kind === "svg") {
+      const svgBlob = new Blob([preview.content], { type: "image/svg+xml" });
+      createdUrl = URL.createObjectURL(svgBlob);
+      setMediaUrl(createdUrl);
+      setMediaLoading(false);
+      setMediaError("");
+      return () => {
+        if (createdUrl) URL.revokeObjectURL(createdUrl);
+      };
+    }
+
+    const mime =
+      kind === "image"
+        ? preview.image?.mime
+        : kind === "media"
+          ? preview.media?.mime
+          : undefined;
+    if (!mime) {
+      setMediaUrl(null);
+      setMediaLoading(false);
+      return;
+    }
+    if (preview.size > MAX_WEB_MEDIA_PREVIEW_BYTES) {
+      setMediaUrl(null);
+      setMediaLoading(false);
+      setMediaError(i18nGet("previewImageTooLarge"));
+      return;
+    }
+
+    setMediaLoading(true);
+    setMediaError("");
+    authFetch(fileUrl("file", layer, row.key, imageName))
+      .then(async (resp) => {
+        if (!resp.ok) {
+          throw new Error(resp.statusText || "Failed to load media");
+        }
+        const rawBlob = await resp.blob();
+        return new Blob([rawBlob], { type: mime });
+      })
+      .then((typedBlob) => {
+        if (cancelled) return;
+        createdUrl = URL.createObjectURL(typedBlob);
+        setMediaUrl(createdUrl);
+        setMediaLoading(false);
+      })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setMediaLoading(false);
+        setMediaError(err.message || i18nGet("previewMediaLoadError"));
+      });
+
+    return () => {
+      cancelled = true;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [preview, layer, row, imageName, apiTokenVersion]);
+
+  const kind = preview
+    ? preview.kind ?? (preview.binary ? "binary" : "text")
+    : undefined;
+  const hasFormattedText = kind === "text" && !!preview?.formattedContent;
+  const isTextView =
+    kind === "text" || (kind === "svg" && mode === "secondary");
+  const isHexView =
+    kind === "binary" ||
+    ((kind === "image" ||
+      kind === "media" ||
+      kind === "archive" ||
+      kind === "structured") &&
+      mode === "secondary");
+
   let notice = "";
-  if (preview?.binary) {
+  if (preview?.compression && kind === "text") {
+    notice = i18nGet("previewDecompressed").replace(
+      "{codec}",
+      preview.compression,
+    );
+  } else if (isHexView) {
     notice = i18nGet("previewBinary");
-  } else if (preview?.truncated) {
+  } else if (preview?.truncated && kind === "text") {
     notice = i18nGet("previewTruncated");
   }
+
+  let modeOptions: { label: string; value: "primary" | "secondary" }[] | null =
+    null;
+  if (kind === "image" || kind === "media") {
+    modeOptions = [
+      { label: i18nGet("previewModeVisual"), value: "primary" },
+      { label: i18nGet("previewModeHex"), value: "secondary" },
+    ];
+  } else if (kind === "svg") {
+    modeOptions = [
+      { label: i18nGet("previewModeVisual"), value: "primary" },
+      { label: i18nGet("previewModeSource"), value: "secondary" },
+    ];
+  } else if (kind === "archive") {
+    modeOptions = [
+      { label: i18nGet("previewModeContents"), value: "primary" },
+      { label: i18nGet("previewModeHex"), value: "secondary" },
+    ];
+  } else if (kind === "structured") {
+    modeOptions = [
+      { label: i18nGet("previewModeInspector"), value: "primary" },
+      { label: i18nGet("previewModeHex"), value: "secondary" },
+    ];
+  } else if (hasFormattedText) {
+    modeOptions = [
+      { label: i18nGet("previewModeFormatted"), value: "primary" },
+      { label: i18nGet("previewModeRaw"), value: "secondary" },
+    ];
+  }
+
+  let copyPayload = "";
+  if (preview) {
+    if (isHexView) {
+      copyPayload = preview.content;
+    } else if (kind === "text") {
+      copyPayload =
+        mode === "primary" && preview.formattedContent
+          ? preview.formattedContent
+          : preview.content;
+    } else if (kind === "svg" && mode === "secondary") {
+      copyPayload = preview.content;
+    } else if (kind === "archive") {
+      copyPayload = formatArchiveText(preview.archive);
+    } else if (kind === "structured") {
+      copyPayload = formatStructuredText(preview.structured);
+    }
+  }
+
+  const handleCopy = () => {
+    if (!copyPayload) return;
+    navigator.clipboard?.writeText(copyPayload).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
   const downloadHref = row ? fileUrl("file", layer, row.key, imageName) : "#";
+  const imageMeta = preview?.image;
+  const mediaMeta = preview?.media;
+  const displayedText =
+    kind === "text"
+      ? mode === "primary" && preview?.formattedContent
+        ? preview.formattedContent
+        : preview?.content ?? ""
+      : preview?.content ?? "";
+
   return (
     <Modal
       className="filePreview"
@@ -251,15 +457,38 @@ const FilePreviewModal = ({
       open={!!row}
       onCancel={onClose}
       footer={null}
-      width={800}
+      width={860}
     >
       {row && (
-        <p className="filePreviewMeta">
+        <div className="filePreviewMeta">
           <code>{row.mode}</code>
           <span>
             {row.uid}:{row.gid}
           </span>
           <span>{prettyBytes(row.size)}</span>
+          {imageMeta && (
+            <>
+              <Tag>{imageMeta.format}</Tag>
+              {imageMeta.width != null && imageMeta.height != null && (
+                <Tag>
+                  {imageMeta.width} × {imageMeta.height}
+                </Tag>
+              )}
+              {imageMeta.detail && <Tag>{imageMeta.detail}</Tag>}
+            </>
+          )}
+          {mediaMeta && (
+            <>
+              <Tag>{mediaMeta.format}</Tag>
+              {mediaMeta.detail && <Tag>{mediaMeta.detail}</Tag>}
+            </>
+          )}
+          {preview?.language && kind === "text" && (
+            <Tag>{preview.language}</Tag>
+          )}
+          {preview?.compression && <Tag>{preview.compression}</Tag>}
+          {preview?.structured && <Tag>{preview.structured.format}</Tag>}
+          {preview?.archive && <Tag>{preview.archive.format}</Tag>}
           <a
             href={downloadHref}
             download={row.name}
@@ -269,12 +498,154 @@ const FilePreviewModal = ({
           >
             {getDownloadIcon()} {i18nGet("previewDownload")}
           </a>
-        </p>
+        </div>
+      )}
+      {preview && (modeOptions || isTextView || !!copyPayload) && (
+        <div className="filePreviewToolbar">
+          {modeOptions && (
+            <Segmented
+              size="small"
+              value={mode}
+              options={modeOptions}
+              onChange={(val) => setMode(val as "primary" | "secondary")}
+            />
+          )}
+          <div className="filePreviewToolbarActions">
+            {isTextView && (
+              <Checkbox
+                checked={wrapText}
+                onChange={(e) => setWrapText(e.target.checked)}
+              >
+                {i18nGet("wrapLinesLabel")}
+              </Checkbox>
+            )}
+            {copyPayload && (
+              <Button size="small" onClick={handleCopy}>
+                {copied ? i18nGet("copiedButton") : i18nGet("copyButton")}
+              </Button>
+            )}
+          </div>
+        </div>
       )}
       {error && <Alert type="error" showIcon title={error} />}
       {!preview && !error && <Spin />}
       {notice && <p className="filePreviewNotice">{notice}</p>}
-      {preview && <pre className="filePreviewBody">{preview.content}</pre>}
+      {preview && kind === "empty" && (
+        <p className="filePreviewNotice">{i18nGet("previewEmpty")}</p>
+      )}
+      {preview &&
+        (kind === "image" || kind === "svg") &&
+        mode === "primary" && (
+          <div className="filePreviewStage">
+            {mediaLoading && <Spin />}
+            {mediaError && <Alert type="warning" showIcon title={mediaError} />}
+            {mediaUrl && !mediaLoading && (
+              <img
+                className="filePreviewImage"
+                src={mediaUrl}
+                alt={row?.name || "image preview"}
+              />
+            )}
+          </div>
+        )}
+      {preview && kind === "media" && mode === "primary" && (
+        <div className="filePreviewMediaCard">
+          {mediaLoading && <Spin />}
+          {mediaError && <Alert type="warning" showIcon title={mediaError} />}
+          {mediaUrl &&
+            !mediaLoading &&
+            (mediaMeta?.mediaType === "video" ? (
+              <video
+                className="filePreviewVideo"
+                src={mediaUrl}
+                controls
+                preload="metadata"
+              />
+            ) : (
+              <audio
+                className="filePreviewAudio"
+                src={mediaUrl}
+                controls
+                preload="metadata"
+              />
+            ))}
+          {mediaMeta?.detail && (
+            <p className="filePreviewNotice">{mediaMeta.detail}</p>
+          )}
+        </div>
+      )}
+      {preview &&
+        kind === "archive" &&
+        mode === "primary" &&
+        preview.archive && (
+          <div className="filePreviewArchive">
+            <p className="filePreviewNotice">
+              {i18nGet("previewArchiveSummary")
+                .replace("{format}", preview.archive.format)
+                .replace("{count}", String(preview.archive.totalEntries))
+                .replace(
+                  "{size}",
+                  prettyBytes(preview.archive.totalUncompressedSize),
+                )}
+              {preview.archive.truncatedEntries
+                ? ` · ${i18nGet("previewArchiveTruncated")
+                    .replace("{shown}", String(preview.archive.entries.length))
+                    .replace(
+                      "{total}",
+                      String(preview.archive.totalEntries),
+                    )}`
+                : ""}
+            </p>
+            <div className="filePreviewArchiveScroll">
+              <table className="filePreviewArchiveTable">
+                <tbody>
+                  {preview.archive.entries.map((entry, idx) => (
+                    <tr key={`${entry.path}-${idx}`}>
+                      <td className="mono">{entry.mode}</td>
+                      <td className="mono sizeCell">
+                        {prettyBytes(entry.size)}
+                      </td>
+                      <td className="mono pathCell">{entry.path}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      {preview &&
+        kind === "structured" &&
+        mode === "primary" &&
+        preview.structured && (
+          <div className="filePreviewInspector">
+            <div className="filePreviewInspectorSummary">
+              {preview.structured.summary}
+            </div>
+            <dl className="filePreviewKv">
+              {preview.structured.fields.map((f) => (
+                <div key={f.label} className="filePreviewKvRow">
+                  <dt>{f.label}</dt>
+                  <dd className="mono">{f.value}</dd>
+                </div>
+              ))}
+            </dl>
+            {preview.structured.sections.map((sec) => (
+              <div key={sec.title} className="filePreviewSection">
+                <h4>{sec.title}</h4>
+                <pre className="filePreviewSectionBody">
+                  {sec.items.join("\n")}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+      {preview && (isTextView || isHexView) && (
+        <pre
+          className={`filePreviewBody${isTextView && wrapText ? " wrap" : ""}`}
+        >
+          {displayedText}
+        </pre>
+      )}
     </Modal>
   );
 };

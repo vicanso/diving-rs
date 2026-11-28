@@ -2,14 +2,19 @@
 
 use std::collections::HashSet;
 use std::ops::Deref;
-use std::str::from_utf8;
 use std::sync::Arc;
 
 use bytesize::ByteSize;
+pub use diving_core::{
+    ArchiveEntryPreview, ArchivePreviewMeta, ImagePreviewMeta, MediaPreviewMeta, PreviewField,
+    StructuredPreviewMeta, StructuredSection,
+};
 use diving_core::{
-    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer, Op,
-    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, Recommendation,
-    RuntimeCompat, parse_image_info, registry_host,
+    DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer,
+    InspectedPreview, Op, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    Recommendation, RuntimeCompat, detect_code_language as core_detect_code_language,
+    encode_data_uri, format_archive_text, format_media_text, format_structured_text,
+    inspect_file_preview, parse_image_info, registry_host,
 };
 use serde::{Deserialize, Serialize};
 
@@ -791,10 +796,46 @@ pub fn flatten_file_tree(
 pub enum FilePreviewContent {
     Text {
         text: String,
+        formatted_text: Option<String>,
         language: Option<&'static str>,
+        compression: Option<&'static str>,
         shown_bytes: u64,
         total_size: u64,
         truncated: bool,
+    },
+    Image {
+        meta: ImagePreviewMeta,
+        data_uri: Option<String>,
+        hex_dump: String,
+        shown_bytes: u64,
+        total_size: u64,
+        truncated: bool,
+    },
+    Svg {
+        meta: ImagePreviewMeta,
+        source: String,
+        total_size: u64,
+    },
+    Archive {
+        meta: ArchivePreviewMeta,
+        report_text: String,
+        hex_dump: String,
+        shown_bytes: u64,
+        total_size: u64,
+    },
+    Structured {
+        meta: StructuredPreviewMeta,
+        report_text: String,
+        hex_dump: String,
+        shown_bytes: u64,
+        total_size: u64,
+    },
+    Media {
+        meta: MediaPreviewMeta,
+        report_text: String,
+        hex_dump: String,
+        shown_bytes: u64,
+        total_size: u64,
     },
     BinaryHex {
         hex_dump: String,
@@ -807,36 +848,7 @@ pub enum FilePreviewContent {
 
 /// Maps filenames and extensions to `nsh_base::editor` syntax highlight names.
 pub fn detect_code_language(path: &str) -> Option<&'static str> {
-    let basename = path.rsplit('/').next().unwrap_or(path);
-    if basename.eq_ignore_ascii_case("Dockerfile") || basename.starts_with("Dockerfile.") {
-        return Some("Dockerfile");
-    }
-    if basename.eq_ignore_ascii_case("Makefile") {
-        return Some("makefile");
-    }
-    let ext = basename.rsplit_once('.')?.1.to_ascii_lowercase();
-    match ext.as_str() {
-        "rs" => Some("rust"),
-        "ts" => Some("typescript"),
-        "tsx" => Some("tsx"),
-        "js" | "mjs" | "cjs" => Some("javascript"),
-        "jsx" => Some("jsx"),
-        "json" => Some("json"),
-        "yml" | "yaml" => Some("yaml"),
-        "toml" => Some("toml"),
-        "sh" | "bash" | "zsh" => Some("bash"),
-        "py" => Some("python"),
-        "go" => Some("go"),
-        "md" | "markdown" => Some("markdown"),
-        "xml" | "svg" => Some("xml"),
-        "html" | "htm" => Some("html"),
-        "css" => Some("css"),
-        "sql" => Some("sql"),
-        "conf" | "ini" | "env" => Some("ini"),
-        "c" | "h" => Some("c"),
-        "cc" | "cpp" | "cxx" | "hpp" => Some("cpp"),
-        _ => None,
-    }
+    core_detect_code_language(path)
 }
 
 /// Formats raw bytes into 16-bytes-per-row `Offset | Hex | ASCII` dump.
@@ -882,7 +894,9 @@ pub fn symlink_preview_content(link: &str, lang: UiLang) -> FilePreviewContent {
     let len = body.len() as u64;
     FilePreviewContent::Text {
         text: body,
+        formatted_text: None,
         language: None,
+        compression: None,
         shown_bytes: len,
         total_size: len,
         truncated: false,
@@ -904,40 +918,91 @@ pub fn classify_file_entry(
     classify_file_preview(path, bytes, total_size)
 }
 
-/// Classifies raw file bytes read from a layer tar into UTF-8 text, hex dump, or empty.
-pub fn classify_file_preview(path: &str, bytes: &[u8], total_size: u64) -> FilePreviewContent {
-    if bytes.is_empty() && total_size == 0 {
-        return FilePreviewContent::Empty;
-    }
-    let shown_bytes = bytes.len() as u64;
-    let truncated = total_size > shown_bytes;
-    let looks_binary = bytes.contains(&0);
+fn build_hex_preview(bytes: &[u8]) -> (String, u64) {
+    let slice = &bytes[..bytes.len().min(8 * 1024)];
+    (format_hex_dump(slice), slice.len() as u64)
+}
 
-    if !looks_binary {
-        let valid_text = match from_utf8(bytes) {
-            Ok(text) => Some(text),
-            Err(err) if truncated && err.error_len().is_none() && err.valid_up_to() > 0 => {
-                from_utf8(&bytes[..err.valid_up_to()]).ok()
-            }
-            Err(_) => None,
-        };
-        if let Some(text) = valid_text {
-            return FilePreviewContent::Text {
-                text: text.to_owned(),
-                language: detect_code_language(path),
-                shown_bytes: text.len() as u64,
+/// Classifies raw file bytes read from a layer tar into rich previews, UTF-8 text, hex dump, or empty.
+pub fn classify_file_preview(path: &str, bytes: &[u8], total_size: u64) -> FilePreviewContent {
+    match inspect_file_preview(path, bytes, total_size) {
+        InspectedPreview::Empty => FilePreviewContent::Empty,
+        InspectedPreview::Image { meta, truncated } => {
+            let (hex_dump, shown_bytes) = build_hex_preview(bytes);
+            let data_uri = (!truncated).then(|| encode_data_uri(&meta.mime, bytes));
+            FilePreviewContent::Image {
+                meta,
+                data_uri,
+                hex_dump,
+                shown_bytes,
                 total_size,
                 truncated,
-            };
+            }
         }
-    }
-
-    let hex_slice = &bytes[..bytes.len().min(8 * 1024)];
-    FilePreviewContent::BinaryHex {
-        hex_dump: format_hex_dump(hex_slice),
-        shown_bytes: hex_slice.len() as u64,
-        total_size,
-        truncated: total_size > hex_slice.len() as u64,
+        InspectedPreview::Svg { meta, source, .. } => FilePreviewContent::Svg {
+            meta,
+            source,
+            total_size,
+        },
+        InspectedPreview::Archive { meta } => {
+            let (hex_dump, shown_bytes) = build_hex_preview(bytes);
+            let report_text = format_archive_text(&meta);
+            FilePreviewContent::Archive {
+                meta,
+                report_text,
+                hex_dump,
+                shown_bytes,
+                total_size,
+            }
+        }
+        InspectedPreview::Structured { meta } => {
+            let (hex_dump, shown_bytes) = build_hex_preview(bytes);
+            let report_text = format_structured_text(&meta);
+            FilePreviewContent::Structured {
+                meta,
+                report_text,
+                hex_dump,
+                shown_bytes,
+                total_size,
+            }
+        }
+        InspectedPreview::Media { meta, .. } => {
+            let (hex_dump, shown_bytes) = build_hex_preview(bytes);
+            let report_text = format_media_text(&meta, total_size);
+            FilePreviewContent::Media {
+                meta,
+                report_text,
+                hex_dump,
+                shown_bytes,
+                total_size,
+            }
+        }
+        InspectedPreview::Text {
+            text,
+            formatted_text,
+            language,
+            compression,
+            shown_bytes,
+            total_size,
+            truncated,
+        } => FilePreviewContent::Text {
+            text,
+            formatted_text,
+            language,
+            compression,
+            shown_bytes,
+            total_size,
+            truncated,
+        },
+        InspectedPreview::Binary { .. } => {
+            let (hex_dump, shown_bytes) = build_hex_preview(bytes);
+            FilePreviewContent::BinaryHex {
+                hex_dump,
+                shown_bytes,
+                total_size,
+                truncated: total_size > shown_bytes,
+            }
+        }
     }
 }
 
@@ -1244,7 +1309,9 @@ mod tests {
             text_preview,
             FilePreviewContent::Text {
                 text: "FROM alpine:3.20\n".to_owned(),
+                formatted_text: None,
                 language: Some("Dockerfile"),
+                compression: None,
                 shown_bytes: 17,
                 total_size: 17,
                 truncated: false,
@@ -1393,7 +1460,9 @@ mod tests {
             preview,
             FilePreviewContent::Text {
                 text: "Symbolic link → busybox".to_owned(),
+                formatted_text: None,
                 language: None,
+                compression: None,
                 shown_bytes: "Symbolic link → busybox".len() as u64,
                 total_size: "Symbolic link → busybox".len() as u64,
                 truncated: false,
@@ -1405,12 +1474,89 @@ mod tests {
             zh,
             FilePreviewContent::Text {
                 text: "符号链接（未记录目标路径）。".to_owned(),
+                formatted_text: None,
                 language: None,
+                compression: None,
                 shown_bytes: "符号链接（未记录目标路径）。".len() as u64,
                 total_size: "符号链接（未记录目标路径）。".len() as u64,
                 truncated: false,
             }
         );
+    }
+
+    #[test]
+    fn classify_file_preview_handles_images_svg_json_and_elf() {
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        png.extend_from_slice(&13_u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&32_u32.to_be_bytes());
+        png.extend_from_slice(&24_u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        match classify_file_preview("assets/icon.png", &png, png.len() as u64) {
+            FilePreviewContent::Image {
+                meta,
+                data_uri,
+                truncated,
+                ..
+            } => {
+                assert_eq!(meta.format, "PNG");
+                assert_eq!(meta.width, Some(32));
+                assert_eq!(meta.height, Some(24));
+                assert!(
+                    data_uri
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("data:image/png;base64,")
+                );
+                assert!(!truncated);
+            }
+            other => panic!("expected Image preview, got {other:?}"),
+        }
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><circle cx="10" cy="10" r="8"/></svg>"#;
+        match classify_file_preview("assets/badge.svg", svg, svg.len() as u64) {
+            FilePreviewContent::Svg { meta, source, .. } => {
+                assert_eq!(meta.format, "SVG");
+                assert_eq!(meta.width, Some(40));
+                assert!(source.contains("<circle"));
+            }
+            other => panic!("expected Svg preview, got {other:?}"),
+        }
+
+        let min_json = br#"{"a":1,"b":"ok"}"#;
+        match classify_file_preview("static/version.json", min_json, min_json.len() as u64) {
+            FilePreviewContent::Text {
+                formatted_text,
+                language,
+                ..
+            } => {
+                assert_eq!(language, Some("json"));
+                assert!(
+                    formatted_text
+                        .as_deref()
+                        .unwrap()
+                        .contains("\n  \"b\": \"ok\"")
+                );
+            }
+            other => panic!("expected formatted JSON Text preview, got {other:?}"),
+        }
+
+        let mut elf = [0_u8; 64];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        match classify_file_preview("usr/lib/libdemo.so", &elf, 8192) {
+            FilePreviewContent::Structured {
+                meta, report_text, ..
+            } => {
+                assert!(meta.summary.contains("x86_64"));
+                assert!(report_text.contains("ELF"));
+            }
+            other => panic!("expected Structured ELF preview, got {other:?}"),
+        }
     }
 
     #[test]

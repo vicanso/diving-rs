@@ -206,7 +206,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 10px 14px;
   margin: 0 0 12px;
   font-size: 13px;
   color: var(--ink-secondary);
@@ -217,6 +217,22 @@
 }
 
 .filePreview .filePreviewMeta a {
+  margin-left: auto;
+}
+
+.filePreview .filePreviewToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.filePreview .filePreviewToolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin-left: auto;
 }
 
@@ -239,6 +255,173 @@
   background: var(--bg-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+}
+
+.filePreview .filePreviewBody.wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.filePreview .filePreviewStage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  max-height: 62vh;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-muted);
+  background-image:
+    linear-gradient(45deg, var(--bg) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--bg) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--bg) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--bg) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+}
+
+.filePreview .filePreviewImage {
+  max-width: 100%;
+  max-height: 54vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.filePreview .filePreviewMediaCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+
+.filePreview .filePreviewAudio {
+  width: 100%;
+  max-width: 520px;
+}
+
+.filePreview .filePreviewVideo {
+  max-width: 100%;
+  max-height: 54vh;
+  border-radius: var(--radius-sm);
+}
+
+.filePreview .filePreviewArchiveScroll {
+  max-height: 56vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+
+.filePreview .filePreviewArchiveTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.filePreview .filePreviewArchiveTable td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-secondary);
+  vertical-align: top;
+}
+
+.filePreview .filePreviewArchiveTable tr:last-child td {
+  border-bottom: none;
+}
+
+.filePreview .filePreviewArchiveTable .mono {
+  font-family: var(--font-mono);
+}
+
+.filePreview .filePreviewArchiveTable .sizeCell {
+  text-align: right;
+  white-space: nowrap;
+  color: var(--ink-muted);
+}
+
+.filePreview .filePreviewArchiveTable .pathCell {
+  word-break: break-all;
+}
+
+.filePreview .filePreviewInspector {
+  max-height: 58vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.filePreview .filePreviewInspectorSummary {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.filePreview .filePreviewKv {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  padding: 6px 12px;
+}
+
+.filePreview .filePreviewKvRow {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.filePreview .filePreviewKvRow:last-child {
+  border-bottom: none;
+}
+
+.filePreview .filePreviewKvRow dt {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.filePreview .filePreviewKvRow dd {
+  margin: 0;
+  color: var(--ink-secondary);
+  word-break: break-word;
+}
+
+.filePreview .filePreviewSection h4 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.filePreview .filePreviewSectionBody {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+  overflow-x: auto;
 }
 
 /* —— MCP guide dialog (rendered in a portal, outside .appLayout) —— */

@@ -338,6 +338,43 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "Symbolic link (no target recorded).",
         "符号链接（未记录目标路径）。",
     ),
+    ("sheet.mode_preview", "Preview", "预览"),
+    ("sheet.mode_hex", "Hex", "十六进制"),
+    ("sheet.mode_source", "Source", "源码"),
+    ("sheet.mode_formatted", "Formatted", "格式化"),
+    ("sheet.mode_raw", "Raw", "原始"),
+    ("sheet.mode_contents", "Contents", "目录内容"),
+    ("sheet.mode_inspector", "Inspector", "结构信息"),
+    ("sheet.fit_window", "Fit", "适应窗口"),
+    ("sheet.actual_size", "1:1", "原始尺寸"),
+    (
+        "sheet.decompressed",
+        "Decompressed from {0} stream ({1} shown).",
+        "已自动解压 {0} 流（展示 {1}）。",
+    ),
+    (
+        "sheet.archive_summary",
+        "{0} · {1} entries · {2} uncompressed",
+        "{0} · 共 {1} 项 · 解压大小 {2}",
+    ),
+    (
+        "sheet.archive_truncated",
+        "Showing first {0} of {1} entries.",
+        "仅显示前 {0} 项（共 {1} 项）。",
+    ),
+    ("sheet.archive_col_mode", "Mode", "权限"),
+    ("sheet.archive_col_size", "Size", "大小"),
+    ("sheet.archive_col_path", "Path", "路径"),
+    (
+        "sheet.image_too_large",
+        "Image exceeds {0} inline limit — use Save as… or switch to Hex.",
+        "图片超过 {0} 内嵌预览上限 — 请点击“导出”或切换到十六进制查看。",
+    ),
+    (
+        "sheet.media_hint",
+        "Media container detected. Audio/video playback is supported in the Web viewer, or use Save as… to open locally.",
+        "已识别媒体容器。Web 端支持直接播放音视频，也可点击“导出”到本地打开。",
+    ),
     // Treemap & Findings & Dockerfile
     (
         "treemap.m3_pending",

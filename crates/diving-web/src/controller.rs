@@ -6,8 +6,10 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
 use diving_core::{
-    is_safe_blob_id, parse_image_info, resolve_explicit_credentials, to_diff_markdown, to_markdown,
-    to_summary_markdown, AnalyzeOptions, Error as CoreError, ImagePreview, Lang, PreviewOptions,
+    inspect_file_preview, is_safe_blob_id, parse_image_info, preview_read_limit,
+    resolve_explicit_credentials, to_diff_markdown, to_markdown, to_summary_markdown,
+    AnalyzeOptions, ArchivePreviewMeta, Error as CoreError, ImagePreview, ImagePreviewMeta,
+    InspectedPreview, Lang, MediaPreviewMeta, PreviewOptions, StructuredPreviewMeta,
     REGISTRY_LOCAL_FILE,
 };
 use futures::stream;
@@ -227,20 +229,46 @@ fn local_file_archive(image: Option<&str>) -> Option<String> {
 
 /// Text shown by the web preview; longer files are cut, not refused.
 const PREVIEW_TEXT_BYTES: u64 = 256 * 1024;
-/// A NUL byte in this prefix marks the file as binary.
-const PREVIEW_SNIFF_BYTES: usize = 8 * 1024;
 /// How much of a binary file the hex view shows.
-const PREVIEW_HEX_BYTES: usize = 512;
+const PREVIEW_HEX_BYTES: usize = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum FilePreviewKind {
+    Empty,
+    Text,
+    Image,
+    Svg,
+    Media,
+    Archive,
+    Structured,
+    Binary,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FilePreview {
     size: u64,
     binary: bool,
-    /// Whether `content` covers less than the whole file.
+    /// Whether `content` (or inspected prefix) covers less than the whole file.
     truncated: bool,
-    /// The text, or a hex dump of the first bytes of a binary file.
+    /// The text / SVG markup, or a hex dump of the first bytes of a binary file.
     content: String,
+    kind: FilePreviewKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compression: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    formatted_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<ImagePreviewMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media: Option<MediaPreviewMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<ArchivePreviewMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured: Option<StructuredPreviewMeta>,
 }
 
 /// Classic `hexdump -C` layout: offset, 16 bytes in two groups, ASCII.
@@ -272,28 +300,150 @@ fn hex_dump(bytes: &[u8]) -> String {
     out
 }
 
+fn binary_hex_content(head: &[u8]) -> String {
+    let shown = &head[..head.len().min(PREVIEW_HEX_BYTES)];
+    hex_dump(shown)
+}
+
+#[cfg(test)]
 fn build_preview(head: &[u8], size: u64) -> FilePreview {
-    let sniff = &head[..head.len().min(PREVIEW_SNIFF_BYTES)];
-    if sniff.contains(&0) {
-        let shown = &head[..head.len().min(PREVIEW_HEX_BYTES)];
-        return FilePreview {
+    build_preview_for_path("", head, size)
+}
+
+fn build_preview_for_path(file_path: &str, head: &[u8], size: u64) -> FilePreview {
+    match inspect_file_preview(file_path, head, size) {
+        InspectedPreview::Empty => FilePreview {
+            size,
+            binary: false,
+            truncated: false,
+            content: String::new(),
+            kind: FilePreviewKind::Empty,
+            language: None,
+            compression: None,
+            formatted_content: None,
+            image: None,
+            media: None,
+            archive: None,
+            structured: None,
+        },
+        InspectedPreview::Image { meta, truncated } => FilePreview {
             size,
             binary: true,
-            truncated: (shown.len() as u64) < size,
-            content: hex_dump(shown),
-        };
-    }
-    FilePreview {
-        size,
-        binary: false,
-        truncated: (head.len() as u64) < size,
-        content: String::from_utf8_lossy(head).into_owned(),
+            truncated,
+            content: binary_hex_content(head),
+            kind: FilePreviewKind::Image,
+            language: None,
+            compression: None,
+            formatted_content: None,
+            image: Some(meta),
+            media: None,
+            archive: None,
+            structured: None,
+        },
+        InspectedPreview::Svg {
+            meta,
+            source,
+            truncated,
+        } => FilePreview {
+            size,
+            binary: false,
+            truncated,
+            content: source,
+            kind: FilePreviewKind::Svg,
+            language: Some("xml"),
+            compression: None,
+            formatted_content: None,
+            image: Some(meta),
+            media: None,
+            archive: None,
+            structured: None,
+        },
+        InspectedPreview::Media { meta, truncated } => FilePreview {
+            size,
+            binary: true,
+            truncated,
+            content: binary_hex_content(head),
+            kind: FilePreviewKind::Media,
+            language: None,
+            compression: None,
+            formatted_content: None,
+            image: None,
+            media: Some(meta),
+            archive: None,
+            structured: None,
+        },
+        InspectedPreview::Archive { meta } => FilePreview {
+            size,
+            binary: true,
+            truncated: meta.truncated_entries,
+            content: binary_hex_content(head),
+            kind: FilePreviewKind::Archive,
+            language: None,
+            compression: None,
+            formatted_content: None,
+            image: None,
+            media: None,
+            archive: Some(meta),
+            structured: None,
+        },
+        InspectedPreview::Structured { meta } => FilePreview {
+            size,
+            binary: true,
+            truncated: (head.len() as u64) < size,
+            content: binary_hex_content(head),
+            kind: FilePreviewKind::Structured,
+            language: None,
+            compression: None,
+            formatted_content: None,
+            image: None,
+            media: None,
+            archive: None,
+            structured: Some(meta),
+        },
+        InspectedPreview::Text {
+            text,
+            formatted_text,
+            language,
+            compression,
+            truncated,
+            ..
+        } => FilePreview {
+            size,
+            binary: false,
+            truncated,
+            content: text,
+            kind: FilePreviewKind::Text,
+            language,
+            compression,
+            formatted_content: formatted_text,
+            image: None,
+            media: None,
+            archive: None,
+            structured: None,
+        },
+        InspectedPreview::Binary { .. } => {
+            let shown = &head[..head.len().min(PREVIEW_HEX_BYTES)];
+            FilePreview {
+                size,
+                binary: true,
+                truncated: (shown.len() as u64) < size,
+                content: hex_dump(shown),
+                kind: FilePreviewKind::Binary,
+                language: None,
+                compression: None,
+                formatted_content: None,
+                image: None,
+                media: None,
+                archive: None,
+                structured: None,
+            }
+        }
     }
 }
 
 /// The first part of a file in a cached layer, for the web UI to show
-/// inline: text up to [`PREVIEW_TEXT_BYTES`], or a hex dump for a binary.
-/// Reads only that much, whatever the file's size.
+/// inline: rich previews (images, SVG, compressed text, archives, ELF/Wasm/SQLite)
+/// or text up to [`PREVIEW_TEXT_BYTES`], or a hex dump for unknown binaries.
 async fn preview_file(
     State(state): State<Arc<WebState>>,
     Query(params): Query<GetFileParams>,
@@ -302,6 +452,8 @@ async fn preview_file(
     let digest = params.digest;
     let media_type = params.media_type;
     let file_path = params.file;
+    let read_limit =
+        preview_read_limit(&file_path).min(state.max_download_file_size.max(PREVIEW_TEXT_BYTES));
     let use_cached = is_safe_blob_id(&digest) && analyzer.has_layer_blob(&digest);
     let local_archive = local_file_archive(params.image.as_deref());
     let preview = tokio::task::spawn_blocking(move || -> HTTPResult<FilePreview> {
@@ -311,11 +463,11 @@ async fn preview_file(
                 &digest,
                 &media_type,
                 &file_path,
-                PREVIEW_TEXT_BYTES,
+                read_limit,
             )?,
-            _ => analyzer.read_file_head(&digest, &media_type, &file_path, PREVIEW_TEXT_BYTES)?,
+            _ => analyzer.read_file_head(&digest, &media_type, &file_path, read_limit)?,
         };
-        Ok(build_preview(&head, size))
+        Ok(build_preview_for_path(&file_path, &head, size))
     })
     .await
     .map_err(|e| HTTPError::new_with_category(&e.to_string(), "blob"))??;
@@ -423,11 +575,61 @@ mod tests {
 
         let elf = build_preview(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0\x03\0>\0", 20);
         assert!(elf.binary);
+        assert_eq!(elf.kind, FilePreviewKind::Binary);
         assert_eq!(
             elf.content,
             "00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|\n\
              00000010  03 00 3e 00                                       |..>.|\n"
         );
+    }
+
+    #[test]
+    fn rich_preview_detects_images_svg_json_and_elf() {
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        png.extend_from_slice(&13_u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64_u32.to_be_bytes());
+        png.extend_from_slice(&32_u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        let img = build_preview_for_path("static/assets/icon.png", &png, png.len() as u64);
+        assert_eq!(img.kind, FilePreviewKind::Image);
+        let meta = img.image.expect("image meta");
+        assert_eq!(meta.format, "PNG");
+        assert_eq!(meta.width, Some(64));
+        assert_eq!(meta.height, Some(32));
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24"/></svg>"#;
+        let svg_preview = build_preview_for_path("icons/box.svg", svg, svg.len() as u64);
+        assert_eq!(svg_preview.kind, FilePreviewKind::Svg);
+        assert_eq!(svg_preview.language, Some("xml"));
+        assert!(!svg_preview.binary);
+
+        let json_bytes = br#"{"name":"diving","version":"0.12.3"}"#;
+        let json_preview =
+            build_preview_for_path("static/version.json", json_bytes, json_bytes.len() as u64);
+        assert_eq!(json_preview.kind, FilePreviewKind::Text);
+        assert_eq!(json_preview.language, Some("json"));
+        assert!(json_preview
+            .formatted_content
+            .as_deref()
+            .unwrap()
+            .contains("\n  \"version\": \"0.12.3\""));
+
+        let mut elf_hdr = [0_u8; 64];
+        elf_hdr[0..4].copy_from_slice(b"\x7fELF");
+        elf_hdr[4] = 2;
+        elf_hdr[5] = 1;
+        elf_hdr[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        elf_hdr[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        let elf_preview = build_preview_for_path("usr/local/bin/app", &elf_hdr, 8192);
+        assert_eq!(elf_preview.kind, FilePreviewKind::Structured);
+        assert!(elf_preview
+            .structured
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("aarch64"));
     }
 
     #[tokio::test]

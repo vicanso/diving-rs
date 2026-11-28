@@ -11,6 +11,7 @@ mod gate;
 mod i18n;
 mod image;
 mod markdown;
+mod preview;
 mod progress;
 mod recommend;
 mod sensitive;
@@ -43,6 +44,13 @@ pub use image::{
     REGISTRY_DOCKER_HUB, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 pub use markdown::{to_markdown, to_summary_markdown};
+pub use preview::{
+    detect_code_language, encode_data_uri, format_archive_text, format_media_text,
+    format_structured_text, inspect_file_preview, preview_read_limit, ArchiveEntryPreview,
+    ArchivePreviewMeta, ImagePreviewMeta, InspectedPreview, MediaPreviewMeta, PreviewField,
+    StructuredPreviewMeta, StructuredSection, PREVIEW_ARCHIVE_MAX_ENTRIES, PREVIEW_RICH_LIMIT,
+    PREVIEW_TEXT_LIMIT,
+};
 pub use progress::{ProgressCallback, ProgressEvent};
 pub use recommend::{
     build_recommendations, gate_violations, Recommendation, CATEGORY_NECESSITY, CATEGORY_SECURITY,

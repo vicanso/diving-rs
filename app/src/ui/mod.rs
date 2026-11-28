@@ -20,7 +20,10 @@ pub use button::{
     ButtonVariant, UiSize, ui_action_card, ui_button, ui_icon_button, ui_image_pill_button,
     ui_link, ui_menu_trigger_icon, ui_recent_item, ui_sidebar_item,
 };
-pub use code::{ui_code_viewer, ui_diff_viewer, ui_hex_viewer};
+pub use code::{
+    ui_archive_viewer, ui_code_viewer, ui_diff_viewer, ui_hex_viewer, ui_image_stage,
+    ui_structured_viewer,
+};
 pub use controls::{
     SegmentOption, ui_borderless_select, ui_checkbox, ui_segmented, ui_select, ui_switch,
 };
