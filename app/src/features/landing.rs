@@ -2,8 +2,8 @@
 
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, format_bytes};
-use crate::features::arch_select_items;
+use crate::domain::{AppState, RegistryRetryTarget, format_bytes};
+use crate::features::{active_failed_analyze_image, arch_select_items, registry_auth_fix_button};
 use crate::i18n::{format_user_error, t, tf};
 use crate::ui::{
     BannerTone, ButtonVariant, IconName, UiSize, border_strong, font_mono_family, radius_control,
@@ -239,24 +239,46 @@ fn sample_strip(state: AppState) -> impl IntoElement {
 
 fn error_banner(state: AppState) -> impl IntoElement {
     let lang = state.lang;
-    let retry_state = state.clone();
+    let err_sig = state.analyze_error;
+    let failed_sig = state.failed_analyze_image;
+    let current_sig = state.current_image;
+    let input_sig = state.image_input;
+    let auth_state = state.clone();
+    let retry_state = state;
+
     ui_banner(
         BannerTone::Danger,
         move || {
-            let raw = state.analyze_error.get().unwrap_or_default();
+            let raw = err_sig.get().unwrap_or_default();
             SharedString::from(format_user_error(lang.get(), &raw))
         },
         Some(
-            ui_button(
-                move || SharedString::from(t(lang.get(), "landing.retry")),
-                ButtonVariant::Outline,
-                UiSize::Xs,
-                Some(IconName::Refresh),
-                false,
-                false,
-                move || retry_state.submit_current_input(),
-            )
-            .into_element(),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(registry_auth_fix_button(
+                    auth_state,
+                    RegistryRetryTarget::Analyze,
+                    move || {
+                        active_failed_analyze_image(
+                            failed_sig.get(),
+                            current_sig.get(),
+                            input_sig.get(),
+                        )
+                    },
+                    move || err_sig.get().unwrap_or_default(),
+                ))
+                .child(ui_button(
+                    move || SharedString::from(t(lang.get(), "landing.retry")),
+                    ButtonVariant::Outline,
+                    UiSize::Xs,
+                    Some(IconName::Refresh),
+                    false,
+                    false,
+                    move || retry_state.reanalyze_current_image(),
+                ))
+                .into_element(),
         ),
     )
 }

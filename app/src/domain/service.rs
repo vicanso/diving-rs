@@ -3,15 +3,18 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
-use diving_app::config::{build_desktop_analyzer, build_http_client, load_config};
+use diving_app::config::{
+    build_desktop_analyzer, build_http_client, load_config, load_config_in_dir,
+    load_user_registries, save_user_registries,
+};
 use diving_core::{
     AnalyzeOptions, Analyzer, CleanupStats, DiffOptions, DockerAnalyzeResult, Error as CoreError,
     ImageDiff, ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions,
-    ProgressEvent, REGISTRY_LOCAL_FILE, diff_images_with_options, list_local_images,
+    ProgressEvent, REGISTRY_LOCAL_FILE, RegistryRule, diff_images_with_options, list_local_images,
     parse_image_info, to_diff_markdown, to_markdown,
 };
 use tokio::runtime::{Builder, Runtime};
@@ -75,8 +78,9 @@ impl AnalyzeTaskHandle {
 
 struct ServiceInner {
     rt: Runtime,
-    analyzer: Analyzer,
-    config_warning: Option<String>,
+    analyzer: StdRwLock<Analyzer>,
+    config_warning: StdRwLock<Option<String>>,
+    config_dir: Option<PathBuf>,
 }
 
 /// Thread-safe handle wrapping the desktop `Analyzer` and shared Tokio runtime.
@@ -139,14 +143,24 @@ impl DivingService {
         Self {
             inner: Arc::new(ServiceInner {
                 rt,
-                analyzer,
-                config_warning,
+                analyzer: StdRwLock::new(analyzer),
+                config_warning: StdRwLock::new(config_warning),
+                config_dir: None,
             }),
         }
     }
 
     /// Creates an isolated service backed by a custom `Analyzer` (used in tests).
     pub fn with_analyzer(analyzer: Analyzer) -> Self {
+        Self::with_analyzer_inner(analyzer, None)
+    }
+
+    /// Creates an isolated service with a custom `TempDir` config directory (never touches `~/.diving`).
+    pub fn with_analyzer_and_config_dir(analyzer: Analyzer, config_dir: PathBuf) -> Self {
+        Self::with_analyzer_inner(analyzer, Some(config_dir))
+    }
+
+    fn with_analyzer_inner(analyzer: Analyzer, config_dir: Option<PathBuf>) -> Self {
         let rt = Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -155,15 +169,71 @@ impl DivingService {
         Self {
             inner: Arc::new(ServiceInner {
                 rt,
-                analyzer,
-                config_warning: None,
+                analyzer: StdRwLock::new(analyzer),
+                config_warning: StdRwLock::new(None),
+                config_dir,
             }),
         }
     }
 
+    fn analyzer_snapshot(&self) -> Analyzer {
+        self.inner
+            .analyzer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn load_effective_config(&self) -> Result<diving_app::config::LoadedConfig, String> {
+        match &self.inner.config_dir {
+            Some(dir) => load_config_in_dir(dir),
+            None => load_config(None),
+        }
+    }
+
+    /// Loads raw `(config.yml, registries.yml)` rules without expanding `${ENV_VAR}` placeholders.
+    pub fn load_registry_sources(&self) -> Result<(Vec<RegistryRule>, Vec<RegistryRule>), String> {
+        let loaded = self.load_effective_config()?;
+        let base = loaded.config.registries.unwrap_or_default();
+        let user = load_user_registries(&loaded.config_dir)?;
+        Ok((base, user))
+    }
+
+    /// Saves user registry rules to `<config_dir>/registries.yml` and hot-reloads the `Analyzer`.
+    pub fn save_user_registry_rules(&self, rules: &[RegistryRule]) -> Result<(), String> {
+        let dir = match &self.inner.config_dir {
+            Some(dir) => dir.clone(),
+            None => self.load_effective_config()?.config_dir,
+        };
+        save_user_registries(&dir, rules)?;
+        self.reload_config()
+    }
+
+    /// Rebuilds the active [`Analyzer`] from disk config (`config.yml` + `registries.yml`) in place.
+    pub fn reload_config(&self) -> Result<(), String> {
+        let loaded = self.load_effective_config()?;
+        let client = build_http_client()?;
+        let next = build_desktop_analyzer(&loaded, client).map_err(|err| err.to_string())?;
+        *self
+            .inner
+            .analyzer
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .inner
+            .config_warning
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+
     /// Returns any non-fatal warning captured while loading `~/.diving/config.yml`.
-    pub fn config_warning(&self) -> Option<&str> {
-        self.inner.config_warning.as_deref()
+    pub fn config_warning(&self) -> Option<String> {
+        self.inner
+            .config_warning
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Starts analyzing `image` (optionally scoped to `arch`) and streams progress + result.
@@ -189,7 +259,7 @@ impl DivingService {
     ) -> (AnalyzeTaskHandle, mpsc::UnboundedReceiver<AnalyzeMessage>) {
         let target = format_image_target(&image, arch.as_deref());
         let (tx, rx) = mpsc::unbounded_channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
         let done = Arc::new(AtomicBool::new(false));
         let is_registry = image_source_kind(&target) == ImageSourceKind::Registry;
 
@@ -257,7 +327,7 @@ impl DivingService {
         let base_ref = format_image_target(&base_image, base_arch.as_deref());
         let target_ref = format_image_target(&target_image, target_arch.as_deref());
         let (tx, rx) = mpsc::unbounded_channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
 
         let handle = self.inner.rt.spawn(async move {
             let base_tx = tx.clone();
@@ -338,7 +408,7 @@ impl DivingService {
         let base_ref = format_image_target(&base_image, base_arch.as_deref());
         let target_ref = format_image_target(&target_image, target_arch.as_deref());
         let (tx, rx) = oneshot::channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
 
         let handle = self.inner.rt.spawn(async move {
             let outcome = analyzer
@@ -376,7 +446,7 @@ impl DivingService {
         file_path: String,
     ) -> oneshot::Receiver<Result<FilePreviewContent, String>> {
         let (tx, rx) = oneshot::channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
         self.inner.rt.spawn_blocking(move || {
             let result = read_preview_head(
                 &analyzer,
@@ -402,7 +472,7 @@ impl DivingService {
         dest: PathBuf,
     ) -> oneshot::Receiver<Result<u64, String>> {
         let (tx, rx) = oneshot::channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
         self.inner.rt.spawn_blocking(move || {
             let result = export_layer_file_sync(
                 &analyzer,
@@ -511,7 +581,7 @@ impl DivingService {
     /// Runs expired cache cleanup on layer blobs and saved analyses.
     pub fn cleanup_caches(&self) -> oneshot::Receiver<Result<CleanupStats, String>> {
         let (tx, rx) = oneshot::channel();
-        let analyzer = self.inner.analyzer.clone();
+        let analyzer = self.analyzer_snapshot();
         self.inner.rt.spawn(async move {
             let result = analyzer
                 .cleanup_caches()

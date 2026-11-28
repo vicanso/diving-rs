@@ -10,14 +10,186 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use home::home_dir;
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tracing::{debug, warn};
 
-/// Username + password (or PAT) for a registry Basic-auth handshake.
+use crate::store::sha256_hex;
+
+/// Per-registry authentication, custom header, and HTTP/TLS transport rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistryRule {
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    pub insecure_http: bool,
+    pub insecure_skip_tls_verify: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<String>,
+}
+
+/// Normalizes a registry host or wildcard pattern (`https://Host.Example:5000/v2` -> `host.example:5000`).
+pub fn normalize_registry_host_pattern(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_scheme = if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://") {
+        &trimmed[8..]
+    } else if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://") {
+        &trimmed[7..]
+    } else {
+        trimmed
+    };
+    without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_docker_hub_host(host: &str) -> bool {
+    matches!(
+        host,
+        "index.docker.io" | "registry-1.docker.io" | "docker.io"
+    )
+}
+
+fn strip_port_from_host(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if host.matches(':').count() == 1 {
+        host.split(':').next().unwrap_or(host)
+    } else {
+        host
+    }
+}
+
+/// Returns `true` if `pattern` (exact host[:port] or `*.domain[:port]`) matches `target_host`.
+pub fn registry_host_matches(pattern: &str, target_host: &str) -> bool {
+    match_host_specificity(pattern, target_host).is_some()
+}
+
+/// Scores how specifically `pattern` matches `target_host` (`(2, _)` exact, `(1, len)` wildcard).
+pub(crate) fn match_host_specificity(pattern: &str, target_host: &str) -> Option<(u8, usize)> {
+    let pat = normalize_registry_host_pattern(pattern);
+    let target = normalize_registry_host_pattern(target_host);
+    if pat.is_empty() || target.is_empty() {
+        return None;
+    }
+    if pat == target || (is_docker_hub_host(&pat) && is_docker_hub_host(&target)) {
+        return Some((2, usize::MAX));
+    }
+    let suffix = pat.strip_prefix('*')?;
+    if !suffix.starts_with('.') || suffix.len() <= 1 {
+        return None;
+    }
+    if suffix.contains(':') {
+        (target.ends_with(suffix) && target.len() > suffix.len()).then_some((1, pat.len()))
+    } else {
+        let bare = strip_port_from_host(&target);
+        (bare.ends_with(suffix) && bare.len() > suffix.len()).then_some((1, pat.len()))
+    }
+}
+
+/// Indexed, normalized registry rule matcher preserving original order indices.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegistryRuleSet {
+    rules: Vec<RegistryRule>,
+}
+
+impl RegistryRuleSet {
+    pub(crate) fn new(rules: impl IntoIterator<Item = RegistryRule>) -> Self {
+        let normalized = rules
+            .into_iter()
+            .filter_map(|mut rule| {
+                rule.host = normalize_registry_host_pattern(&rule.host);
+                (!rule.host.is_empty()).then_some(rule)
+            })
+            .collect();
+        Self { rules: normalized }
+    }
+
+    pub(crate) fn rules(&self) -> &[RegistryRule] {
+        &self.rules
+    }
+
+    /// Returns the best matching rule index (exact match > longest wildcard suffix).
+    pub(crate) fn match_index(&self, host: &str) -> Option<usize> {
+        let mut best: Option<(usize, (u8, usize))> = None;
+        for (idx, rule) in self.rules.iter().enumerate() {
+            let Some(score) = match_host_specificity(&rule.host, host) else {
+                continue;
+            };
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                best = Some((idx, score));
+            }
+        }
+        best.map(|(idx, _)| idx)
+    }
+
+    /// Returns the best matching `(index, &RegistryRule)` for `host`.
+    pub(crate) fn match_host(&self, host: &str) -> Option<(usize, &RegistryRule)> {
+        self.match_index(host).map(|idx| (idx, &self.rules[idx]))
+    }
+
+    /// Whether an explicitly configured rule permits targeting `(scheme, host)` past default SSRF blocks.
+    pub(crate) fn allows_private_target(&self, scheme: &str, host: &str) -> bool {
+        let Some((_, rule)) = self.match_host(host) else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("https")
+            || (scheme.eq_ignore_ascii_case("http") && rule.insecure_http)
+    }
+
+    /// Computes a stable hash of the matched rule's auth and connection properties for cache isolation.
+    pub(crate) fn auth_fingerprint(&self, host: &str) -> Option<String> {
+        let (_, rule) = self.match_host(host)?;
+        let mut buf = String::new();
+        buf.push_str(&rule.host);
+        buf.push('\0');
+        if let Some(u) = rule.username.as_deref() {
+            buf.push_str(u);
+        }
+        buf.push('\0');
+        if let Some(p) = rule.password.as_deref() {
+            buf.push_str(p);
+        }
+        buf.push('\0');
+        if let Some(t) = rule.token.as_deref() {
+            buf.push_str(t);
+        }
+        buf.push('\0');
+        for (k, v) in &rule.headers {
+            buf.push_str(&k.to_ascii_lowercase());
+            buf.push('=');
+            buf.push_str(v);
+            buf.push('\0');
+        }
+        buf.push(if rule.insecure_http { '1' } else { '0' });
+        buf.push(if rule.insecure_skip_tls_verify {
+            '1'
+        } else {
+            '0'
+        });
+        if let Some(ca) = rule.ca_cert.as_deref() {
+            buf.push('\0');
+            buf.push_str(ca);
+        }
+        Some(sha256_hex(buf.as_bytes()))
+    }
+}
+
+/// Username + password (or PAT) for a registry Basic/Bearer handshake.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegistryCredentials {
     pub username: String,
@@ -380,5 +552,60 @@ mod tests {
         assert!(resolve_for_registry("https://ghcr.io/v2", None, None).is_none());
         let hit = resolve_for_registry("https://ghcr.io/v2", None, Some(&cfg)).unwrap();
         assert_eq!(hit.username, "alice");
+    }
+
+    #[test]
+    fn registry_rule_set_prefers_exact_then_longest_wildcard_and_docker_aliases() {
+        let rules = RegistryRuleSet::new([
+            RegistryRule {
+                host: "*.corp.internal".into(),
+                insecure_http: false,
+                ..Default::default()
+            },
+            RegistryRule {
+                host: "https://*.sub.corp.internal/v2".into(),
+                insecure_http: true,
+                ..Default::default()
+            },
+            RegistryRule {
+                host: "reg.sub.corp.internal:5000".into(),
+                insecure_http: true,
+                token: Some("exact-tok".into()),
+                ..Default::default()
+            },
+            RegistryRule {
+                host: "docker.io".into(),
+                username: Some("hub-user".into()),
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(
+            rules
+                .match_host("reg.sub.corp.internal:5000")
+                .and_then(|(_, r)| r.token.as_deref()),
+            Some("exact-tok")
+        );
+        assert_eq!(
+            rules
+                .match_host("ci.sub.corp.internal:8443")
+                .map(|(_, r)| r.host.as_str()),
+            Some("*.sub.corp.internal")
+        );
+        assert_eq!(
+            rules
+                .match_host("artifactory.corp.internal")
+                .map(|(_, r)| r.host.as_str()),
+            Some("*.corp.internal")
+        );
+        assert_eq!(
+            rules
+                .match_host("index.docker.io")
+                .and_then(|(_, r)| r.username.as_deref()),
+            Some("hub-user")
+        );
+        assert!(rules.allows_private_target("http", "ci.sub.corp.internal:8443"));
+        assert!(!rules.allows_private_target("http", "artifactory.corp.internal"));
+        assert!(rules.allows_private_target("https", "artifactory.corp.internal"));
     }
 }

@@ -1,7 +1,7 @@
 //! Root application state (`AppState`) with storage persistence and stale-result guards.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::env::consts;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,11 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use chrono::Local;
+use diving_app::config::merge_registry_rules;
 use diving_core::{
     BaseLayerMode, DiffOptions, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff,
-    ImagePreview, LocalContainerImage, LocalRuntime, ProgressEvent, build_recommendations,
+    ImagePreview, LocalContainerImage, LocalRuntime, ProgressEvent, RegistryRule,
+    build_recommendations, normalize_registry_host_pattern, registry_host_matches,
 };
 use nsh_core::element::Owner;
 use nsh_core::element::desktop::quit;
@@ -80,6 +82,77 @@ pub struct TreemapHoverInfo {
 pub struct DiffErrorState {
     pub base: Option<String>,
     pub target: Option<String>,
+}
+
+/// Action to automatically trigger once private registry settings are saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RegistryRetryTarget {
+    #[default]
+    None,
+    Analyze,
+    Diff,
+}
+
+/// One editable HTTP header row inside the Private Registries dialog.
+#[derive(Clone, PartialEq)]
+pub struct RegistryHeaderDraft {
+    pub id: u64,
+    pub key: Signal<String>,
+    pub value: Signal<String>,
+}
+
+/// Editable draft entry backing one domain rule in the Private Registries dialog.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryDraftRule {
+    pub host: String,
+    pub username: String,
+    pub password: String,
+    pub token: String,
+    pub headers: Vec<(String, String)>,
+    pub insecure_http: bool,
+    pub insecure_skip_tls_verify: bool,
+    pub ca_cert: String,
+    pub from_config_yml: bool,
+}
+
+impl RegistryDraftRule {
+    fn from_rule(rule: &RegistryRule, from_config_yml: bool) -> Self {
+        Self {
+            host: normalize_registry_host_pattern(&rule.host),
+            username: rule.username.clone().unwrap_or_default(),
+            password: rule.password.clone().unwrap_or_default(),
+            token: rule.token.clone().unwrap_or_default(),
+            headers: rule
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            insecure_http: rule.insecure_http,
+            insecure_skip_tls_verify: rule.insecure_skip_tls_verify,
+            ca_cert: rule.ca_cert.clone().unwrap_or_default(),
+            from_config_yml,
+        }
+    }
+
+    fn to_rule(&self) -> RegistryRule {
+        let mut headers = BTreeMap::new();
+        for (k, v) in &self.headers {
+            let clean_key = k.trim();
+            if !clean_key.is_empty() {
+                headers.insert(clean_key.to_owned(), v.clone());
+            }
+        }
+        RegistryRule {
+            host: normalize_registry_host_pattern(&self.host),
+            username: (!self.username.is_empty()).then(|| self.username.clone()),
+            password: (!self.password.is_empty()).then(|| self.password.clone()),
+            token: (!self.token.is_empty()).then(|| self.token.clone()),
+            headers,
+            insecure_http: self.insecure_http,
+            insecure_skip_tls_verify: self.insecure_skip_tls_verify,
+            ca_cert: (!self.ca_cert.trim().is_empty()).then(|| self.ca_cert.trim().to_owned()),
+        }
+    }
 }
 
 /// Lifecycle state for the GitHub Releases self-updater UI.
@@ -225,6 +298,22 @@ pub struct AppState {
     pub command_palette_open: Signal<bool>,
     pub provenance_open: Signal<bool>,
     pub provenance_query: Signal<String>,
+    pub failed_analyze_image: Signal<Option<String>>,
+    pub registry_dialog_open: Signal<bool>,
+    pub registry_drafts: Signal<Vec<RegistryDraftRule>>,
+    pub registry_config_base: Signal<Vec<RegistryRule>>,
+    pub registry_selected_index: Signal<Option<usize>>,
+    pub registry_dialog_error: Signal<Option<String>>,
+    pub registry_retry_target: Signal<RegistryRetryTarget>,
+    pub reg_host_input: Signal<String>,
+    pub reg_username_input: Signal<String>,
+    pub reg_password_input: Signal<String>,
+    pub reg_token_input: Signal<String>,
+    pub reg_headers: Signal<Vec<RegistryHeaderDraft>>,
+    pub reg_insecure_http: Signal<bool>,
+    pub reg_skip_tls: Signal<bool>,
+    pub reg_ca_cert_input: Signal<String>,
+    reg_next_header_id: Signal<u64>,
     result_seq: Signal<u64>,
     compare_synced_source: Signal<(String, Option<SharedString>)>,
     root_owner: Owner,
@@ -270,7 +359,7 @@ impl AppState {
             wide_sidebar_pref
         };
 
-        let config_warning = service.config_warning().map(str::to_owned);
+        let config_warning = service.config_warning();
         let initial_skipped = if auto_check_disabled_by_env() {
             None
         } else {
@@ -383,6 +472,22 @@ impl AppState {
             command_palette_open: signal(false),
             provenance_open: signal(false),
             provenance_query: signal(String::new()),
+            failed_analyze_image: signal(None),
+            registry_dialog_open: signal(false),
+            registry_drafts: signal(Vec::new()),
+            registry_config_base: signal(Vec::new()),
+            registry_selected_index: signal(None),
+            registry_dialog_error: signal(None),
+            registry_retry_target: signal(RegistryRetryTarget::None),
+            reg_host_input: signal(String::new()),
+            reg_username_input: signal(String::new()),
+            reg_password_input: signal(String::new()),
+            reg_token_input: signal(String::new()),
+            reg_headers: signal(Vec::new()),
+            reg_insecure_http: signal(false),
+            reg_skip_tls: signal(false),
+            reg_ca_cert_input: signal(String::new()),
+            reg_next_header_id: signal(1),
             result_seq: signal(0),
             compare_synced_source: signal((String::new(), None)),
             root_owner: Owner::current(),
@@ -581,6 +686,7 @@ impl AppState {
     /// Whether any modal dialog, sheet, or command palette is currently open.
     pub fn any_overlay_open(&self) -> bool {
         self.command_palette_open.get_untracked()
+            || self.registry_dialog_open.get_untracked()
             || self.provenance_open.get_untracked()
             || self.compare_dialog_open.get_untracked()
             || self.local_picker_open.get_untracked()
@@ -590,6 +696,7 @@ impl AppState {
     /// Closes all modal dialogs, sheets, and header search overlays.
     pub fn close_all_modals(&self) {
         self.command_palette_open.set(false);
+        self.registry_dialog_open.set(false);
         self.provenance_open.set(false);
         self.compare_dialog_open.set(false);
         self.local_picker_open.set(false);
@@ -601,6 +708,10 @@ impl AppState {
     pub fn dismiss_top_overlay_or_search(&self) -> bool {
         if self.command_palette_open.get_untracked() {
             self.command_palette_open.set(false);
+            return true;
+        }
+        if self.registry_dialog_open.get_untracked() {
+            self.registry_dialog_open.set(false);
             return true;
         }
         if self.provenance_open.get_untracked() {
@@ -781,6 +892,7 @@ impl AppState {
         self.arch_input.set(synced_arch);
         self.image_input.set(trimmed.clone());
         self.pending_image.set(Some(trimmed.clone()));
+        self.failed_analyze_image.set(Some(trimmed.clone()));
         self.analyze_error.set(None);
         self.preview.set(None);
         self.show_preview_card.set(false);
@@ -945,6 +1057,7 @@ impl AppState {
         self.progress_text.set(None);
         self.progress_ratio.set(1.0);
         self.analyze_error.set(None);
+        self.failed_analyze_image.set(None);
 
         // Precompute the merged final filesystem tree off the UI thread for instant Treemap tab switches.
         let tree_rx = self.service.build_final_tree_async(res);
@@ -1370,7 +1483,12 @@ impl AppState {
                 }
             }
             AppRoute::Inspector | AppRoute::Landing => {
-                let img = {
+                let img = if self.analyze_error.get_untracked().is_some() {
+                    self.failed_analyze_image
+                        .get_untracked()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| self.image_input.get_untracked().trim().to_owned())
+                } else {
                     let cur = self.current_image.get_untracked();
                     if !cur.is_empty() {
                         cur
@@ -1781,6 +1899,291 @@ impl AppState {
         };
         self.local_picker_open.set(false);
         self.analyze(selected, None);
+    }
+
+    /// Opens the Private Registries configuration modal populated from `config.yml` and `registries.yml`.
+    pub fn open_registry_settings(&self) {
+        self.open_registry_settings_inner(None, RegistryRetryTarget::None);
+    }
+
+    /// Opens the Private Registries modal pre-focused on `host`, optionally retrying after save.
+    pub fn open_registry_settings_for_host(&self, host: &str, retry: RegistryRetryTarget) {
+        self.open_registry_settings_inner(Some(host), retry);
+    }
+
+    fn open_registry_settings_inner(&self, prefill_host: Option<&str>, retry: RegistryRetryTarget) {
+        let (base_rules, user_rules) = match self.service.load_registry_sources() {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.registry_dialog_error.set(Some(err));
+                (Vec::new(), Vec::new())
+            }
+        };
+        let base_hosts: HashSet<String> = base_rules
+            .iter()
+            .map(|r| normalize_registry_host_pattern(&r.host))
+            .filter(|h| !h.is_empty())
+            .collect();
+        let merged = merge_registry_rules(&base_rules, &user_rules);
+        let mut drafts: Vec<RegistryDraftRule> = merged
+            .iter()
+            .map(|rule| {
+                let norm = normalize_registry_host_pattern(&rule.host);
+                RegistryDraftRule::from_rule(rule, base_hosts.contains(&norm))
+            })
+            .collect();
+
+        let selected_idx = if let Some(raw_host) = prefill_host {
+            let target = normalize_registry_host_pattern(raw_host);
+            let exact = drafts
+                .iter()
+                .position(|d| normalize_registry_host_pattern(&d.host) == target);
+            let matched = exact.or_else(|| {
+                drafts
+                    .iter()
+                    .position(|d| registry_host_matches(&d.host, &target))
+            });
+            if let Some(idx) = matched {
+                Some(idx)
+            } else if !target.is_empty() {
+                drafts.push(RegistryDraftRule {
+                    host: target,
+                    ..Default::default()
+                });
+                Some(drafts.len() - 1)
+            } else {
+                (!drafts.is_empty()).then_some(0)
+            }
+        } else {
+            (!drafts.is_empty()).then_some(0)
+        };
+
+        self.registry_config_base.set(base_rules);
+        self.registry_drafts.set(drafts);
+        self.registry_retry_target.set(retry);
+        self.registry_dialog_error.set(None);
+        self.registry_selected_index.set(selected_idx);
+        self.load_registry_editor(selected_idx);
+        self.registry_dialog_open.set(true);
+    }
+
+    fn alloc_header_draft(&self, key: String, value: String) -> RegistryHeaderDraft {
+        let next_id = self.reg_next_header_id.get_untracked();
+        self.reg_next_header_id.set(next_id.wrapping_add(1));
+        self.root_owner.run(|| RegistryHeaderDraft {
+            id: next_id,
+            key: signal(key),
+            value: signal(value),
+        })
+    }
+
+    fn load_registry_editor(&self, idx: Option<usize>) {
+        let draft = idx.and_then(|i| {
+            self.registry_drafts
+                .with_untracked(|list| list.get(i).cloned())
+        });
+        if let Some(draft) = draft {
+            self.reg_host_input.set(draft.host);
+            self.reg_username_input.set(draft.username);
+            self.reg_password_input.set(draft.password);
+            self.reg_token_input.set(draft.token);
+            let headers = draft
+                .headers
+                .into_iter()
+                .map(|(k, v)| self.alloc_header_draft(k, v))
+                .collect();
+            self.reg_headers.set(headers);
+            self.reg_insecure_http.set(draft.insecure_http);
+            self.reg_skip_tls.set(draft.insecure_skip_tls_verify);
+            self.reg_ca_cert_input.set(draft.ca_cert);
+        } else {
+            self.reg_host_input.set(String::new());
+            self.reg_username_input.set(String::new());
+            self.reg_password_input.set(String::new());
+            self.reg_token_input.set(String::new());
+            self.reg_headers.set(Vec::new());
+            self.reg_insecure_http.set(false);
+            self.reg_skip_tls.set(false);
+            self.reg_ca_cert_input.set(String::new());
+        }
+    }
+
+    /// Commits current right-pane editor signal values back into `registry_drafts[selected]`.
+    pub fn sync_active_registry_draft(&self) {
+        let Some(idx) = self.registry_selected_index.get_untracked() else {
+            return;
+        };
+        let host = self.reg_host_input.get_untracked();
+        let username = self.reg_username_input.get_untracked();
+        let password = self.reg_password_input.get_untracked();
+        let token = self.reg_token_input.get_untracked();
+        let headers = self.reg_headers.with_untracked(|rows| {
+            rows.iter()
+                .map(|row| (row.key.get_untracked(), row.value.get_untracked()))
+                .collect()
+        });
+        let insecure_http = self.reg_insecure_http.get_untracked();
+        let insecure_skip_tls_verify = self.reg_skip_tls.get_untracked();
+        let ca_cert = self.reg_ca_cert_input.get_untracked();
+
+        let mut list = self.registry_drafts.get_untracked();
+        if let Some(entry) = list.get_mut(idx) {
+            entry.host = host;
+            entry.username = username;
+            entry.password = password;
+            entry.token = token;
+            entry.headers = headers;
+            entry.insecure_http = insecure_http;
+            entry.insecure_skip_tls_verify = insecure_skip_tls_verify;
+            entry.ca_cert = ca_cert;
+            self.registry_drafts.set(list);
+        }
+    }
+
+    /// Switches selection to draft rule `idx` after saving edits on the previously active rule.
+    pub fn select_registry_draft(&self, idx: usize) {
+        self.sync_active_registry_draft();
+        let len = self.registry_drafts.with_untracked(Vec::len);
+        let next = (idx < len).then_some(idx);
+        self.registry_selected_index.set(next);
+        self.load_registry_editor(next);
+        self.registry_dialog_error.set(None);
+    }
+
+    /// Appends a blank private registry rule and selects it for editing.
+    pub fn add_registry_draft(&self) {
+        self.sync_active_registry_draft();
+        let mut list = self.registry_drafts.get_untracked();
+        list.push(RegistryDraftRule::default());
+        let next_idx = list.len() - 1;
+        self.registry_drafts.set(list);
+        self.registry_selected_index.set(Some(next_idx));
+        self.load_registry_editor(Some(next_idx));
+        self.registry_dialog_error.set(None);
+    }
+
+    /// Deletes the active registry rule (or resets an overriding rule if restored separately).
+    pub fn remove_selected_registry_draft(&self) {
+        self.sync_active_registry_draft();
+        let Some(idx) = self.registry_selected_index.get_untracked() else {
+            return;
+        };
+        let mut list = self.registry_drafts.get_untracked();
+        if idx >= list.len() {
+            return;
+        }
+        list.remove(idx);
+        let next_idx = if list.is_empty() {
+            None
+        } else {
+            Some(idx.min(list.len() - 1))
+        };
+        self.registry_drafts.set(list);
+        self.registry_selected_index.set(next_idx);
+        self.load_registry_editor(next_idx);
+        self.registry_dialog_error.set(None);
+    }
+
+    /// Resets the currently selected `config.yml`-backed rule back to its `config.yml` defaults.
+    pub fn reset_selected_registry_draft(&self) {
+        self.sync_active_registry_draft();
+        let Some(idx) = self.registry_selected_index.get_untracked() else {
+            return;
+        };
+        let mut list = self.registry_drafts.get_untracked();
+        let Some(current) = list.get(idx) else {
+            return;
+        };
+        let norm_host = normalize_registry_host_pattern(&current.host);
+        let base_rule = self.registry_config_base.with_untracked(|base| {
+            base.iter()
+                .find(|r| normalize_registry_host_pattern(&r.host) == norm_host)
+                .cloned()
+        });
+        if let Some(base_rule) = base_rule {
+            list[idx] = RegistryDraftRule::from_rule(&base_rule, true);
+            self.registry_drafts.set(list);
+            self.load_registry_editor(Some(idx));
+            self.registry_dialog_error.set(None);
+        }
+    }
+
+    /// Appends an empty `(key, value)` row to the active rule's custom headers list.
+    pub fn add_registry_header_row(&self) {
+        let mut rows = self.reg_headers.get_untracked();
+        rows.push(self.alloc_header_draft(String::new(), String::new()));
+        self.reg_headers.set(rows);
+    }
+
+    /// Removes a custom header row by its stable row `id`.
+    pub fn remove_registry_header_row(&self, id: u64) {
+        let mut rows = self.reg_headers.get_untracked();
+        rows.retain(|row| row.id != id);
+        self.reg_headers.set(rows);
+    }
+
+    /// Opens an OS file dialog to pick a custom PEM CA certificate file for the active rule.
+    pub fn browse_registry_ca_cert(&self) {
+        let lang = self.lang.get_untracked();
+        let title = t(lang, "registry.ca_cert_dialog").to_owned();
+        let state = self.clone();
+        self.spawn_app_task(async move {
+            let picked = pick_paths(OpenDialog::files().title(title)).await;
+            if let Ok(Some(paths)) = picked
+                && let Some(first) = paths.into_iter().next()
+            {
+                let path_str = first.display().to_string();
+                state
+                    .reg_ca_cert_input
+                    .set(strip_windows_drive_leading_slash(&path_str).to_owned());
+            }
+        });
+    }
+
+    /// Validates drafts, writes `registries.yml`, hot-reloads `Analyzer`, and optionally retries.
+    pub fn save_registry_settings(&self) {
+        self.sync_active_registry_draft();
+        let lang = self.lang.get_untracked();
+        let drafts = self.registry_drafts.get_untracked();
+        for draft in &drafts {
+            if normalize_registry_host_pattern(&draft.host).is_empty() {
+                self.registry_dialog_error
+                    .set(Some(t(lang, "registry.error_empty_host").to_owned()));
+                return;
+            }
+        }
+
+        let base_rules = self.registry_config_base.get_untracked();
+        let mut user_rules = Vec::new();
+        for draft in &drafts {
+            let candidate = draft.to_rule();
+            let matching_base = base_rules
+                .iter()
+                .find(|r| normalize_registry_host_pattern(&r.host) == candidate.host)
+                .map(|r| RegistryDraftRule::from_rule(r, true).to_rule());
+            if matching_base.as_ref() != Some(&candidate) {
+                user_rules.push(candidate);
+            }
+        }
+
+        if let Err(err) = self.service.save_user_registry_rules(&user_rules) {
+            self.registry_dialog_error.set(Some(err));
+            return;
+        }
+
+        let retry = self.registry_retry_target.get_untracked();
+        self.registry_dialog_error.set(None);
+        self.config_warning.set(self.service.config_warning());
+        self.registry_dialog_open.set(false);
+        self.registry_retry_target.set(RegistryRetryTarget::None);
+        self.show_status_notice(t(lang, "registry.saved_notice").to_owned());
+
+        match retry {
+            RegistryRetryTarget::None => {}
+            RegistryRetryTarget::Analyze | RegistryRetryTarget::Diff => {
+                self.reanalyze_current_image();
+            }
+        }
     }
 
     /// Runs startup DMG mount cleanup and silent 48-hour background update check (no-op in tests).

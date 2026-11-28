@@ -1,6 +1,6 @@
 use clap::Parser;
 use diving_app::config::{
-    build_http_client, build_web_analyzer, build_web_http_client, load_config,
+    build_http_client, build_web_analyzer, build_web_http_client_for, load_config,
 };
 use diving_app::logging::{init_logger, install_crypto_provider, EXIT_ERROR};
 use mimalloc::MiMalloc;
@@ -42,8 +42,7 @@ fn main() {
             std::process::exit(EXIT_ERROR);
         }
     };
-    let web_http_client = match build_web_http_client(loaded.config.registry_allowlist().is_empty())
-    {
+    let web_http_client = match build_web_http_client_for(&loaded) {
         Ok(client) => client,
         Err(err) => {
             error!(err, "build web http client fail");

@@ -47,6 +47,7 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
     let skip_state = state.clone();
     let resume_state = state.clone();
     let check_now_state = state.clone();
+    let reg_state = state.clone();
     let clean_state = state;
 
     let trigger = view()
@@ -124,6 +125,13 @@ pub fn more_actions_menu(state: AppState, size: UiSize) -> impl IntoElement {
             None,
             move || has_result.get().is_none(),
             move || export_json_state.export_json_report(),
+        ))
+        .child(ui_menu_item(
+            move || SharedString::from(t(lang.get(), "menu.registries")),
+            Some(IconName::FileKey),
+            Some("mod+,"),
+            false,
+            move || reg_state.open_registry_settings(),
         ))
         .child(ui_menu_item(
             move || SharedString::from(t(lang.get(), "menu.clear_cache")),

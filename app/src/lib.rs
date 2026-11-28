@@ -14,7 +14,7 @@ use crate::domain::{AppRoute, AppState, DivingService, UpdatePhase};
 use crate::features::{
     app_sidebar, bind_global_keys, command_palette_overlay, compare_dialog, content_header_bar,
     diff_workspace, file_preview_sheet, inspector_workspace, install_application_menu,
-    landing_view, local_picker_dialog, provenance_dialog,
+    landing_view, local_picker_dialog, provenance_dialog, registry_auth_dialog,
 };
 use crate::i18n::{t, tf};
 use crate::ui::{
@@ -141,6 +141,7 @@ pub fn App() -> impl IntoElement {
                 .child(compare_dialog(state.clone()))
                 .child(local_picker_dialog(state.clone()))
                 .child(provenance_dialog(state.clone()))
+                .child(registry_auth_dialog(state.clone()))
                 .child(command_palette_overlay(state))
         })
 }

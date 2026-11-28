@@ -34,7 +34,7 @@ pub use gallery::{UiGallery, ui_gallery};
 pub use icons::{IconName, file_kind_icon, ui_file_icon, ui_icon, ui_spinner};
 pub use input::{
     InputEscape, InputSubmit, ui_bare_input_with_ref, ui_field, ui_input, ui_input_with_ref,
-    ui_search_input, ui_search_input_with_escape,
+    ui_password_input, ui_search_input, ui_search_input_with_escape,
 };
 pub use nsh_base::{SelectItem, theme};
 pub use overlay::{

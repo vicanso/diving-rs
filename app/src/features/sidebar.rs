@@ -101,6 +101,7 @@ fn sidebar_workbench_nav(state: AppState) -> impl IntoElement {
     let cmp_state = state.clone();
     let file_state = state.clone();
     let folder_state = state.clone();
+    let reg_state = state.clone();
 
     view()
         .px_2p5()
@@ -151,6 +152,13 @@ fn sidebar_workbench_nav(state: AppState) -> impl IntoElement {
             None,
             false,
             move || folder_state.open_local_folder(),
+        ))
+        .child(ui_sidebar_item(
+            move || SharedString::from(t(lang.get(), "menu.registries")),
+            IconName::FileKey,
+            Some("mod+,"),
+            state.registry_dialog_open,
+            move || reg_state.open_registry_settings(),
         ))
 }
 

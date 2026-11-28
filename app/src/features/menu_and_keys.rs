@@ -79,6 +79,11 @@ pub fn bind_global_keys(state: AppState) {
         d_state.open_compare_dialog();
     });
 
+    let comma_state = state.clone();
+    on_key_with("mod+,", always, move |_| {
+        comma_state.open_registry_settings();
+    });
+
     let r_state = state.clone();
     on_key_with("mod+r", always, move |_| {
         r_state.reanalyze_current_image();
@@ -149,7 +154,8 @@ pub fn bind_global_keys(state: AppState) {
     // another overlay (e.g., File Preview Sheet), `effect` does not re-run and
     // `nsh_base::command`'s newer Escape binding continues to fire first.
     let esc_active = computed(move || {
-        esc_state.provenance_open.get()
+        esc_state.registry_dialog_open.get()
+            || esc_state.provenance_open.get()
             || esc_state.compare_dialog_open.get()
             || esc_state.local_picker_open.get()
             || esc_state.preview_sheet_open.get()
@@ -222,6 +228,7 @@ fn build_app_menu(
     let new_s = state.clone();
     let local_s = state.clone();
     let compare_s = state.clone();
+    let reg_s = state.clone();
     let export_s = state.clone();
     let reanalyze_s = state.clone();
     let clean_s = state.clone();
@@ -248,7 +255,14 @@ fn build_app_menu(
         UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing { .. }
     );
 
-    let mut app_items = vec![MenuItem::role(MenuRole::About), MenuItem::separator()];
+    let mut app_items = vec![
+        MenuItem::role(MenuRole::About),
+        MenuItem::separator(),
+        MenuItem::new(t(lang, "menu.registries"))
+            .shortcut("mod+,")
+            .on_select(move || reg_s.open_registry_settings()),
+        MenuItem::separator(),
+    ];
     match update_phase {
         UpdatePhase::Available { .. }
         | UpdatePhase::Failed {

@@ -13,7 +13,7 @@ use super::oci_image::{plan_cross_layer_duplicates, DuplicateGroup, FileTreeItem
 use super::registry::{
     resolve_layer_concurrency, DockerImageParams, RegistryCaches, RegistryClient,
 };
-use super::registry_auth::{DockerConfig, RegistryCredentials};
+use super::registry_auth::{DockerConfig, RegistryCredentials, RegistryRuleSet};
 use super::scan::{
     build_risk_tags, detect_os_from_history, display_name, extract_base_os_from_layers,
     extract_health_and_ports, extract_image_exec_meta, extract_image_meta, preview_layers,
@@ -48,6 +48,8 @@ pub(crate) struct PipelineContext {
     pub(crate) sensitive_patterns: Arc<SensitivePatterns>,
     pub(crate) layer_concurrency: Option<usize>,
     pub(crate) block_private_hosts: bool,
+    pub(crate) registries: Arc<RegistryRuleSet>,
+    pub(crate) rule_clients: Arc<HashMap<usize, reqwest::Client>>,
 }
 
 pub(crate) struct PipelineOptions {
@@ -78,6 +80,8 @@ fn new_client_with_local_cache(
         docker_config: ctx.docker_config.clone(),
         layer_concurrency: ctx.layer_concurrency,
         block_private_hosts: ctx.block_private_hosts,
+        registries: ctx.registries.clone(),
+        rule_clients: ctx.rule_clients.clone(),
         local_index: Arc::new(TokioOnceCell::new()),
         cache_local_blobs,
     }
@@ -190,8 +194,8 @@ async fn analyze_client(
             },
         );
     }
-    let token = client.get_auth_token(params).await?;
-    params.token = token;
+    let auth = client.get_auth(params).await?;
+    params.auth = auth;
 
     let cache_key: Option<(String, String)> = if params.verify_dup {
         client.head_manifest_digest(params).await
@@ -410,7 +414,7 @@ pub(crate) async fn preview_image(
         credentials,
         ..Default::default()
     };
-    params.token = client.get_auth_token(&params).await?;
+    params.auth = client.get_auth(&params).await?;
     let (manifest, supported_archs) = client.get_manifest(&params).await?;
     let config = client
         .get_image_config(&params, &manifest.config.digest)
@@ -585,6 +589,8 @@ mod tests {
             sensitive_patterns: Arc::new(SensitivePatterns::default()),
             layer_concurrency: Some(2),
             block_private_hosts: false,
+            registries: Arc::new(RegistryRuleSet::default()),
+            rule_clients: Arc::new(HashMap::new()),
         }
     }
 

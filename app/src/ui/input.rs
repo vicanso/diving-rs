@@ -102,6 +102,67 @@ pub fn ui_input_with_ref(
     .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring))
 }
 
+/// Masked secret/password input with inline show/hide visibility toggle.
+pub fn ui_password_input(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String>,
+    accessibility_label: impl Into<SharedString>,
+    size: UiSize,
+    monospace: bool,
+) -> impl IntoElement {
+    let lang_sig = ambient_lang_signal();
+    let revealed = signal(false);
+    let raw_input = build_raw_input(
+        value,
+        placeholder,
+        accessibility_label,
+        size,
+        None,
+        monospace,
+        None,
+    )
+    .masked(move || !revealed.get());
+
+    view()
+        .flex_row()
+        .items_center()
+        .min_h(size.min_height())
+        .pl(size.horizontal_padding())
+        .pr_1()
+        .gap_1()
+        .rounded(move || size.radius())
+        .bg(move || theme().card)
+        .border_1()
+        .border_color(move || theme().input)
+        .transition_colors()
+        .duration(move || dur(INSTANT))
+        .hover(|s| s.border_color(border_strong))
+        .focus_within(|s| s.border_color(move || theme().ring))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .child(raw_input),
+        )
+        .child(view().flex_shrink_0().child(ui_icon_button(
+            IconName::Eye,
+            "Toggle secret visibility",
+            Some(move || {
+                if revealed.get() {
+                    localized_ui_label(lang_sig, "Hide secret", "隐藏内容")
+                } else {
+                    localized_ui_label(lang_sig, "Reveal secret", "显示内容")
+                }
+            }),
+            ButtonVariant::Ghost,
+            UiSize::Xs,
+            false,
+            false,
+            move || revealed.set(!revealed.get_untracked()),
+        )))
+}
+
 /// Borderless text input whose surrounding composite bar owns the outer chrome and focus ring.
 pub fn ui_bare_input_with_ref(
     value: Signal<String>,

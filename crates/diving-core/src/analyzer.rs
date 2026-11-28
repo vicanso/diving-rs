@@ -4,10 +4,10 @@ use crate::i18n::Lang;
 use crate::image::{
     analyze_once, analyze_or_last_known, get_file_content_from_layer, get_file_head_from_layer,
     hash_files_from_layer, is_local_registry, is_private_or_loopback_host, load_docker_config,
-    parse_image_info, preview_image, registry_host, stream_file_from_layer, DockerAnalyzeResult,
-    DockerConfig, ImageInfo, ImagePreview, LocalManifest, PipelineContext, PipelineOptions,
-    RegistryCaches, RegistryCredentials, TarIndex, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
-    REGISTRY_LOCAL_PODMAN,
+    match_host_specificity, parse_image_info, preview_image, registry_host, stream_file_from_layer,
+    DockerAnalyzeResult, DockerConfig, ImageInfo, ImagePreview, LocalManifest, PipelineContext,
+    PipelineOptions, RegistryCaches, RegistryCredentials, RegistryRule, RegistryRuleSet, TarIndex,
+    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
 use crate::recommend::build_recommendations;
@@ -18,11 +18,13 @@ use crate::store::{
 };
 use crate::trace::{clone_value_from_task_local, TRACE_ID};
 use futures::future::{try_join, FutureExt, Shared};
+use reqwest::redirect::Policy as RedirectPolicy;
+use reqwest::{Certificate, Client};
 use rustls::crypto::CryptoProvider;
 use serde_json::from_slice;
 use snafu::ResultExt;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::future::Future;
 use std::io::{BufReader, Read, Result as IoResult, Take};
 use std::num::NonZeroUsize;
@@ -186,6 +188,7 @@ pub struct AnalyzerBuilder {
     use_docker_config: bool,
     docker_config_path: Option<PathBuf>,
     registry_allowlist: Vec<String>,
+    registries: Vec<RegistryRule>,
     block_private_registries: bool,
     singleflight: bool,
     max_concurrent_analyses: Option<usize>,
@@ -206,6 +209,7 @@ impl Default for AnalyzerBuilder {
             use_docker_config: false,
             docker_config_path: None,
             registry_allowlist: vec![],
+            registries: vec![],
             block_private_registries: false,
             singleflight: true,
             max_concurrent_analyses: None,
@@ -311,6 +315,15 @@ impl AnalyzerBuilder {
         self
     }
 
+    /// Configure per-domain private registry auth, header, HTTP, and TLS rules.
+    pub fn registries<I>(mut self, rules: I) -> Self
+    where
+        I: IntoIterator<Item = RegistryRule>,
+    {
+        self.registries = rules.into_iter().collect();
+        self
+    }
+
     /// Reject private, loopback, link-local, and `.local`/`.internal` registry
     /// and token-realm hosts when no explicit `registry_allowlist` is configured.
     pub fn block_private_registries(mut self, block: bool) -> Self {
@@ -324,6 +337,20 @@ impl AnalyzerBuilder {
             Some(c) => c,
             None => build_default_http_client()?,
         };
+        let registry_http_client = build_registry_http_client(None)?;
+        let registries = Arc::new(RegistryRuleSet::new(self.registries));
+        let mut rule_clients = HashMap::new();
+        for (idx, rule) in registries.rules().iter().enumerate() {
+            let ca_path = rule
+                .ca_cert
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if rule.insecure_skip_tls_verify || ca_path.is_some() {
+                rule_clients.insert(idx, build_registry_http_client(Some(rule))?);
+            }
+        }
+        let rule_clients = Arc::new(rule_clients);
         let recent_analyses = (!self.memory_cache_ttl.is_zero()).then(|| {
             let cap = NonZeroUsize::new(self.memory_cache_capacity.max(1)).unwrap();
             StdMutex::new(RecentCache::new(cap, self.memory_cache_ttl))
@@ -346,6 +373,9 @@ impl AnalyzerBuilder {
             inner: Arc::new(AnalyzerInner {
                 store,
                 http_client,
+                registry_http_client,
+                registries,
+                rule_clients,
                 registry_caches: Arc::new(RegistryCaches::default()),
                 sensitive_patterns: Arc::new(self.sensitive_patterns),
                 layer_concurrency: self.layer_concurrency,
@@ -370,6 +400,9 @@ impl AnalyzerBuilder {
 struct AnalyzerInner {
     store: Arc<CacheStore>,
     http_client: reqwest::Client,
+    registry_http_client: reqwest::Client,
+    registries: Arc<RegistryRuleSet>,
+    rule_clients: Arc<HashMap<usize, reqwest::Client>>,
     registry_caches: Arc<RegistryCaches>,
     sensitive_patterns: Arc<SensitivePatterns>,
     layer_concurrency: Option<usize>,
@@ -400,7 +433,7 @@ impl AnalyzerInner {
 
     fn pipeline_context(&self) -> PipelineContext {
         PipelineContext {
-            http_client: self.http_client.clone(),
+            http_client: self.registry_http_client.clone(),
             store: self.store.clone(),
             registry_caches: self.registry_caches.clone(),
             docker_config: self.docker_config(),
@@ -408,6 +441,8 @@ impl AnalyzerInner {
             layer_concurrency: self.layer_concurrency,
             block_private_hosts: self.block_private_registries
                 && self.registry_allowlist.is_empty(),
+            registries: self.registries.clone(),
+            rule_clients: self.rule_clients.clone(),
         }
     }
 
@@ -438,8 +473,33 @@ impl Analyzer {
         &self.inner.http_client
     }
 
+    /// Parse `image` and apply any configured `insecure_http` scheme override.
+    pub fn resolve_image_info(&self, image: &str) -> ImageInfo {
+        let mut info = parse_image_info(image);
+        let trimmed = image.trim();
+        let has_explicit_scheme = trimmed
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+            || trimmed
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+        if !is_local_registry(&info.registry) && !has_explicit_scheme {
+            if let Some(host) = registry_host(&info.registry) {
+                if self
+                    .inner
+                    .registries
+                    .match_host(&host)
+                    .is_some_and(|(_, rule)| rule.insecure_http)
+                {
+                    info.registry = format!("http://{host}/v2");
+                }
+            }
+        }
+        info
+    }
+
     /// Validate whether `info` is permitted by this `Analyzer`'s local-source
-    /// flags and `registry_allowlist`.
+    /// flags, `registry_allowlist`, and configured `registries`.
     pub fn check_allowed(&self, info: &ImageInfo) -> Result<()> {
         if is_local_registry(&info.registry) {
             let local_enabled = match info.registry.as_str() {
@@ -456,8 +516,16 @@ impl Analyzer {
         }
         if self.inner.registry_allowlist.is_empty() {
             if self.inner.block_private_registries && !is_local_registry(&info.registry) {
+                let scheme = info
+                    .registry
+                    .split_once("://")
+                    .map(|(s, _)| s)
+                    .unwrap_or("https");
                 let host = registry_host(&info.registry).unwrap_or_default();
-                if is_private_or_loopback_host(&host) {
+                if self.inner.registries.allows_private_target(scheme, &host) {
+                    return Ok(());
+                }
+                if !scheme.eq_ignore_ascii_case("https") || is_private_or_loopback_host(&host) {
                     return Err(Error::DisallowedRegistry { registry: host });
                 }
             }
@@ -469,7 +537,11 @@ impl Analyzer {
             registry_host(&info.registry).unwrap_or_default()
         }
         .to_ascii_lowercase();
-        if self.inner.registry_allowlist.iter().any(|a| a == &id) {
+        if self.inner.registry_allowlist.iter().any(|allowed| {
+            allowed == &id
+                || (!is_local_registry(&info.registry)
+                    && match_host_specificity(allowed, &id).is_some())
+        }) {
             return Ok(());
         }
         Err(Error::DisallowedRegistry { registry: id })
@@ -481,7 +553,7 @@ impl Analyzer {
         image: &str,
         opts: AnalyzeOptions,
     ) -> Result<Arc<DockerAnalyzeResult>> {
-        let info = parse_image_info(image);
+        let info = self.resolve_image_info(image);
         self.analyze_info(info, opts).await
     }
 
@@ -494,11 +566,22 @@ impl Analyzer {
         self.check_allowed(&info)?;
 
         let is_local = is_local_registry(&info.registry);
-        let auth_scope = match &opts.credentials {
-            Some(c) if !c.is_empty() => {
-                sha256_hex(format!("{}:{}", c.username, c.password).as_bytes())
+        let rule_scope = (!is_local)
+            .then(|| {
+                registry_host(&info.registry)
+                    .and_then(|host| self.inner.registries.auth_fingerprint(&host))
+            })
+            .flatten();
+        let auth_scope = match (
+            opts.credentials.as_ref().filter(|c| !c.is_empty()),
+            rule_scope,
+        ) {
+            (Some(c), Some(fp)) => {
+                sha256_hex(format!("{}:{}|{fp}", c.username, c.password).as_bytes())
             }
-            _ => "anon".to_string(),
+            (Some(c), None) => sha256_hex(format!("{}:{}", c.username, c.password).as_bytes()),
+            (None, Some(fp)) => format!("rule:{fp}"),
+            (None, None) => "anon".to_string(),
         };
         let key = format!(
             "{}|{}|{}|{}|{}|{}|{}",
@@ -617,7 +700,7 @@ impl Analyzer {
 
     /// Lightweight preview of a registry image from manifest + config alone.
     pub async fn preview(&self, image: &str, opts: PreviewOptions) -> Result<ImagePreview> {
-        let info = parse_image_info(image);
+        let info = self.resolve_image_info(image);
         self.preview_info(info, opts).await
     }
 
@@ -647,8 +730,8 @@ impl Analyzer {
         analyze_opts: AnalyzeOptions,
         diff_opts: DiffOptions,
     ) -> Result<ImageDiff> {
-        let base_info = parse_image_info(base);
-        let target_info = parse_image_info(target);
+        let base_info = self.resolve_image_info(base);
+        let target_info = self.resolve_image_info(target);
         self.check_allowed(&base_info)?;
         self.check_allowed(&target_info)?;
 
@@ -853,7 +936,7 @@ impl Analyzer {
 
     /// Invalidate cached manifest and in-memory analysis entries for an image reference.
     pub fn invalidate(&self, image: &str) {
-        let info = parse_image_info(image);
+        let info = self.resolve_image_info(image);
         self.invalidate_info(&info);
     }
 
@@ -921,15 +1004,53 @@ fn ensure_rustls_provider() {
     }
 }
 
-fn build_default_http_client() -> Result<reqwest::Client> {
+fn build_default_http_client() -> Result<Client> {
     ensure_rustls_provider();
-    reqwest::Client::builder()
+    Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32)
         .build()
         .map_err(|e| Error::Other {
             message: format!("failed to build HTTP client: {e}"),
         })
+}
+
+fn build_registry_http_client(rule: Option<&RegistryRule>) -> Result<Client> {
+    ensure_rustls_provider();
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(32)
+        .redirect(RedirectPolicy::none());
+    if let Some(rule) = rule {
+        if rule.insecure_skip_tls_verify {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        if let Some(ca_path) = rule
+            .ca_cert
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let pem_bytes = fs::read(ca_path).map_err(|e| Error::InvalidConfig {
+                message: format!("failed to read ca_cert {ca_path}: {e}"),
+            })?;
+            let certs =
+                Certificate::from_pem_bundle(&pem_bytes).map_err(|e| Error::InvalidConfig {
+                    message: format!("invalid PEM in ca_cert {ca_path}: {e}"),
+                })?;
+            if certs.is_empty() {
+                return Err(Error::InvalidConfig {
+                    message: format!("no certificates found in ca_cert {ca_path}"),
+                });
+            }
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+    }
+    builder.build().map_err(|e| Error::Other {
+        message: format!("failed to build registry HTTP client: {e}"),
+    })
 }
 
 #[cfg(test)]

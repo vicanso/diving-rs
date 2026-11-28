@@ -12,8 +12,10 @@ use diving_core::{DockerAnalyzeResult, DockerAnalyzeSummary};
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppState, InspectorTab, format_bytes, format_runtime_compat, image_source_kind,
+    AppState, InspectorTab, RegistryRetryTarget, format_bytes, format_runtime_compat,
+    image_source_kind,
 };
+use crate::features::{active_failed_analyze_image, registry_auth_fix_button};
 use crate::i18n::{UiLang, format_user_error, localize_risk_tag, t, tf};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, UiSize, danger, font_mono_family, success,
@@ -33,8 +35,13 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
         .child(when(
             move || error_state.analyze_error.get().is_some(),
             move || {
+                let auth_s = error_state.clone();
+                let retry_s = error_state.clone();
                 let dismiss = error_state.clone();
                 let err_sig = error_state.analyze_error;
+                let failed_sig = error_state.failed_analyze_image;
+                let current_sig = error_state.current_image;
+                let input_sig = error_state.image_input;
                 view().px_4().pt_2().child(ui_banner(
                     BannerTone::Danger,
                     move || {
@@ -42,16 +49,41 @@ pub fn inspector_workspace(state: AppState) -> impl IntoElement {
                         SharedString::from(format_user_error(lang.get(), &raw))
                     },
                     Some(
-                        ui_button(
-                            move || SharedString::from(t(lang.get(), "common.close")),
-                            ButtonVariant::Ghost,
-                            UiSize::Xs,
-                            Some(IconName::Close),
-                            false,
-                            false,
-                            move || dismiss.dismiss_analyze_error(),
-                        )
-                        .into_element(),
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(registry_auth_fix_button(
+                                auth_s,
+                                RegistryRetryTarget::Analyze,
+                                move || {
+                                    active_failed_analyze_image(
+                                        failed_sig.get(),
+                                        current_sig.get(),
+                                        input_sig.get(),
+                                    )
+                                },
+                                move || err_sig.get().unwrap_or_default(),
+                            ))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "landing.retry")),
+                                ButtonVariant::Outline,
+                                UiSize::Xs,
+                                Some(IconName::Refresh),
+                                false,
+                                false,
+                                move || retry_s.reanalyze_current_image(),
+                            ))
+                            .child(ui_button(
+                                move || SharedString::from(t(lang.get(), "common.close")),
+                                ButtonVariant::Ghost,
+                                UiSize::Xs,
+                                Some(IconName::Close),
+                                false,
+                                false,
+                                move || dismiss.dismiss_analyze_error(),
+                            ))
+                            .into_element(),
                     ),
                 ))
             },

@@ -9,9 +9,10 @@ use crate::ui::{
     SelectItem, TabOption, UiSize, font_mono_family, register_fonts, theme, ui_badge, ui_banner,
     ui_button, ui_checkbox, ui_code_viewer, ui_context_menu, ui_dialog, ui_diff_viewer,
     ui_empty_state, ui_field, ui_file_icon, ui_icon, ui_icon_button, ui_input, ui_link, ui_menu,
-    ui_menu_item, ui_menu_separator, ui_menu_trigger_icon, ui_opcode_pill, ui_panel, ui_popover,
-    ui_progress_bar, ui_resizable_split, ui_search_input, ui_segmented, ui_select, ui_separator,
-    ui_sheet, ui_size_bar, ui_skeleton, ui_status_badge, ui_switch, ui_tabs,
+    ui_menu_item, ui_menu_separator, ui_menu_trigger_icon, ui_opcode_pill, ui_panel,
+    ui_password_input, ui_popover, ui_progress_bar, ui_resizable_split, ui_search_input,
+    ui_segmented, ui_select, ui_separator, ui_sheet, ui_size_bar, ui_skeleton, ui_status_badge,
+    ui_switch, ui_tabs,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,7 @@ pub fn UiGallery() -> impl IntoElement {
     let image_ref = signal(String::from("redis:7-alpine"));
     let search_query = signal(String::new());
     let mirror_error_input = signal(String::from("http://insecure.local"));
+    let registry_secret = signal(String::from("s3cret-token"));
     let verify_dup = signal(true);
     let follow_symlinks = signal(false);
     let selected_arch = signal(Some(SharedString::from("amd64")));
@@ -117,6 +119,7 @@ pub fn UiGallery() -> impl IntoElement {
                                 image_ref,
                                 search_query,
                                 mirror_error_input,
+                                registry_secret,
                                 verify_dup,
                                 follow_symlinks,
                                 selected_arch,
@@ -527,6 +530,7 @@ fn inputs_section(
     image_ref: Signal<String>,
     search_query: Signal<String>,
     mirror_error_input: Signal<String>,
+    registry_secret: Signal<String>,
     verify_dup: Signal<bool>,
     follow_symlinks: Signal<bool>,
     selected_arch: Signal<Option<SharedString>>,
@@ -589,6 +593,18 @@ fn inputs_section(
                             UiSize::Md,
                             true,
                             None,
+                        ),
+                    )))
+                    .child(view().flex_1().min_w(px(220.0)).child(ui_field(
+                        "Registry Token",
+                        Some("Masked secret with reveal toggle".into()),
+                        || None::<SharedString>,
+                        ui_password_input(
+                            registry_secret,
+                            "Token or password",
+                            "Registry secret input",
+                            UiSize::Md,
+                            true,
                         ),
                     ))),
             )

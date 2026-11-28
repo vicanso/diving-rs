@@ -11,9 +11,10 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::domain::{
-    AppRoute, AppState, DiffErrorState, DiffFileTab, SharedRef, classify_layer_opcode, format_bytes,
+    AppRoute, AppState, DiffErrorState, DiffFileTab, RegistryRetryTarget, SharedRef,
+    classify_layer_opcode, format_bytes,
 };
-use crate::features::arch_select_items;
+use crate::features::{arch_select_items, registry_auth_fix_button};
 use crate::i18n::{
     UiLang, format_shared_base_layers, format_user_error, localize_category, localize_severity,
     strip_inline_markdown, t, tf,
@@ -394,9 +395,22 @@ fn diff_error_view(state: AppState, err: DiffErrorState) -> impl IntoElement {
                 ),
             ))
             .when_some(err.base, |col, msg| {
+                let auth_btn = registry_auth_fix_button(
+                    state.clone(),
+                    RegistryRetryTarget::Diff,
+                    {
+                        let base_ref = state.diff_base_ref;
+                        move || base_ref.get()
+                    },
+                    {
+                        let msg = msg.clone();
+                        move || msg.clone()
+                    },
+                )
+                .into_element();
                 col.child(ui_panel_titled(
                     move || SharedString::from(t(lang.get(), "diff.base_label")),
-                    None,
+                    Some(auth_btn),
                     text(move || format_user_error(lang.get(), &msg))
                         .text_xs()
                         .font_family(font_mono_family())
@@ -404,9 +418,22 @@ fn diff_error_view(state: AppState, err: DiffErrorState) -> impl IntoElement {
                 ))
             })
             .when_some(err.target, |col, msg| {
+                let auth_btn = registry_auth_fix_button(
+                    state.clone(),
+                    RegistryRetryTarget::Diff,
+                    {
+                        let target_ref = state.diff_target_ref;
+                        move || target_ref.get()
+                    },
+                    {
+                        let msg = msg.clone();
+                        move || msg.clone()
+                    },
+                )
+                .into_element();
                 col.child(ui_panel_titled(
                     move || SharedString::from(t(lang.get(), "diff.target_label")),
-                    None,
+                    Some(auth_btn),
                     text(move || format_user_error(lang.get(), &msg))
                         .text_xs()
                         .font_family(font_mono_family())

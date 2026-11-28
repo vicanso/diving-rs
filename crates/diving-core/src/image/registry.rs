@@ -2,7 +2,10 @@ use super::image_ref::{platform_name, repository_path, ImageInfo, REGISTRY_LOCAL
 use super::layer::{get_files_from_layer, ImageLayerInfo, TarIndex};
 use super::local::{read_oci_layout, LocalManifest, MANIFEST_ACCEPTS};
 use super::oci_image::{ImageConfig, ImageIndex, ImageManifest, ImageManifestLayer};
-use super::registry_auth::{resolve_for_registry, DockerConfig, RegistryCredentials};
+use super::registry_auth::{
+    registry_host, resolve_for_registry, DockerConfig, RegistryCredentials, RegistryRule,
+    RegistryRuleSet,
+};
 use super::scan::compression_label;
 use crate::error::{Error, IoSnafu, JsonSnafu, RequestSnafu, ResponseJsonSnafu, Result};
 use crate::progress::{emit_progress, ProgressCallback, ProgressEvent};
@@ -14,8 +17,9 @@ use crate::tl_info;
 use crate::trace::{clone_value_from_task_local, TRACE_ID};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use lru::LruCache;
+use reqwest::Url;
 use ring::digest::{Context, SHA256};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -282,11 +286,22 @@ pub(crate) fn bytes_match_digest(data: &[u8], digest: &str) -> bool {
     }
 }
 
-fn auth_scope_key(creds: Option<&RegistryCredentials>) -> String {
-    match creds {
-        Some(c) if !c.is_empty() => sha256_hex(format!("{}:{}", c.username, c.password).as_bytes()),
-        _ => "anon".to_string(),
+fn auth_scope_key(creds: Option<&RegistryCredentials>, rule_fp: Option<&str>) -> String {
+    match (creds.filter(|c| !c.is_empty()), rule_fp) {
+        (Some(c), Some(fp)) => sha256_hex(format!("{}:{}|{fp}", c.username, c.password).as_bytes()),
+        (Some(c), None) => sha256_hex(format!("{}:{}", c.username, c.password).as_bytes()),
+        (None, Some(fp)) => format!("rule:{fp}"),
+        (None, None) => "anon".to_string(),
     }
+}
+
+/// Resolved credential mode attached to outbound registry API requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum ResolvedAuth {
+    #[default]
+    None,
+    Bearer(String),
+    Basic(String),
 }
 
 async fn verify_blob_digest(path: &Path, expected_digest: &str) -> Result<()> {
@@ -321,7 +336,7 @@ pub(crate) struct DockerImageParams {
     pub user: String,
     pub img: String,
     pub tag: String,
-    pub token: String,
+    pub auth: ResolvedAuth,
     pub arch: String,
     pub verify_dup: bool,
     pub credentials: Option<RegistryCredentials>,
@@ -343,6 +358,8 @@ pub(crate) struct RegistryClient {
     pub(crate) docker_config: Option<Arc<DockerConfig>>,
     pub(crate) layer_concurrency: Option<usize>,
     pub(crate) block_private_hosts: bool,
+    pub(crate) registries: Arc<RegistryRuleSet>,
+    pub(crate) rule_clients: Arc<HashMap<usize, reqwest::Client>>,
     pub(crate) local_index: Arc<TokioOnceCell<Arc<TarIndex>>>,
     pub(crate) cache_local_blobs: bool,
 }
@@ -462,27 +479,187 @@ impl RegistryClient {
         })
     }
 
+    fn matched_rule(&self) -> Option<(usize, &RegistryRule)> {
+        let host = registry_host(&self.registry)?;
+        self.registries.match_host(&host)
+    }
+
+    fn client_for_host(&self, host: &str, fallback_rule_idx: Option<usize>) -> &reqwest::Client {
+        if let Some(idx) = self.registries.match_index(host) {
+            if let Some(client) = self.rule_clients.get(&idx) {
+                return client;
+            }
+        }
+        if let Some(idx) = fallback_rule_idx {
+            if let Some(client) = self.rule_clients.get(&idx) {
+                return client;
+            }
+        }
+        &self.http_client
+    }
+
+    fn apply_rule_headers_only(
+        rule: Option<&RegistryRule>,
+        headers: &mut HashMap<String, String>,
+    ) -> Vec<String> {
+        let mut origin_only_keys = Vec::new();
+        if let Some(rule) = rule {
+            for (key, value) in &rule.headers {
+                let name = key.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                headers.insert(name.to_owned(), value.clone());
+                origin_only_keys.push(name.to_ascii_lowercase());
+            }
+        }
+        origin_only_keys
+    }
+
+    fn apply_registry_headers(
+        &self,
+        headers: &mut HashMap<String, String>,
+        auth: &ResolvedAuth,
+    ) -> Vec<String> {
+        let rule = self.matched_rule().map(|(_, r)| r);
+        let mut origin_only_keys = Self::apply_rule_headers_only(rule, headers);
+        let has_custom_auth = headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+        if !has_custom_auth {
+            match auth {
+                ResolvedAuth::Bearer(token) if !token.is_empty() => {
+                    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+                    origin_only_keys.push("authorization".to_string());
+                }
+                ResolvedAuth::Basic(token) if !token.is_empty() => {
+                    headers.insert("Authorization".to_string(), format!("Basic {token}"));
+                    origin_only_keys.push("authorization".to_string());
+                }
+                ResolvedAuth::Bearer(_) | ResolvedAuth::Basic(_) | ResolvedAuth::None => {}
+            }
+        }
+        origin_only_keys
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_redirects(
+        &self,
+        method: Method,
+        initial_url: String,
+        mut headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        timeout: Duration,
+        fallback_rule_idx: Option<usize>,
+        allow_same_registry_host: bool,
+    ) -> Result<reqwest::Response> {
+        const MAX_REDIRECTS: usize = 10;
+
+        let init_parsed = Url::parse(&initial_url).map_err(|e| Error::Other {
+            message: format!("invalid registry URL {initial_url}: {e}"),
+        })?;
+        let init_origin = init_parsed.origin();
+        let registry_origin_host = registry_host(&self.registry);
+
+        let mut current_method = method;
+        let mut current_url = initial_url.clone();
+
+        for _hop in 0..=MAX_REDIRECTS {
+            let Some((scheme, host_port)) = extract_url_host(&current_url) else {
+                return Err(Error::DisallowedRegistry {
+                    registry: current_url,
+                });
+            };
+            if self.block_private_hosts {
+                let same_registry_host = allow_same_registry_host
+                    && registry_origin_host
+                        .as_deref()
+                        .is_some_and(|reg_host| reg_host.eq_ignore_ascii_case(host_port));
+                let allowed = (scheme.eq_ignore_ascii_case("https")
+                    && !is_private_or_loopback_host(host_port))
+                    || self.registries.allows_private_target(scheme, host_port)
+                    || same_registry_host;
+                if !allowed {
+                    return Err(Error::DisallowedRegistry {
+                        registry: host_port.to_string(),
+                    });
+                }
+            }
+
+            let current_parsed = Url::parse(&current_url).map_err(|e| Error::Other {
+                message: format!("invalid request URL {current_url}: {e}"),
+            })?;
+            let same_origin = current_parsed.origin() == init_origin;
+            let hop_fallback = if same_origin { fallback_rule_idx } else { None };
+            let client = self.client_for_host(host_port, hop_fallback);
+
+            let mut builder = client
+                .request(current_method.clone(), current_url.clone())
+                .timeout(timeout);
+            for (key, value) in &headers {
+                builder = builder.header(key.as_str(), value.as_str());
+            }
+            let resp = builder.send().await.context(RequestSnafu {
+                url: current_url.clone(),
+            })?;
+
+            if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                let Some(loc_raw) = resp.headers().get("location").and_then(|v| v.to_str().ok())
+                else {
+                    return Ok(resp);
+                };
+                let next_url = current_parsed
+                    .join(loc_raw.trim())
+                    .map_err(|e| Error::Other {
+                        message: format!(
+                            "invalid redirect target {loc_raw} from {current_url}: {e}"
+                        ),
+                    })?;
+                if resp.status().as_u16() == 303 && current_method != Method::HEAD {
+                    current_method = Method::GET;
+                }
+                if next_url.origin() != init_origin {
+                    headers.retain(|k, _| {
+                        !k.eq_ignore_ascii_case("authorization")
+                            && !origin_only_keys.iter().any(|ok| k.eq_ignore_ascii_case(ok))
+                    });
+                }
+                current_url = next_url.to_string();
+                continue;
+            }
+
+            return Ok(resp);
+        }
+
+        Err(Error::Other {
+            message: format!("too many redirects from {initial_url}"),
+        })
+    }
+
     async fn send_request(
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
+        allow_same_registry_host: bool,
     ) -> Result<reqwest::Response> {
         const MAX_ATTEMPTS: u32 = 2;
         const MAX_BACKOFF_SECS: u64 = 60;
         const DEFAULT_BACKOFF_SECS: u64 = 5;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            let mut builder = self
-                .http_client
-                .get(url.clone())
-                .timeout(Duration::from_secs(30 * 60));
-            for (key, value) in &headers {
-                builder = builder.header(key.as_str(), value.as_str());
-            }
-            let resp = builder
-                .send()
-                .await
-                .context(RequestSnafu { url: url.clone() })?;
+            let resp = self
+                .execute_with_redirects(
+                    Method::GET,
+                    url.clone(),
+                    headers.clone(),
+                    origin_only_keys,
+                    Duration::from_secs(30 * 60),
+                    fallback_rule_idx,
+                    allow_same_registry_host,
+                )
+                .await?;
             let status = resp.status();
             if status.as_u16() == 429 && attempt < MAX_ATTEMPTS {
                 let wait_secs = resp
@@ -536,8 +713,19 @@ impl RegistryClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
+        allow_same_registry_host: bool,
     ) -> Result<bytes::Bytes> {
-        let mut resp = self.send_request(url.clone(), headers).await?;
+        let mut resp = self
+            .send_request(
+                url.clone(),
+                headers,
+                origin_only_keys,
+                fallback_rule_idx,
+                allow_same_registry_host,
+            )
+            .await?;
         if let Some(len) = resp.content_length() {
             if len > MAX_JSON_RESPONSE_BYTES as u64 {
                 return Err(Error::Other {
@@ -569,8 +757,19 @@ impl RegistryClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
+        allow_same_registry_host: bool,
     ) -> Result<T> {
-        let data = self.get_bytes(url.clone(), headers).await?;
+        let data = self
+            .get_bytes(
+                url.clone(),
+                headers,
+                origin_only_keys,
+                fallback_rule_idx,
+                allow_same_registry_host,
+            )
+            .await?;
         serde_json::from_slice(&data).context(JsonSnafu { context: "request" })
     }
 
@@ -578,12 +777,15 @@ impl RegistryClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
         path: &Path,
         expected_digest: &str,
     ) -> Result<()> {
         let tmp = tmp_sibling_path(path);
         let result = async {
-            self.stream_blob_with_retry(url, headers, &tmp).await?;
+            self.stream_blob_with_retry(url, headers, origin_only_keys, fallback_rule_idx, &tmp)
+                .await?;
             verify_blob_digest(&tmp, expected_digest).await?;
             tokio::fs::rename(&tmp, path).await.context(IoSnafu {})
         }
@@ -598,6 +800,8 @@ impl RegistryClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
         path: &Path,
     ) -> Result<()> {
         const MAX_ATTEMPTS: usize = 4;
@@ -608,7 +812,14 @@ impl RegistryClient {
                 req_headers.insert("Range".to_string(), format!("bytes={downloaded}-"));
             }
             match self
-                .stream_blob_once(url.clone(), req_headers, path, &mut downloaded)
+                .stream_blob_once(
+                    url.clone(),
+                    req_headers,
+                    origin_only_keys,
+                    fallback_rule_idx,
+                    path,
+                    &mut downloaded,
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -632,11 +843,21 @@ impl RegistryClient {
         &self,
         url: String,
         headers: HashMap<String, String>,
+        origin_only_keys: &[String],
+        fallback_rule_idx: Option<usize>,
         path: &Path,
         downloaded: &mut u64,
     ) -> Result<()> {
         let resuming = *downloaded > 0;
-        let resp = self.send_request(url.clone(), headers).await?;
+        let resp = self
+            .send_request(
+                url.clone(),
+                headers,
+                origin_only_keys,
+                fallback_rule_idx,
+                true,
+            )
+            .await?;
         let resumed = resuming && resp.status().as_u16() == StatusCode::PARTIAL_CONTENT.as_u16();
         let mut file = if resumed {
             let mut f = tokio::fs::OpenOptions::new()
@@ -668,7 +889,6 @@ impl RegistryClient {
     ) -> Result<(ImageManifest, Vec<String>)> {
         let img = &params.img;
         let tag = &params.tag;
-        let token = &params.token;
         if self.is_local() {
             let local_image = self.get_local_manifest(img, &params.arch).await?;
             let mut image_manifest: ImageManifest = local_image.into();
@@ -681,21 +901,24 @@ impl RegistryClient {
 
         let repo = params.repo();
         let url = format!("{}/{repo}/manifests/{tag}", self.registry);
+        let rule_idx = self.matched_rule().map(|(idx, _)| idx);
+        let rule_fp =
+            registry_host(&self.registry).and_then(|host| self.registries.auth_fingerprint(&host));
         let key = format!(
             "{url}:{}:{}",
             params.arch,
-            auth_scope_key(params.credentials.as_ref())
+            auth_scope_key(params.credentials.as_ref(), rule_fp.as_deref())
         );
         if let Some(cached) = self.caches.get_manifest(&key) {
             return Ok(cached);
         }
         tl_info!(url = url, "getting manifest");
         let mut headers = HashMap::new();
-        if !token.is_empty() {
-            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-        }
         headers.insert("Accept".to_string(), MANIFEST_ACCEPTS.join(", "));
-        let data = self.get_bytes(url.clone(), headers).await?;
+        let origin_only = self.apply_registry_headers(&mut headers, &params.auth);
+        let data = self
+            .get_bytes(url.clone(), headers, &origin_only, rule_idx, true)
+            .await?;
         let is_index = serde_json::from_slice::<Value>(&data)
             .context(JsonSnafu {
                 context: "get_manifest",
@@ -725,12 +948,12 @@ impl RegistryClient {
                 })?;
             tl_info!(arch = chosen.platform.architecture, "guess manifest");
             let mut headers = HashMap::new();
-            if !token.is_empty() {
-                headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-            }
             headers.insert("Accept".to_string(), chosen.media_type);
+            let origin_only = self.apply_registry_headers(&mut headers, &params.auth);
             let url = format!("{}/{repo}/manifests/{}", self.registry, chosen.digest);
-            let data = self.get_bytes(url.clone(), headers).await?;
+            let data = self
+                .get_bytes(url.clone(), headers, &origin_only, rule_idx, true)
+                .await?;
             let manifest = serde_json::from_slice(&data).context(JsonSnafu {
                 context: "get_manifest",
             })?;
@@ -777,14 +1000,14 @@ impl RegistryClient {
             }
             tl_info!(digest, "cached blob digest mismatch, refetching");
         }
-        let token = &params.token;
+        let rule_idx = self.matched_rule().map(|(idx, _)| idx);
         let url = format!("{}/{}/blobs/{digest}", self.registry, params.repo());
         tl_info!(url = url, "getting blob");
         let mut headers = HashMap::new();
-        if !token.is_empty() {
-            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-        }
-        let resp = self.get_bytes(url.clone(), headers).await?;
+        let origin_only = self.apply_registry_headers(&mut headers, &params.auth);
+        let resp = self
+            .get_bytes(url.clone(), headers, &origin_only, rule_idx, true)
+            .await?;
         if !bytes_match_digest(&resp, digest) {
             return Err(Error::Other {
                 message: format!("blob digest mismatch for {digest}"),
@@ -834,7 +1057,7 @@ impl RegistryClient {
             .unwrap_or(false);
 
         if !is_cached {
-            let token = &params.token;
+            let rule_idx = self.matched_rule().map(|(idx, _)| idx);
             let url = format!("{}/{}/blobs/{}", self.registry, params.repo(), layer.digest);
             tl_info!(url = url, "getting blob");
             emit_progress(
@@ -846,24 +1069,34 @@ impl RegistryClient {
                 },
             );
             let mut headers = HashMap::new();
-            if !token.is_empty() {
-                headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-            }
+            let origin_only = self.apply_registry_headers(&mut headers, &params.auth);
             if let Err(err) = self
-                .download_blob_to_path(url.clone(), headers, &path, &layer.digest)
+                .download_blob_to_path(
+                    url.clone(),
+                    headers,
+                    &origin_only,
+                    rule_idx,
+                    &path,
+                    &layer.digest,
+                )
                 .await
             {
                 if !err.is_unauthorized() {
                     return Err(err);
                 }
                 tl_info!(digest = layer.digest, "blob unauthorized, refreshing token");
-                let token = self.refresh_auth_token(params).await?;
+                let refreshed = self.refresh_auth(params).await?;
                 let mut headers = HashMap::new();
-                if !token.is_empty() {
-                    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-                }
-                self.download_blob_to_path(url.clone(), headers, &path, &layer.digest)
-                    .await?;
+                let origin_only = self.apply_registry_headers(&mut headers, &refreshed);
+                self.download_blob_to_path(
+                    url.clone(),
+                    headers,
+                    &origin_only,
+                    rule_idx,
+                    &path,
+                    &layer.digest,
+                )
+                .await?;
             }
             tl_info!(url = url, "got blob");
         } else {
@@ -955,90 +1188,195 @@ impl RegistryClient {
         Ok(info_list)
     }
 
-    pub(crate) async fn get_auth_token(&self, params: &DockerImageParams) -> Result<String> {
-        self.fetch_auth_token(params, false).await
+    pub(crate) async fn get_auth(&self, params: &DockerImageParams) -> Result<ResolvedAuth> {
+        self.fetch_auth(params, false).await
     }
 
-    async fn refresh_auth_token(&self, params: &DockerImageParams) -> Result<String> {
-        self.fetch_auth_token(params, true).await
+    async fn refresh_auth(&self, params: &DockerImageParams) -> Result<ResolvedAuth> {
+        self.fetch_auth(params, true).await
     }
 
-    async fn fetch_auth_token(
+    fn resolve_rule_credentials(&self, params: &DockerImageParams) -> Option<RegistryCredentials> {
+        if let Some(c) = params.credentials.as_ref().filter(|c| !c.is_empty()) {
+            return Some(c.clone());
+        }
+        if let Some((_, rule)) = self.matched_rule() {
+            if let Some(username) = rule
+                .username
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+            {
+                return Some(RegistryCredentials {
+                    username: username.to_string(),
+                    password: rule.password.clone().unwrap_or_default(),
+                });
+            }
+        }
+        resolve_for_registry(&self.registry, None, self.docker_config.as_deref())
+    }
+
+    async fn fetch_auth(
         &self,
         params: &DockerImageParams,
         skip_cache: bool,
-    ) -> Result<String> {
+    ) -> Result<ResolvedAuth> {
         if self.is_local() {
-            return Ok(String::new());
+            return Ok(ResolvedAuth::None);
         }
-        let tag = &params.tag;
-        let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
-        let resp = self
-            .http_client
-            .head(url.clone())
-            .timeout(Duration::from_secs(5 * 60))
-            .send()
-            .await
-            .context(RequestSnafu { url: url.clone() })?;
-        if resp.status().as_u16() == StatusCode::UNAUTHORIZED.as_u16() {
-            if let Some(value) = resp.headers().get("www-authenticate") {
-                let auth_info = parse_auth_info(value.to_str().unwrap_or_default());
-                if self.block_private_hosts {
-                    match extract_url_host(&auth_info.auth) {
-                        Some((scheme, host))
-                            if scheme.eq_ignore_ascii_case("https")
-                                && !is_private_or_loopback_host(host) => {}
-                        Some((_, host)) => {
-                            return Err(Error::DisallowedRegistry {
-                                registry: host.to_string(),
-                            });
-                        }
-                        None => {
-                            return Err(Error::DisallowedRegistry {
-                                registry: auth_info.auth.clone(),
-                            });
-                        }
-                    }
-                }
-                let url = format!(
-                    "{}?service={}&scope={}",
-                    auth_info.auth, auth_info.service, auth_info.scope
-                );
-                let creds = resolve_for_registry(
-                    &self.registry,
-                    params.credentials.as_ref(),
-                    self.docker_config.as_deref(),
-                );
-                let cache_key = format!("{url}#auth={}", auth_scope_key(creds.as_ref()));
-                if !skip_cache {
-                    if let Some(info) = self.caches.get_token(&cache_key) {
-                        return Ok(info.bearer());
-                    }
-                }
-                tl_info!(url = url, authenticated = creds.is_some(), "getting token");
-                let mut headers = HashMap::new();
-                if let Some(c) = creds.as_ref() {
-                    headers.insert(
-                        "Authorization".to_string(),
-                        format!("Basic {}", c.basic_token()),
-                    );
-                }
-                let mut resp = self.get::<DockerTokenInfo>(url.clone(), headers).await?;
-                let bearer = resp.bearer();
-                if bearer.is_empty() {
-                    return Err(Error::Other {
-                        message: "registry auth returned empty token".to_string(),
-                    });
-                }
-                if resp.issued_at.is_none() {
-                    resp.issued_at = Some(Utc::now().to_rfc3339());
-                }
-                self.caches.set_token(&cache_key, resp);
-                tl_info!(url = url, "got token");
-                return Ok(bearer);
+        let matched = self.matched_rule();
+        let rule_idx = matched.map(|(idx, _)| idx);
+        let matched_rule = matched.map(|(_, rule)| rule);
+        let creds = self.resolve_rule_credentials(params);
+
+        let has_explicit_or_rule_creds = params.credentials.as_ref().is_some_and(|c| !c.is_empty())
+            || matched_rule
+                .and_then(|r| r.username.as_deref())
+                .is_some_and(|u| !u.trim().is_empty());
+
+        if !has_explicit_or_rule_creds {
+            if let Some(static_token) = matched_rule
+                .and_then(|r| r.token.as_deref())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                return Ok(ResolvedAuth::Bearer(static_token.to_string()));
+            }
+            if matched_rule.is_some_and(|r| {
+                r.headers
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("authorization"))
+            }) {
+                return Ok(ResolvedAuth::None);
             }
         }
-        Ok(String::new())
+
+        let tag = &params.tag;
+        let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
+        let mut head_headers = HashMap::new();
+        head_headers.insert("Accept".to_string(), MANIFEST_ACCEPTS.join(", "));
+        let head_origin_only = Self::apply_rule_headers_only(matched_rule, &mut head_headers);
+
+        let resp = self
+            .execute_with_redirects(
+                Method::HEAD,
+                url.clone(),
+                head_headers,
+                &head_origin_only,
+                Duration::from_secs(5 * 60),
+                rule_idx,
+                true,
+            )
+            .await?;
+
+        if resp.status().as_u16() != StatusCode::UNAUTHORIZED.as_u16() {
+            return Ok(ResolvedAuth::None);
+        }
+
+        let mut bearer_auth: Option<AuthInfo> = None;
+        for value in resp.headers().get_all("www-authenticate") {
+            let Ok(raw) = value.to_str() else {
+                continue;
+            };
+            let trimmed = raw.trim_start();
+            if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("bearer") {
+                let info = parse_auth_info(trimmed);
+                if !info.auth.is_empty() {
+                    bearer_auth = Some(info);
+                    break;
+                }
+            }
+        }
+
+        let Some(auth_info) = bearer_auth else {
+            return Ok(match creds {
+                Some(c) if !c.is_empty() => ResolvedAuth::Basic(c.basic_token()),
+                _ => ResolvedAuth::None,
+            });
+        };
+
+        let mut token_url = auth_info.auth.clone();
+        let mut sep = if token_url.contains('?') { '&' } else { '?' };
+        if !auth_info.service.is_empty() {
+            token_url.push(sep);
+            token_url.push_str("service=");
+            token_url.push_str(&auth_info.service);
+            sep = '&';
+        }
+        if !auth_info.scope.is_empty() {
+            token_url.push(sep);
+            token_url.push_str("scope=");
+            token_url.push_str(&auth_info.scope);
+        }
+
+        let realm_host = extract_url_host(&auth_info.auth).map(|(_, host)| host);
+        let reg_host = registry_host(&self.registry);
+        let token_rule = realm_host
+            .and_then(|host| self.registries.match_host(host))
+            .or_else(|| {
+                let same_as_reg = realm_host
+                    .zip(reg_host.as_deref())
+                    .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+                same_as_reg.then_some(matched).flatten()
+            });
+        let token_rule_idx = token_rule.map(|(idx, _)| idx);
+        let mut token_headers = HashMap::new();
+        let mut token_origin_only =
+            Self::apply_rule_headers_only(token_rule.map(|(_, r)| r), &mut token_headers);
+        let rule_fp = realm_host
+            .and_then(|h| self.registries.auth_fingerprint(h))
+            .or_else(|| {
+                reg_host
+                    .as_deref()
+                    .and_then(|h| self.registries.auth_fingerprint(h))
+            });
+        let cache_key = format!(
+            "{token_url}#auth={}",
+            auth_scope_key(creds.as_ref(), rule_fp.as_deref())
+        );
+        if !skip_cache {
+            if let Some(info) = self.caches.get_token(&cache_key) {
+                return Ok(ResolvedAuth::Bearer(info.bearer()));
+            }
+        }
+        tl_info!(
+            url = token_url,
+            authenticated = creds.is_some(),
+            "getting token"
+        );
+        if let Some(c) = creds.as_ref() {
+            if !token_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("authorization"))
+            {
+                token_headers.insert(
+                    "Authorization".to_string(),
+                    format!("Basic {}", c.basic_token()),
+                );
+                token_origin_only.push("authorization".to_string());
+            }
+        }
+        let mut resp = self
+            .get::<DockerTokenInfo>(
+                token_url.clone(),
+                token_headers,
+                &token_origin_only,
+                token_rule_idx,
+                true,
+            )
+            .await?;
+        let bearer = resp.bearer();
+        if bearer.is_empty() {
+            return Err(Error::Other {
+                message: "registry auth returned empty token".to_string(),
+            });
+        }
+        if resp.issued_at.is_none() {
+            resp.issued_at = Some(Utc::now().to_rfc3339());
+        }
+        self.caches.set_token(&cache_key, resp);
+        tl_info!(url = token_url, "got token");
+        Ok(ResolvedAuth::Bearer(bearer))
     }
 
     pub(crate) async fn head_manifest_digest(
@@ -1049,17 +1387,23 @@ impl RegistryClient {
             return None;
         }
         let tag = &params.tag;
-        let token = &params.token;
         let url = format!("{}/{}/manifests/{tag}", self.registry, params.repo());
-        let mut req = self
-            .http_client
-            .head(url)
-            .timeout(Duration::from_secs(30))
-            .header("Accept", MANIFEST_ACCEPTS.join(", "));
-        if !token.is_empty() {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-        let resp = req.send().await.ok()?;
+        let rule_idx = self.matched_rule().map(|(idx, _)| idx);
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), MANIFEST_ACCEPTS.join(", "));
+        let origin_only = self.apply_registry_headers(&mut headers, &params.auth);
+        let resp = self
+            .execute_with_redirects(
+                Method::HEAD,
+                url,
+                headers,
+                &origin_only,
+                Duration::from_secs(30),
+                rule_idx,
+                true,
+            )
+            .await
+            .ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -1174,9 +1518,17 @@ mod tests {
             username: "alice".into(),
             password: "secret-2".into(),
         };
-        assert_eq!(auth_scope_key(None), "anon");
-        assert_ne!(auth_scope_key(Some(&c1)), auth_scope_key(Some(&c2)));
-        assert_ne!(auth_scope_key(Some(&c1)), "anon");
+        assert_eq!(auth_scope_key(None, None), "anon");
+        assert_ne!(
+            auth_scope_key(Some(&c1), None),
+            auth_scope_key(Some(&c2), None)
+        );
+        assert_ne!(auth_scope_key(Some(&c1), None), "anon");
+        assert_ne!(auth_scope_key(None, Some("fp1")), "anon");
+        assert_ne!(
+            auth_scope_key(Some(&c1), Some("fp1")),
+            auth_scope_key(Some(&c1), None)
+        );
 
         let caches = RegistryCaches::default();
         caches.set_manifest("expired-manifest", ImageManifest::default(), vec![], -10);

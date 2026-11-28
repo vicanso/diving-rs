@@ -117,6 +117,23 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
             .group(group_actions)
             .keywords(["diff", "compare", "delta"])
             .shortcut("mod+d"),
+        CommandItem::new("action:registries", t(lang, "menu.registries"))
+            .group(group_actions)
+            .keywords([
+                "registry",
+                "registries",
+                "auth",
+                "login",
+                "harbor",
+                "token",
+                "headers",
+                "tls",
+                "仓库",
+                "认证",
+                "登录",
+                "请求头",
+            ])
+            .shortcut("mod+,"),
         CommandItem::new("action:focus_search", t(lang, "cmd.focus_search"))
             .group(group_actions)
             .keywords(["search", "image", "focus"])
@@ -263,6 +280,7 @@ fn execute_command(state: &AppState, id: &str) {
         "action:open_folder" => state.open_local_folder(),
         "action:local_images" => state.open_local_picker(),
         "action:compare" => state.open_compare_dialog(),
+        "action:registries" => state.open_registry_settings(),
         "action:focus_search" => state.focus_search_input(),
         "action:provenance" => state.open_provenance_search(),
         "action:reanalyze" => state.reanalyze_current_image(),

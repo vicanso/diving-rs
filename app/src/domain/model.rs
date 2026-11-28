@@ -9,7 +9,7 @@ use bytesize::ByteSize;
 use diving_core::{
     DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer, Op,
     REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, Recommendation,
-    RuntimeCompat, parse_image_info,
+    RuntimeCompat, parse_image_info, registry_host,
 };
 use serde::{Deserialize, Serialize};
 
@@ -167,6 +167,35 @@ pub fn image_source_kind(image_ref: &str) -> ImageSourceKind {
         r if r == REGISTRY_LOCAL_PODMAN => ImageSourceKind::LocalPodman,
         _ => ImageSourceKind::Registry,
     }
+}
+
+/// Extracts `host[:port]` for remote registry image references (`None` for local sources).
+pub fn extract_registry_host_from_image(image_ref: &str) -> Option<String> {
+    let trimmed = image_ref.trim();
+    if trimmed.is_empty() || image_source_kind(trimmed) != ImageSourceKind::Registry {
+        return None;
+    }
+    let info = parse_image_info(trimmed);
+    registry_host(&info.registry)
+}
+
+/// Returns `true` when an error message indicates registry authentication or TLS failure.
+pub fn is_registry_auth_or_tls_error(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("denied")
+        || lower.contains("forbidden")
+        || lower.contains("authentication required")
+        || lower.contains("empty token")
+        || lower.contains("certificate")
+        || lower.contains("unknownissuer")
+        || lower.contains("invalidcertificate")
+        || lower.contains("tls")
+        || lower.contains("ssl")
+        || lower.contains("handshake")
+        || lower.contains("corrupt message")
 }
 
 /// Formats byte sizes consistently with `diving-core` (`"0 B"` for zero).
@@ -1484,5 +1513,42 @@ mod tests {
             classify_file_kind("UNKNOWN_DATA", "-rw-r--r--", false),
             FileKind::Generic
         );
+    }
+
+    #[test]
+    fn extract_registry_host_and_auth_error_detection_cover_private_registries() {
+        assert_eq!(
+            extract_registry_host_from_image("harbor.corp.com/org/app:v1").as_deref(),
+            Some("harbor.corp.com")
+        );
+        assert_eq!(
+            extract_registry_host_from_image("http://10.0.1.5:5000/svc:latest").as_deref(),
+            Some("10.0.1.5:5000")
+        );
+        assert_eq!(
+            extract_registry_host_from_image("redis:alpine").as_deref(),
+            Some("index.docker.io")
+        );
+        assert_eq!(extract_registry_host_from_image("file:///tmp/a.tar"), None);
+        assert_eq!(
+            extract_registry_host_from_image("docker://redis:alpine"),
+            None
+        );
+        assert_eq!(extract_registry_host_from_image(""), None);
+
+        assert!(is_registry_auth_or_tls_error(
+            "Request https://harbor.corp.com/v2/app/manifests/latest code: UNAUTHORIZED fail: authentication required"
+        ));
+        assert!(is_registry_auth_or_tls_error("registry returned HTTP 403"));
+        assert!(is_registry_auth_or_tls_error(
+            "invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(is_registry_auth_or_tls_error(
+            "error sending request for url: corrupt message"
+        ));
+        assert!(!is_registry_auth_or_tls_error("Tar fail: unexpected EOF"));
+        assert!(!is_registry_auth_or_tls_error(
+            "docker images failed: daemon not running"
+        ));
     }
 }
