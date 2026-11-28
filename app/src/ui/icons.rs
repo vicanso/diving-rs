@@ -60,6 +60,7 @@ pub enum IconName {
     PanelLeft,
     Plus,
     SortOrder,
+    Trash,
 }
 
 impl IconName {
@@ -113,6 +114,7 @@ impl IconName {
             Self::PanelLeft => include_str!("../../assets/icons/panel-left.svg"),
             Self::Plus => include_str!("../../assets/icons/plus.svg"),
             Self::SortOrder => include_str!("../../assets/icons/sort-order.svg"),
+            Self::Trash => include_str!("../../assets/icons/trash.svg"),
         }
     }
 }

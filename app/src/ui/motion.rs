@@ -3,6 +3,7 @@
 use nsh_core::animation::{Keyframe, KeyframeTiming, MotionChannel, MotionSpec};
 use nsh_core::element::StyleRefinement;
 use nsh_core::prelude::*;
+use nsh_core::{LayoutAnimation, LayoutCurve, LayoutTransition};
 
 /// Instant hover wash / subtle border highlight (`120 ms`).
 pub const INSTANT: f32 = 120.0;
@@ -54,4 +55,15 @@ pub fn dur(ms: f32) -> f32 {
 /// Applies the standard button press scale unless reduced motion is active.
 pub fn press_scale(style: StyleRefinement, scale: f32) -> StyleRefinement {
     style.scale(move || if reduce_motion() { 1.0 } else { scale })
+}
+
+/// Animates the next layout transition (such as showing or dismissing an inline banner)
+/// using the `FAST` ease-out curve unless reduced motion is active.
+pub fn animate_layout_fast() {
+    if !reduce_motion() {
+        animate_layout(LayoutAnimation::all(LayoutTransition::new(
+            LayoutCurve::EaseOut,
+            FAST,
+        )));
+    }
 }

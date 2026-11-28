@@ -358,7 +358,7 @@ fn buttons_section(clicks: Signal<u32>) -> impl IntoElement {
                         "Danger",
                         ButtonVariant::Danger,
                         UiSize::Md,
-                        Some(IconName::Alert),
+                        Some(IconName::Trash),
                         false,
                         false,
                         || {},

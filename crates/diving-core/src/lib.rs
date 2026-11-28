@@ -34,9 +34,10 @@ pub use gate::{
 };
 pub use i18n::{fill, tr, Lang};
 pub use image::{
-    final_filesystem, host_arch, is_local_registry, is_private_or_loopback_host, list_local_images,
-    normalize_registry_host_pattern, parse_image_info, parse_local_images_output, registry_host,
-    registry_host_matches, resolve_explicit as resolve_explicit_credentials, AnalyzeReport,
+    final_filesystem, host_arch, is_image_in_use_error, is_local_registry,
+    is_private_or_loopback_host, list_local_images, normalize_registry_host_pattern,
+    parse_image_info, parse_local_images_output, registry_host, registry_host_matches,
+    remove_local_image, resolve_explicit as resolve_explicit_credentials, AnalyzeReport,
     BigModifiedFileInfo, DockerAnalyzeResult, DockerAnalyzeSummary, DuplicateGroup, DuplicatePath,
     FileTreeItem, FinalFile, ImageFileInfo, ImageFileSummary, ImageFileWastedSummary, ImageInfo,
     ImageLayer, ImagePreview, LocalContainerImage, LocalRuntime, Op, RegistryCredentials,

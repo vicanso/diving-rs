@@ -354,15 +354,17 @@
     4. *Recommendations Diff*：分离展示 `New`（新增风险）与 `Resolved`（已解决优化）。
 - **双镜像异步加载态与局部失败**：对比同时分析两张镜像，若任一失败，明确指出是 `Base` 还是 `Target` 拉取失败并允许直接修改或重试，不丢失用户已填的另一侧引用。
 
-### 视图 5：Local Docker / Podman Image Picker（本地镜像选择弹窗）
+### 视图 5：Local Docker / Podman / Container Image Picker（本地镜像选择弹窗）
 
-- **主要任务**：弥补现有纯手工输入 `docker://` 协议的繁琐，直接枚举并筛选本机 Docker / Podman 守护进程中的镜像。
+- **主要任务**：直接枚举、排序、筛选并管理本机 `docker://`、`podman://` 与 macOS `container://` 运行时中的镜像。
 - **设计要求**：
   - Centered `Dialog`（宽 `640pt`，最大高 `520pt`）。
-  - 顶部栏：`Docker` / `Podman` 运行时 `SegmentedControl` + 刷新按钮 + 实时关键词过滤框（打开自动聚焦）。
-  - 中部 `virtual_list`：对齐脊线 `Repository:Tag`（加粗） | `Image ID (短 12 位 Mono)` | `Created` | `Size (右对齐 Mono)`。键盘上下移动、回车直接选择触发分析。
-  - 底部：提示说明（调用本地 CLI 导出分析）+ `Cancel` + `Analyze selected`（唯一主按钮，未选中行时禁用）。
-  - **异常处理**：若检测到本机未安装或未启动 Docker/Podman daemon，不显示空白列表——立即渲染清晰恢复向导（提示启动 daemon、切换另一种运行时，或提供直接跳转 `Open tar / OCI archive…` 按钮）。
+  - 顶部栏：`Docker` / `Podman` / `Container` 运行时 `SegmentedControl`（**已安装的 CLI 排在前面、未安装排在后面但仍可点击**；若尚未保存有效运行时偏好，默认自动选中第一个已安装的运行时）+ 实时关键词过滤框（打开自动聚焦）+ 刷新按钮。
+  - 失败反馈带（条件出现）：当删除单个镜像失败时，在表格顶部展示带关闭按钮的 `BannerTone::Danger` 提示，不清空已有列表。
+  - 中部 4 列表头 + `virtual_list`：对齐脊线 `Repository:Tag`（加粗） | `Image ID`（短 12 位 Mono 徽章） | `Created` | `Size`（右对齐 Mono `tabular_nums`） + 右侧固定 `26pt` 行删除动作列。4 个表头均支持点击切换排序并展示 `↑` / `↓` 指示（`Size` 与 `Created` 默认先降序、再升序、第三次恢复默认序，分别按精确字节数与解析后的时间戳排序；`Repository:Tag` 与 `Image ID` 默认先升序、再降序、第三次恢复默认序），排序/过滤期间通过镜像引用（Domain Identity）保持选中行不变。键盘 `↑` / `↓` 移动选中行、`Enter` / `Space` 分析所选镜像、`Backspace` / `Delete` 触发删除确认。
+  - 底部：提示说明（调用本地 CLI 导出分析）+ `Delete…`（未选中行或正在删除时禁用）+ `Cancel` + `Analyze selected`（唯一主按钮，未选中行或正在删除时禁用）。
+  - 单镜像删除与强制删除恢复：点击行末垃圾桶按钮、右键 `ContextMenu`（分析镜像 / 复制镜像引用 / 删除镜像…）、底部 `Delete…` 按钮或列表聚焦按 `Backspace` / `Delete` 后，弹出原生 `AlertDialog` 二次确认（`Delete “…”?`）；若运行时报错镜像正被容器占用或存在多标签引用冲突（如 `docker` / `podman` / `container`），自动二次弹窗提示并确认后以 `--force` 强制删除。
+  - **异常处理**：若检测到所选运行时未安装或未启动守护进程，不显示空白列表——立即渲染清晰恢复向导（提示启动 daemon、按已安装优先顺序提供另外两个运行时的快捷切换按钮，或直接跳转打开本地归档/目录）。
 
 ### 视图 6：Command Palette（`Mod+K` 全局命令面板）
 
@@ -443,8 +445,12 @@
 | --- | --- | --- | --- |
 | `5. 浮层开关` | `FilePreviewSheet` 右侧滑入与关闭 | NSH `0.7.0` `Transition::spring(spring::PANEL)` 从右侧边缘滑入，背景遮罩淡入 (`BASE`)；支持关闭中途再选中另一文件直接替换内容而**不闪关抽屉** | 立即显现/关闭 |
 | 7. 拖拽与释放 | 若支持抽屉左边界调宽拖拽 | 拖拽跟随鼠标 1:1 变更宽度，松手吸附或保留当前宽度 | 1:1 跟随 |
-| 3. 选中项移动 | Diff View 顶部 `Added / Removed / Resized` 子 Tab 切换 | 与全局 `Tabs` 共用单一 `AnimatedValue` 滑块 (`BASE`, `EASE_IN_OUT`) | 立即跳切 |
-| 4. 内容到达/离开 | 点击 Diff View 的 `Swap`（交换 Base/Target） | 双侧标题栏与指标数据轻量交叉淡入 (`FAST`)，明确反馈已对调 | 立即刷新 |
+| `3. 选中项移动` | Diff View 顶部 `Added / Removed / Resized` 子 Tab 切换 | 与全局 `Tabs` 共用单一 `AnimatedValue` 滑块 (`BASE`, `EASE_IN_OUT`) | 立即跳切 |
+| `4. 内容到达/离开` | 点击 Diff View 的 `Swap`（交换 Base/Target） | 双侧标题栏与指标数据轻量交叉淡入 (`FAST`)，明确反馈已对调 | 立即刷新 |
+| `3. 选中项移动` | Local Picker 顶部 `Docker` / `Podman` / `Container` 分段切换 | 单一滑块背景 `AnimatedValue` + `timing` (`BASE`, `EASE_IN_OUT`) | 立即跳切 |
+| `2. 图标与文案切换` | Local Picker 表头排序列与方向指示（`↑` / `↓`） | 颜色瞬时过渡 (`INSTANT`)，列表重排零波浪动画（保持选中引用） | 立即更新指示与行序 |
+| `6. 布局变化` | Local Picker 删除失败提示横幅展开/收起 | 状态更新前触发 `LayoutAnimation` (`FAST`, `EASE_OUT`) | 立即展开/收起 |
+| `5. 浮层开关` | Local Picker 删除与强制删除二次确认 | 平台原生 `AlertDialog`（`NSAlert` / 系统告警框） | 遵循系统减弱动态效果 |
 
 ---
 

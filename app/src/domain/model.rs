@@ -1,5 +1,6 @@
 //! Pure domain computations for layers, virtual file trees, previews, and history.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -11,8 +12,8 @@ pub use diving_core::{
 };
 use diving_core::{
     DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer,
-    InspectedPreview, Op, REGISTRY_LOCAL_CONTAINER, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
-    REGISTRY_LOCAL_PODMAN, Recommendation, RuntimeCompat,
+    InspectedPreview, LocalContainerImage, Op, REGISTRY_LOCAL_CONTAINER, REGISTRY_LOCAL_DOCKER,
+    REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN, Recommendation, RuntimeCompat,
     detect_code_language as core_detect_code_language, encode_data_uri, format_archive_text,
     format_media_text, format_structured_text, inspect_file_preview, parse_image_info,
     registry_host,
@@ -105,6 +106,108 @@ impl LayerSortOrder {
             Self::Asc => Self::Desc,
         }
     }
+}
+
+/// Sortable columns for the local container image picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalImageSortField {
+    Repository,
+    Id,
+    Created,
+    Size,
+}
+
+/// Sort direction for [`LocalImageSort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+/// Active sort column and direction for local container images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalImageSort {
+    pub field: LocalImageSortField,
+    pub dir: SortDirection,
+}
+
+/// Cycles table column sorting across primary direction -> opposite direction -> unsorted (`None`).
+pub fn next_local_image_sort(
+    current: Option<LocalImageSort>,
+    field: LocalImageSortField,
+) -> Option<LocalImageSort> {
+    let default_dir = match field {
+        LocalImageSortField::Size | LocalImageSortField::Created => SortDirection::Desc,
+        LocalImageSortField::Repository | LocalImageSortField::Id => SortDirection::Asc,
+    };
+    match current {
+        Some(active) if active.field == field && active.dir == default_dir => {
+            let flipped = match default_dir {
+                SortDirection::Asc => SortDirection::Desc,
+                SortDirection::Desc => SortDirection::Asc,
+            };
+            Some(LocalImageSort {
+                field,
+                dir: flipped,
+            })
+        }
+        Some(active) if active.field == field => None,
+        _ => Some(LocalImageSort {
+            field,
+            dir: default_dir,
+        }),
+    }
+}
+
+fn compare_optional_ord<T: Ord>(a: Option<T>, b: Option<T>, dir: SortDirection) -> Ordering {
+    match (a, b) {
+        (Some(av), Some(bv)) => match dir {
+            SortDirection::Asc => av.cmp(&bv),
+            SortDirection::Desc => bv.cmp(&av),
+        },
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Sorts local container images in place while placing entries without parsed metrics last.
+pub fn sort_local_images(images: &mut [LocalContainerImage], sort: Option<LocalImageSort>) {
+    let Some(sort) = sort else {
+        return;
+    };
+    images.sort_by(|a, b| {
+        let primary = match sort.field {
+            LocalImageSortField::Repository => {
+                let ak = a.display_name().to_ascii_lowercase();
+                let bk = b.display_name().to_ascii_lowercase();
+                match sort.dir {
+                    SortDirection::Asc => ak.cmp(&bk),
+                    SortDirection::Desc => bk.cmp(&ak),
+                }
+            }
+            LocalImageSortField::Id => {
+                let ak = a.id.to_ascii_lowercase();
+                let bk = b.id.to_ascii_lowercase();
+                match sort.dir {
+                    SortDirection::Asc => ak.cmp(&bk),
+                    SortDirection::Desc => bk.cmp(&ak),
+                }
+            }
+            LocalImageSortField::Created => {
+                compare_optional_ord(a.effective_created_at(), b.effective_created_at(), sort.dir)
+            }
+            LocalImageSortField::Size => {
+                compare_optional_ord(a.effective_size_bytes(), b.effective_size_bytes(), sort.dir)
+            }
+        };
+        primary.then_with(|| {
+            a.display_name()
+                .to_ascii_lowercase()
+                .cmp(&b.display_name().to_ascii_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        })
+    });
 }
 
 /// Filter modes for `LayerTimeline`.
@@ -1766,6 +1869,113 @@ mod tests {
             classify_file_kind("UNKNOWN_DATA", "-rw-r--r--", false),
             FileKind::Generic
         );
+    }
+
+    #[test]
+    fn local_image_sorting_uses_bytes_timestamps_and_cycles_order() {
+        assert_eq!(
+            next_local_image_sort(None, LocalImageSortField::Size),
+            Some(LocalImageSort {
+                field: LocalImageSortField::Size,
+                dir: SortDirection::Desc,
+            })
+        );
+        assert_eq!(
+            next_local_image_sort(
+                Some(LocalImageSort {
+                    field: LocalImageSortField::Size,
+                    dir: SortDirection::Desc,
+                }),
+                LocalImageSortField::Size,
+            ),
+            Some(LocalImageSort {
+                field: LocalImageSortField::Size,
+                dir: SortDirection::Asc,
+            })
+        );
+        assert_eq!(
+            next_local_image_sort(
+                Some(LocalImageSort {
+                    field: LocalImageSortField::Size,
+                    dir: SortDirection::Asc,
+                }),
+                LocalImageSortField::Size,
+            ),
+            None
+        );
+        assert_eq!(
+            next_local_image_sort(None, LocalImageSortField::Repository),
+            Some(LocalImageSort {
+                field: LocalImageSortField::Repository,
+                dir: SortDirection::Asc,
+            })
+        );
+
+        let mut images = vec![
+            LocalContainerImage {
+                runtime: diving_core::LocalRuntime::Container,
+                repository: "debian".to_owned(),
+                tag: "bookworm-slim".to_owned(),
+                id: "7b140f374b28".to_owned(),
+                size: "26.8 MiB".to_owned(),
+                created: "2026-07-13 00:00".to_owned(),
+                size_bytes: Some(28_101_836),
+                created_at: Some(1_783_900_800),
+            },
+            LocalContainerImage {
+                runtime: diving_core::LocalRuntime::Container,
+                repository: "mysql".to_owned(),
+                tag: "8.4".to_owned(),
+                id: "24989179f588".to_owned(),
+                size: "222.2 MiB".to_owned(),
+                created: "2026-10-12 20:12".to_owned(),
+                size_bytes: None,
+                created_at: None,
+            },
+            LocalContainerImage {
+                runtime: diving_core::LocalRuntime::Container,
+                repository: "alpine/helm".to_owned(),
+                tag: "3.16.2".to_owned(),
+                id: "a19a2968fd67".to_owned(),
+                size: "30.2 MiB".to_owned(),
+                created: "2024-10-14 06:42".to_owned(),
+                size_bytes: Some(31_666_995),
+                created_at: Some(1_728_888_120),
+            },
+        ];
+
+        sort_local_images(
+            &mut images,
+            Some(LocalImageSort {
+                field: LocalImageSortField::Size,
+                dir: SortDirection::Desc,
+            }),
+        );
+        assert_eq!(images[0].display_name(), "mysql:8.4");
+        assert_eq!(images[1].display_name(), "alpine/helm:3.16.2");
+        assert_eq!(images[2].display_name(), "debian:bookworm-slim");
+
+        sort_local_images(
+            &mut images,
+            Some(LocalImageSort {
+                field: LocalImageSortField::Created,
+                dir: SortDirection::Asc,
+            }),
+        );
+        assert_eq!(images[0].display_name(), "alpine/helm:3.16.2");
+        assert_eq!(images[1].display_name(), "debian:bookworm-slim");
+        assert_eq!(images[2].display_name(), "mysql:8.4");
+
+        sort_local_images(
+            &mut images,
+            Some(LocalImageSort {
+                field: LocalImageSortField::Id,
+                dir: SortDirection::Asc,
+            }),
+        );
+        assert_eq!(images[0].id, "24989179f588");
+        assert_eq!(images[1].id, "7b140f374b28");
+        assert_eq!(images[2].id, "a19a2968fd67");
     }
 
     #[test]

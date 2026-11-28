@@ -647,6 +647,71 @@ pub fn ui_menu_trigger_icon_with_dot(
     )
 }
 
+/// Renders a clickable table column header with optional ascending (`↑`) or descending (`↓`)
+/// sort direction indicator aligned cleanly with table rows.
+pub fn ui_table_sort_header(
+    label: impl IntoReactive<SharedString>,
+    sort_asc: impl IntoReactive<Option<bool>>,
+    align_end: bool,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let label = label.into_reactive();
+    let sort_asc = sort_asc.into_reactive();
+    let a11y_label = label.clone();
+    let sort_label = sort_asc.clone();
+    let sort_has = sort_asc.clone();
+    let sort_arrow = sort_asc;
+
+    let label_el = text(label)
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .number_of_lines(1)
+        .text_color(move || {
+            if sort_label.get().is_some() {
+                theme().foreground
+            } else {
+                theme().muted_foreground
+            }
+        });
+    let arrow_el = when(
+        move || sort_has.get().is_some(),
+        move || {
+            let arrow_dir = sort_arrow.clone();
+            text(move || match arrow_dir.get() {
+                Some(true) => "↑",
+                Some(false) => "↓",
+                None => "",
+            })
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(move || theme().primary)
+        },
+    );
+
+    let base = button()
+        .accessibility_label(move || a11y_label.get())
+        .on_press(on_press)
+        .w_full()
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .when(align_end, |b| b.justify_end())
+        .when(!align_end, |b| b.justify_start())
+        .rounded(radius_inset)
+        .transition_colors()
+        .duration(move || dur(FAST))
+        .hover(|s| s.opacity(0.85))
+        .active(|s| press_scale(s, PRESS_BTN_SCALE))
+        .focus_visible(|s| s.outline(px(2.0)).outline_color(move || theme().ring));
+
+    if align_end {
+        base.child(arrow_el).child(label_el)
+    } else {
+        base.child(label_el).child(arrow_el)
+    }
+}
+
 /// Renders an external resource link (the only control allowed to use pointing-hand cursor).
 pub fn ui_link(
     label: impl IntoReactive<SharedString>,

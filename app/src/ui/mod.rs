@@ -19,6 +19,7 @@ pub mod theme;
 pub use button::{
     ButtonVariant, UiSize, ui_action_card, ui_button, ui_icon_button, ui_image_pill_button,
     ui_link, ui_menu_trigger_icon, ui_menu_trigger_icon_with_dot, ui_recent_item, ui_sidebar_item,
+    ui_table_sort_header,
 };
 pub use code::{
     ui_archive_viewer, ui_code_viewer, ui_diff_viewer, ui_hex_viewer, ui_image_stage,
@@ -39,10 +40,12 @@ pub use input::{
     InputEscape, InputSubmit, ui_bare_input_with_ref, ui_field, ui_input, ui_input_with_ref,
     ui_password_input, ui_search_input, ui_search_input_with_escape,
 };
+pub use motion::animate_layout_fast;
 pub use nsh_base::{SelectItem, theme};
 pub use overlay::{
-    BannerTone, CommandItem, format_shortcut_hint, ui_banner, ui_command_palette, ui_context_menu,
-    ui_dialog, ui_menu, ui_menu_item, ui_menu_separator, ui_popover, ui_sheet, ui_tooltip,
+    BannerTone, CommandItem, format_shortcut_hint, ui_banner, ui_command_palette,
+    ui_confirm_destructive, ui_context_menu, ui_dialog, ui_menu, ui_menu_item, ui_menu_separator,
+    ui_popover, ui_sheet, ui_tooltip,
 };
 pub use tabs::{TabOption, ui_tabs};
 pub use theme::{

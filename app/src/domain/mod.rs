@@ -11,15 +11,15 @@ pub use model::{
     AppRoute, ArchiveEntryPreview, ArchivePreviewMeta, DiffFileTab, FileKind, FilePreviewContent,
     FileProvenanceHit, FileTreeFilter, FileTreeRow, ImagePreviewMeta, ImageSourceKind, IndexedTree,
     IndexedTreeNode, InspectorTab, LARGE_LAYER_BYTES, LayerFileCounts, LayerFilterMode,
-    LayerSortOrder, MediaPreviewMeta, PreviewField, RecentImageEntry, SharedRef,
-    StructuredPreviewMeta, StructuredSection, TreemapViewMode, WhatIfProjection,
-    build_indexed_tree, classify_file_entry, classify_file_kind, classify_file_preview,
-    classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
+    LayerSortOrder, LocalImageSort, LocalImageSortField, MediaPreviewMeta, PreviewField,
+    RecentImageEntry, SharedRef, SortDirection, StructuredPreviewMeta, StructuredSection,
+    TreemapViewMode, WhatIfProjection, build_indexed_tree, classify_file_entry, classify_file_kind,
+    classify_file_preview, classify_layer_opcode, compute_what_if_projection, count_layer_file_ops,
     default_selected_layer, extract_registry_host_from_image, findings_total_count,
     flatten_file_tree, flatten_indexed_tree, format_bytes, format_command_lines,
     format_runtime_compat, image_source_kind, is_registry_auth_or_tls_error, layer_matches_filter,
-    relocalize_image_diff, remove_recent, search_file_provenance, symlink_preview_content,
-    upsert_recent, visible_layer_indices,
+    next_local_image_sort, relocalize_image_diff, remove_recent, search_file_provenance,
+    sort_local_images, symlink_preview_content, upsert_recent, visible_layer_indices,
 };
 pub use service::{AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService};
 pub use shell_fmt::{ParsedLayerCommand, format_dockerfile, parse_layer_command};

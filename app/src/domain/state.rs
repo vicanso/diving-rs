@@ -1,6 +1,6 @@
 //! Root application state (`AppState`) with storage persistence and stale-result guards.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::env::consts;
 use std::future::Future;
@@ -15,7 +15,8 @@ use diving_app::config::merge_registry_rules;
 use diving_core::{
     BaseLayerMode, DiffOptions, DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff,
     ImagePreview, LocalContainerImage, LocalRuntime, ProgressEvent, RegistryRule,
-    build_recommendations, normalize_registry_host_pattern, registry_host_matches,
+    build_recommendations, is_image_in_use_error, normalize_registry_host_pattern,
+    registry_host_matches,
 };
 use nsh_core::element::Owner;
 use nsh_core::element::desktop::quit;
@@ -26,9 +27,10 @@ use tokio::sync::{mpsc::unbounded_channel, oneshot};
 
 use crate::domain::model::{
     AppRoute, DiffFileTab, FilePreviewContent, FileTreeFilter, FileTreeRow, ImageSourceKind,
-    InspectorTab, LayerFilterMode, LayerSortOrder, RecentImageEntry, SharedRef, TreemapViewMode,
-    default_selected_layer, format_bytes, image_source_kind, relocalize_image_diff, remove_recent,
-    symlink_preview_content, upsert_recent,
+    InspectorTab, LayerFilterMode, LayerSortOrder, LocalImageSort, LocalImageSortField,
+    RecentImageEntry, SharedRef, TreemapViewMode, default_selected_layer, format_bytes,
+    image_source_kind, next_local_image_sort, relocalize_image_diff, remove_recent,
+    sort_local_images, symlink_preview_content, upsert_recent,
 };
 use crate::domain::service::{
     AnalyzeMessage, AnalyzeTaskHandle, DiffMessage, DiffRunResult, DivingService,
@@ -41,6 +43,7 @@ use crate::domain::updater::{
     skip_version, skipped_version, sweep_installer_mounts,
 };
 use crate::i18n::{UiLang, format_user_error, t, tf};
+use crate::ui::{animate_layout_fast, ui_confirm_destructive};
 
 const KEY_LANG: &str = "diving.lang";
 const KEY_APPEARANCE: &str = "diving.appearance";
@@ -292,10 +295,14 @@ pub struct AppState {
     pub diff_request_id: Signal<u64>,
     pub local_picker_open: Signal<bool>,
     pub local_runtime: Signal<LocalRuntime>,
+    pub local_runtime_order: Signal<[LocalRuntime; 3]>,
     pub local_images: Signal<Vec<LocalContainerImage>>,
     pub local_loading: Signal<bool>,
     pub local_error: Signal<Option<String>>,
+    pub local_action_error: Signal<Option<String>>,
+    pub local_deleting_ref: Signal<Option<String>>,
     pub local_filter: Signal<String>,
+    pub local_sort: Signal<Option<LocalImageSort>>,
     pub local_selected_ref: Signal<Option<String>>,
     pub local_request_id: Signal<u64>,
     pub command_palette_open: Signal<bool>,
@@ -322,6 +329,42 @@ pub struct AppState {
     root_owner: Owner,
     active_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
     active_diff_task: Rc<RefCell<Option<AnalyzeTaskHandle>>>,
+    local_confirm_pending: Rc<Cell<bool>>,
+}
+
+struct ResetCellOnDrop(Rc<Cell<bool>>);
+
+impl Drop for ResetCellOnDrop {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+pub(crate) fn resolve_initial_local_runtime(
+    saved: Option<&str>,
+    mut is_installed: impl FnMut(LocalRuntime) -> bool,
+) -> ([LocalRuntime; 3], LocalRuntime) {
+    let docker_ok = is_installed(LocalRuntime::Docker);
+    let podman_ok = is_installed(LocalRuntime::Podman);
+    let container_ok = is_installed(LocalRuntime::Container);
+    let check = |rt: LocalRuntime| match rt {
+        LocalRuntime::Docker => docker_ok,
+        LocalRuntime::Podman => podman_ok,
+        LocalRuntime::Container => container_ok,
+    };
+    let order = LocalRuntime::ordered_by_installed_with(check);
+    let any_installed = docker_ok || podman_ok || container_ok;
+    let saved_rt = saved.and_then(|raw| match raw.trim() {
+        "podman" => Some(LocalRuntime::Podman),
+        "container" => Some(LocalRuntime::Container),
+        "docker" => Some(LocalRuntime::Docker),
+        _ => None,
+    });
+    let initial = match saved_rt {
+        Some(rt) if check(rt) || !any_installed => rt,
+        _ => order[0],
+    };
+    (order, initial)
 }
 
 impl AppState {
@@ -352,13 +395,10 @@ impl AppState {
             .and_then(|raw| serde_json::from_str::<Vec<RecentImageEntry>>(&raw).ok())
             .unwrap_or_default();
 
-        let saved_local_runtime = Storage::get_item(KEY_LOCAL_RUNTIME)
-            .map(|raw| match raw.as_str() {
-                "podman" => LocalRuntime::Podman,
-                "container" => LocalRuntime::Container,
-                _ => LocalRuntime::Docker,
-            })
-            .unwrap_or(LocalRuntime::Docker);
+        let (saved_local_order, saved_local_runtime) = resolve_initial_local_runtime(
+            Storage::get_item(KEY_LOCAL_RUNTIME).as_deref(),
+            LocalRuntime::is_installed,
+        );
 
         let compact_viewport = untracked(|| window().width) < px(1080.0);
         let wide_sidebar_pref = Storage::get_item(KEY_APP_SIDEBAR_OPEN)
@@ -478,10 +518,14 @@ impl AppState {
             diff_request_id: signal(0),
             local_picker_open: signal(false),
             local_runtime: signal(saved_local_runtime),
+            local_runtime_order: signal(saved_local_order),
             local_images: signal(Vec::new()),
             local_loading: signal(false),
             local_error: signal(None),
+            local_action_error: signal(None),
+            local_deleting_ref: signal(None),
             local_filter: signal(String::new()),
+            local_sort: signal(None),
             local_selected_ref: signal(None),
             local_request_id: signal(0),
             command_palette_open: signal(false),
@@ -508,6 +552,7 @@ impl AppState {
             root_owner: Owner::current(),
             active_task: Rc::new(RefCell::new(None)),
             active_diff_task: Rc::new(RefCell::new(None)),
+            local_confirm_pending: Rc::new(Cell::new(false)),
         };
         state.install_responsive_sync();
         state
@@ -1866,9 +1911,15 @@ impl AppState {
     }
 
     pub fn open_local_picker(&self) {
+        let fresh_order = LocalRuntime::ordered_by_installed();
+        self.local_runtime_order.set(fresh_order);
+        if !self.local_runtime.get_untracked().is_installed() && fresh_order[0].is_installed() {
+            self.local_runtime.set(fresh_order[0]);
+        }
         self.local_picker_open.set(true);
         self.local_filter.set(String::new());
         self.local_selected_ref.set(None);
+        self.local_action_error.set(None);
         self.refresh_local_images();
     }
 
@@ -1877,6 +1928,7 @@ impl AppState {
             let _ = Storage::set_item(KEY_LOCAL_RUNTIME, runtime.cli());
             self.local_runtime.set(runtime);
             self.local_selected_ref.set(None);
+            self.local_action_error.set(None);
             self.refresh_local_images();
         }
     }
@@ -1886,6 +1938,7 @@ impl AppState {
         self.local_request_id.set(req_id);
         self.local_loading.set(true);
         self.local_error.set(None);
+        self.local_action_error.set(None);
         let runtime = self.local_runtime.get_untracked();
         let rx = self.service.list_local(runtime);
         let state = self.clone();
@@ -1913,6 +1966,181 @@ impl AppState {
                     state.local_error.set(Some(err));
                 }
             }
+        });
+    }
+
+    pub fn dismiss_local_action_error(&self) {
+        if self.local_action_error.get_untracked().is_some() {
+            animate_layout_fast();
+            self.local_action_error.set(None);
+        }
+    }
+
+    pub fn toggle_local_sort(&self, field: LocalImageSortField) {
+        self.local_sort
+            .update(|cur| *cur = next_local_image_sort(*cur, field));
+    }
+
+    fn selected_local_image(&self) -> Option<LocalContainerImage> {
+        let selected = self.local_selected_ref.get_untracked()?;
+        self.local_images
+            .with_untracked(|list| list.iter().find(|img| img.reference() == selected).cloned())
+    }
+
+    pub fn request_delete_selected_local_image(&self) {
+        if let Some(image) = self.selected_local_image() {
+            self.request_delete_local_image(image);
+        }
+    }
+
+    fn apply_deleted_local_image(&self, deleted_ref: &str, runtime: LocalRuntime) {
+        if self.local_runtime.get_untracked() != runtime {
+            return;
+        }
+        let keyword = self
+            .local_filter
+            .get_untracked()
+            .trim()
+            .to_ascii_lowercase();
+        let sort = self.local_sort.get_untracked();
+        let mut next_selected = None;
+
+        self.local_images.update(|list| {
+            let matches_filter = |img: &LocalContainerImage| {
+                keyword.is_empty()
+                    || img.repository.to_ascii_lowercase().contains(&keyword)
+                    || img.tag.to_ascii_lowercase().contains(&keyword)
+                    || img.id.to_ascii_lowercase().contains(&keyword)
+            };
+            let mut visible_before: Vec<LocalContainerImage> = list
+                .iter()
+                .filter(|img| matches_filter(img))
+                .cloned()
+                .collect();
+            sort_local_images(&mut visible_before, sort);
+            let old_vis_idx = visible_before
+                .iter()
+                .position(|img| img.reference() == deleted_ref);
+
+            list.retain(|img| img.reference() != deleted_ref);
+
+            let mut visible_after: Vec<LocalContainerImage> = list
+                .iter()
+                .filter(|img| matches_filter(img))
+                .cloned()
+                .collect();
+            sort_local_images(&mut visible_after, sort);
+            if let Some(idx) = old_vis_idx
+                && !visible_after.is_empty()
+            {
+                let next_idx = idx.min(visible_after.len() - 1);
+                next_selected = visible_after
+                    .get(next_idx)
+                    .map(LocalContainerImage::reference);
+            } else if !visible_after.is_empty() {
+                next_selected = visible_after.first().map(LocalContainerImage::reference);
+            }
+        });
+
+        let cur_sel = self.local_selected_ref.get_untracked();
+        if cur_sel.is_none() || cur_sel.as_deref() == Some(deleted_ref) {
+            self.local_selected_ref.set(next_selected);
+        }
+    }
+
+    pub fn request_delete_local_image(&self, image: LocalContainerImage) {
+        if self.local_confirm_pending.get() || self.local_deleting_ref.get_untracked().is_some() {
+            return;
+        }
+        self.local_confirm_pending.set(true);
+        let ref_str = image.reference();
+        self.local_selected_ref.set(Some(ref_str.clone()));
+        let state = self.clone();
+
+        self.spawn_app_task(async move {
+            let _confirm_guard = ResetCellOnDrop(state.local_confirm_pending.clone());
+            let display = image.display_name();
+            let meta = match (!image.id.is_empty(), !image.size.is_empty()) {
+                (true, true) => format!("{} · {}", image.id, image.size),
+                (true, false) => image.id.clone(),
+                (false, true) => image.size.clone(),
+                (false, false) => display.clone(),
+            };
+            let lang = state.lang.get_untracked();
+            let rt_label = local_runtime_label(image.runtime, lang);
+            let confirmed = ui_confirm_destructive(
+                tf(lang, "local.delete_confirm_title", &[&display]),
+                tf(lang, "local.delete_confirm_desc", &[&meta, rt_label]),
+                t(lang, "landing.cancel"),
+                t(lang, "local.delete_confirm_action"),
+            )
+            .await;
+            if !confirmed {
+                return;
+            }
+
+            state.dismiss_local_action_error();
+            state.local_deleting_ref.set(Some(ref_str.clone()));
+            let target = image.cli_target();
+            let outcome = state
+                .service
+                .remove_local(image.runtime, target.clone(), image.id.clone(), false)
+                .await;
+            state.local_deleting_ref.set(None);
+
+            let err = match outcome {
+                Ok(Ok(())) => {
+                    state.apply_deleted_local_image(&ref_str, image.runtime);
+                    return;
+                }
+                Ok(Err(err)) => err,
+                Err(_) => t(state.lang.get_untracked(), "error.local_delete_cancelled").to_owned(),
+            };
+
+            if is_image_in_use_error(&err) {
+                let lang = state.lang.get_untracked();
+                let friendly = format_user_error(lang, &err);
+                let force_confirmed = ui_confirm_destructive(
+                    tf(lang, "local.force_delete_title", &[&display]),
+                    tf(lang, "local.force_delete_desc", &[&friendly]),
+                    t(lang, "landing.cancel"),
+                    t(lang, "local.force_delete_action"),
+                )
+                .await;
+                if !force_confirmed {
+                    return;
+                }
+
+                state.local_deleting_ref.set(Some(ref_str.clone()));
+                let force_outcome = state
+                    .service
+                    .remove_local(image.runtime, target, image.id.clone(), true)
+                    .await;
+                state.local_deleting_ref.set(None);
+
+                match force_outcome {
+                    Ok(Ok(())) => {
+                        state.apply_deleted_local_image(&ref_str, image.runtime);
+                        return;
+                    }
+                    Ok(Err(e2)) => {
+                        animate_layout_fast();
+                        state.local_action_error.set(Some(e2));
+                        return;
+                    }
+                    Err(_) => {
+                        animate_layout_fast();
+                        state.local_action_error.set(Some(
+                            t(state.lang.get_untracked(), "error.local_delete_cancelled")
+                                .to_owned(),
+                        ));
+                        return;
+                    }
+                }
+            }
+
+            animate_layout_fast();
+            state.local_action_error.set(Some(err));
         });
     }
 
@@ -2548,6 +2776,14 @@ fn percent_decode_file_uri(uri: &str) -> String {
     format!("file://{normalized}")
 }
 
+fn local_runtime_label(runtime: LocalRuntime, lang: UiLang) -> &'static str {
+    match runtime {
+        LocalRuntime::Docker => t(lang, "local.docker"),
+        LocalRuntime::Podman => t(lang, "local.podman"),
+        LocalRuntime::Container => t(lang, "local.container"),
+    }
+}
+
 fn strip_windows_drive_leading_slash(path: &str) -> &str {
     let bytes = path.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
@@ -2644,6 +2880,59 @@ mod tests {
         assert_eq!(
             parse_explicit_arch_query("container://redis:alpine?arch=arm64"),
             Some("arm64".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_initial_local_runtime_prefers_installed_runtimes() {
+        assert_eq!(
+            resolve_initial_local_runtime(None, |rt| rt == LocalRuntime::Container),
+            (
+                [
+                    LocalRuntime::Container,
+                    LocalRuntime::Docker,
+                    LocalRuntime::Podman
+                ],
+                LocalRuntime::Container
+            )
+        );
+        // Saved missing runtime falls back to the first installed runtime.
+        assert_eq!(
+            resolve_initial_local_runtime(Some("docker"), |rt| rt == LocalRuntime::Podman),
+            (
+                [
+                    LocalRuntime::Podman,
+                    LocalRuntime::Docker,
+                    LocalRuntime::Container
+                ],
+                LocalRuntime::Podman
+            )
+        );
+        // Saved installed runtime stays selected even if not first in installed order.
+        assert_eq!(
+            resolve_initial_local_runtime(Some("container"), |rt| {
+                matches!(rt, LocalRuntime::Docker | LocalRuntime::Container)
+            }),
+            (
+                [
+                    LocalRuntime::Docker,
+                    LocalRuntime::Container,
+                    LocalRuntime::Podman
+                ],
+                LocalRuntime::Container
+            )
+        );
+        // When nothing is installed, preserve saved choice or fall back cleanly to Docker.
+        assert_eq!(
+            resolve_initial_local_runtime(None, |_| false),
+            (
+                [
+                    LocalRuntime::Docker,
+                    LocalRuntime::Podman,
+                    LocalRuntime::Container
+                ],
+                LocalRuntime::Docker
+            )
         );
     }
 

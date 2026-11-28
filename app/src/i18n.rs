@@ -546,6 +546,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "本地镜像列表加载已取消",
     ),
     (
+        "error.local_delete_cancelled",
+        "Local image removal worker cancelled",
+        "本地镜像删除已取消",
+    ),
+    (
         "error.local_archive_prefix",
         "Unable to read local archive: {0}",
         "无法读取本地镜像归档：{0}",
@@ -864,6 +869,32 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "Switch to Container",
         "切换 Container",
     ),
+    ("local.delete_btn", "Delete…", "删除…"),
+    ("local.ctx_analyze", "Analyze image", "分析镜像"),
+    ("local.ctx_copy_ref", "Copy reference", "复制镜像引用"),
+    ("local.ctx_delete", "Delete image…", "删除镜像…"),
+    (
+        "local.delete_confirm_title",
+        "Delete “{0}”?",
+        "删除「{0}」？",
+    ),
+    (
+        "local.delete_confirm_desc",
+        "Removes this image ({0}) from local {1}. This action cannot be undone.",
+        "将从本地 {1} 中移除该镜像（{0}），此操作不可撤销。",
+    ),
+    ("local.delete_confirm_action", "Delete", "删除"),
+    (
+        "local.force_delete_title",
+        "Force delete “{0}”?",
+        "强制删除「{0}」？",
+    ),
+    (
+        "local.force_delete_desc",
+        "{0}\n\nForce deleting passes --force to remove the image reference even while used by a container.",
+        "{0}\n\n强制删除将附带 --force 参数移除该镜像引用（即使仍有容器关联）。",
+    ),
+    ("local.force_delete_action", "Force delete", "强制删除"),
     // Command Palette & Application Menu
     (
         "cmd.placeholder",

@@ -15,7 +15,7 @@ use diving_core::{
     AnalyzeOptions, Analyzer, CleanupStats, DiffOptions, DockerAnalyzeResult, Error as CoreError,
     ImageDiff, ImagePreview, Lang, LocalContainerImage, LocalRuntime, PreviewOptions,
     ProgressEvent, REGISTRY_LOCAL_FILE, RegistryRule, diff_images_with_options, list_local_images,
-    parse_image_info, preview_read_limit, to_diff_markdown, to_markdown,
+    parse_image_info, preview_read_limit, remove_local_image, to_diff_markdown, to_markdown,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
@@ -75,11 +75,17 @@ impl AnalyzeTaskHandle {
     }
 }
 
+#[cfg(test)]
+type LocalRemoveHook =
+    Arc<dyn Fn(LocalRuntime, &str, &str, bool) -> Result<(), String> + Send + Sync>;
+
 struct ServiceInner {
     rt: Runtime,
     analyzer: StdRwLock<Analyzer>,
     config_warning: StdRwLock<Option<String>>,
     config_dir: Option<PathBuf>,
+    #[cfg(test)]
+    local_remove_hook: Option<LocalRemoveHook>,
 }
 
 /// Thread-safe handle wrapping the desktop `Analyzer` and shared Tokio runtime.
@@ -145,6 +151,8 @@ impl DivingService {
                 analyzer: StdRwLock::new(analyzer),
                 config_warning: StdRwLock::new(config_warning),
                 config_dir: None,
+                #[cfg(test)]
+                local_remove_hook: None,
             }),
         }
     }
@@ -159,6 +167,28 @@ impl DivingService {
         Self::with_analyzer_inner(analyzer, Some(config_dir))
     }
 
+    /// Installs a test callback replacing real CLI execution in [`Self::remove_local`].
+    #[cfg(test)]
+    pub fn with_local_remove_hook<F>(self, hook: F) -> Self
+    where
+        F: Fn(LocalRuntime, &str, &str, bool) -> Result<(), String> + Send + Sync + 'static,
+    {
+        let rt = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("create test Tokio runtime");
+        Self {
+            inner: Arc::new(ServiceInner {
+                rt,
+                analyzer: StdRwLock::new(self.analyzer_snapshot()),
+                config_warning: StdRwLock::new(self.config_warning()),
+                config_dir: self.inner.config_dir.clone(),
+                local_remove_hook: Some(Arc::new(hook)),
+            }),
+        }
+    }
+
     fn with_analyzer_inner(analyzer: Analyzer, config_dir: Option<PathBuf>) -> Self {
         let rt = Builder::new_multi_thread()
             .worker_threads(2)
@@ -171,6 +201,8 @@ impl DivingService {
                 analyzer: StdRwLock::new(analyzer),
                 config_warning: StdRwLock::new(None),
                 config_dir,
+                #[cfg(test)]
+                local_remove_hook: None,
             }),
         }
     }
@@ -562,7 +594,7 @@ impl DivingService {
         rx
     }
 
-    /// Lists local images from Docker or Podman daemon CLI.
+    /// Lists local images from Docker, Podman, or Apple Container CLI.
     pub fn list_local(
         &self,
         runtime: LocalRuntime,
@@ -570,6 +602,32 @@ impl DivingService {
         let (tx, rx) = oneshot::channel();
         self.inner.rt.spawn(async move {
             let result = list_local_images(runtime)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    /// Removes a single local image via the `docker`, `podman`, or `container` CLI.
+    pub fn remove_local(
+        &self,
+        runtime: LocalRuntime,
+        target: String,
+        id: String,
+        force: bool,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        #[cfg(test)]
+        if let Some(hook) = self.inner.local_remove_hook.clone() {
+            self.inner.rt.spawn_blocking(move || {
+                let res = hook(runtime, &target, &id, force);
+                let _ = tx.send(res);
+            });
+            return rx;
+        }
+        self.inner.rt.spawn(async move {
+            let result = remove_local_image(runtime, &target, &id, force)
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(result);

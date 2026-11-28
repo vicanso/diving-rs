@@ -18,7 +18,10 @@ pub use image_ref::{
 pub use layer::{get_file_content_from_layer, get_file_head_from_layer, stream_file_from_layer};
 pub(crate) use layer::{hash_files_from_layer, TarIndex};
 pub(crate) use local::LocalManifest;
-pub use local::{list_local_images, parse_local_images_output, LocalContainerImage, LocalRuntime};
+pub use local::{
+    is_image_in_use_error, list_local_images, parse_local_images_output, remove_local_image,
+    LocalContainerImage, LocalRuntime,
+};
 pub use model::{
     AnalyzeReport, BigModifiedFileInfo, DockerAnalyzeResult, DockerAnalyzeSummary,
     ImageFileWastedSummary, ImagePreview, SensitiveFileInfo, WasteChange,

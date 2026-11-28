@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use nsh_base::{
     CommandEntry, CommandGroup, CommandItem as BaseCommandItem, ContextMenuElement,
-    ContextMenuEvents, MenuElement, MenuEvent, SheetEvent, TooltipElement, command, context_menu,
-    dialog, menu, menu_item, menu_separator, popover, sheet, theme, tooltip,
+    ContextMenuEvents, MenuElement, MenuEvent, SheetEvent, TooltipElement, alert_dialog, command,
+    context_menu, dialog, menu, menu_item, menu_separator, popover, sheet, theme, tooltip,
 };
 use nsh_core::element::{IntoProp, StyleRefinement};
 use nsh_core::prelude::*;
@@ -615,4 +615,23 @@ pub fn ui_command_palette<M>(
                     ),
             )
     })
+}
+
+/// Prompts the user with a native destructive [`AlertDialog`](nsh_base::AlertDialog) and returns
+/// `true` only when the destructive action is confirmed.
+pub async fn ui_confirm_destructive(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    cancel_label: impl Into<SharedString>,
+    confirm_label: impl Into<SharedString>,
+) -> bool {
+    alert_dialog()
+        .title(title)
+        .description(description)
+        .close_on_escape(true)
+        .cancel("cancel", cancel_label)
+        .destructive("confirm", confirm_label)
+        .show()
+        .await
+        .is_ok_and(|res| res.action.as_deref() == Some("confirm"))
 }

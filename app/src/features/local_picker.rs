@@ -9,13 +9,24 @@ use nsh_core::AccessibilityState;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
-use crate::domain::{AppState, SharedRef};
+use crate::domain::{
+    AppState, LocalImageSort, LocalImageSortField, SharedRef, SortDirection, sort_local_images,
+};
 use crate::i18n::{format_user_error, t};
 use crate::ui::{
     BadgeTone, BannerTone, ButtonVariant, IconName, SegmentOption, UiSize, font_mono_family,
-    radius_inset, surface_active, theme, ui_badge, ui_banner, ui_button, ui_dialog, ui_empty_state,
-    ui_icon_button, ui_search_input_with_escape, ui_segmented, ui_skeleton,
+    radius_inset, surface_active, theme, ui_badge, ui_banner, ui_button, ui_context_menu,
+    ui_dialog, ui_empty_state, ui_icon_button, ui_menu_item, ui_menu_separator,
+    ui_search_input_with_escape, ui_segmented, ui_skeleton, ui_spinner, ui_table_sort_header,
 };
+
+fn runtime_label_key(runtime: LocalRuntime) -> &'static str {
+    match runtime {
+        LocalRuntime::Docker => "local.docker",
+        LocalRuntime::Podman => "local.podman",
+        LocalRuntime::Container => "local.container",
+    }
+}
 
 fn switch_runtime_label_key(runtime: LocalRuntime) -> &'static str {
     match runtime {
@@ -25,12 +36,16 @@ fn switch_runtime_label_key(runtime: LocalRuntime) -> &'static str {
     }
 }
 
-fn other_runtimes(current: LocalRuntime) -> [LocalRuntime; 2] {
-    match current {
-        LocalRuntime::Docker => [LocalRuntime::Container, LocalRuntime::Podman],
-        LocalRuntime::Podman => [LocalRuntime::Docker, LocalRuntime::Container],
-        LocalRuntime::Container => [LocalRuntime::Docker, LocalRuntime::Podman],
-    }
+fn other_runtimes(current: LocalRuntime, order: [LocalRuntime; 3]) -> [LocalRuntime; 2] {
+    let mut iter = order.into_iter().filter(|&rt| rt != current);
+    let first = iter.next().unwrap_or(LocalRuntime::Docker);
+    let second = iter.next().unwrap_or(LocalRuntime::Podman);
+    [first, second]
+}
+
+fn column_sort_asc(sort: Option<LocalImageSort>, field: LocalImageSortField) -> Option<bool> {
+    let active = sort?;
+    (active.field == field).then_some(active.dir == SortDirection::Asc)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,14 +129,20 @@ fn picker_body(state: AppState) -> impl IntoElement {
     });
 
     let filter_sig = state.local_filter;
+    let sort_sig = state.local_sort;
     let images_sig = state.local_images;
     let loading_sig = state.local_loading;
     let error_sig = state.local_error;
+    let action_err_sig = state.local_action_error;
+    let deleting_sig = state.local_deleting_ref;
+    let runtime_order_sig = state.local_runtime_order;
+    let local_runtime_sig = state.local_runtime;
     let selected_ref = state.local_selected_ref;
 
     let filtered_rows: Memo<SharedRef<Vec<LocalContainerImage>>> = computed(move || {
         let keyword = filter_sig.get().trim().to_ascii_lowercase();
-        let filtered: Vec<LocalContainerImage> = images_sig
+        let sort = sort_sig.get();
+        let mut filtered: Vec<LocalContainerImage> = images_sig
             .get()
             .into_iter()
             .filter(|img| {
@@ -131,6 +152,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                     || img.id.to_ascii_lowercase().contains(&keyword)
             })
             .collect();
+        sort_local_images(&mut filtered, sort);
         SharedRef::new(filtered)
     });
 
@@ -198,8 +220,17 @@ fn picker_body(state: AppState) -> impl IntoElement {
         on_key_with("space", act_opts, move |_| {
             space_state.analyze_selected_local_image();
         });
+        let backspace_state = act_state.clone();
+        on_key_with("backspace", act_opts, move |_| {
+            backspace_state.request_delete_selected_local_image();
+        });
+        let delete_state = act_state.clone();
+        on_key_with("delete", act_opts, move |_| {
+            delete_state.request_delete_selected_local_image();
+        });
     });
 
+    let dismiss_err_state = state.clone();
     let list_state = state;
 
     view()
@@ -210,23 +241,25 @@ fn picker_body(state: AppState) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(ui_segmented(
-                    vec![
-                        SegmentOption::new(LocalRuntime::Docker, move || {
-                            SharedString::from(t(lang.get(), "local.docker"))
-                        }),
-                        SegmentOption::new(LocalRuntime::Podman, move || {
-                            SharedString::from(t(lang.get(), "local.podman"))
-                        }),
-                        SegmentOption::new(LocalRuntime::Container, move || {
-                            SharedString::from(t(lang.get(), "local.container"))
-                        }),
-                    ],
-                    list_state.local_runtime,
-                    UiSize::Sm,
-                    "Container runtime",
-                    move |next| rt_state.set_local_runtime(next),
-                ))
+                .child(dynamic(move || {
+                    let order = runtime_order_sig.get();
+                    let change_state = rt_state.clone();
+                    ui_segmented(
+                        order
+                            .into_iter()
+                            .map(|rt| {
+                                let key = runtime_label_key(rt);
+                                SegmentOption::new(rt, move || {
+                                    SharedString::from(t(lang.get(), key))
+                                })
+                            })
+                            .collect(),
+                        local_runtime_sig,
+                        UiSize::Sm,
+                        "Container runtime",
+                        move |next| change_state.set_local_runtime(next),
+                    )
+                }))
                 .child(
                     view()
                         .flex_1()
@@ -256,6 +289,32 @@ fn picker_body(state: AppState) -> impl IntoElement {
                     move || refresh_state.refresh_local_images(),
                 )),
         )
+        .child(when(
+            move || action_err_sig.get().is_some(),
+            move || {
+                let dismiss_state = dismiss_err_state.clone();
+                ui_banner(
+                    BannerTone::Danger,
+                    move || {
+                        let raw = action_err_sig.get().unwrap_or_default();
+                        SharedString::from(format_user_error(lang.get(), &raw))
+                    },
+                    Some(
+                        ui_icon_button(
+                            IconName::Close,
+                            "Dismiss error",
+                            Some(move || SharedString::from(t(lang.get(), "common.close"))),
+                            ButtonVariant::Ghost,
+                            UiSize::Xs,
+                            false,
+                            false,
+                            move || dismiss_state.dismiss_local_action_error(),
+                        )
+                        .into_element(),
+                    ),
+                )
+            },
+        ))
         .child(
             view()
                 .h(px(300.0))
@@ -282,6 +341,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                         .into_element(),
                     PickerViewState::Error => {
                         let current_rt = list_state.local_runtime.get();
+                        let rt_order = runtime_order_sig.get();
                         let file_state = list_state.clone();
                         let folder_state = list_state.clone();
 
@@ -315,8 +375,9 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                 .items_center()
                                                 .gap_2()
                                                 .children(
-                                                    other_runtimes(current_rt).into_iter().map(
-                                                        |alt| {
+                                                    other_runtimes(current_rt, rt_order)
+                                                        .into_iter()
+                                                        .map(|alt| {
                                                             let switch_state = list_state.clone();
                                                             let key = switch_runtime_label_key(alt);
                                                             ui_button(
@@ -336,8 +397,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                                         .set_local_runtime(alt)
                                                                 },
                                                             )
-                                                        },
-                                                    ),
+                                                        }),
                                                 )
                                                 .child(ui_button(
                                                     move || {
@@ -436,6 +496,10 @@ fn picker_body(state: AppState) -> impl IntoElement {
                             .into_element()
                     }
                     PickerViewState::List => {
+                        let repo_sort_state = list_state.clone();
+                        let id_sort_state = list_state.clone();
+                        let created_sort_state = list_state.clone();
+                        let size_sort_state = list_state.clone();
                         let row_state = list_state.clone();
 
                         view()
@@ -452,36 +516,83 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                     .bg(move || theme().muted)
                                     .border_b_1()
                                     .border_color(move || theme().border)
-                                    .child(
-                                        text(move || t(lang.get(), "local.col_repo"))
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(move || theme().muted_foreground),
-                                    )
-                                    .child(
-                                        text(move || t(lang.get(), "local.col_id"))
-                                            .w(px(108.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(move || theme().muted_foreground),
-                                    )
-                                    .child(
-                                        text(move || t(lang.get(), "local.col_created"))
-                                            .w(px(110.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(move || theme().muted_foreground),
-                                    )
-                                    .child(
-                                        text(move || t(lang.get(), "local.col_size"))
-                                            .w(px(76.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_right()
-                                            .text_color(move || theme().muted_foreground),
-                                    ),
+                                    .child(view().flex_1().min_w(px(0.0)).h_full().child(
+                                        ui_table_sort_header(
+                                            move || {
+                                                SharedString::from(t(lang.get(), "local.col_repo"))
+                                            },
+                                            move || {
+                                                column_sort_asc(
+                                                    sort_sig.get(),
+                                                    LocalImageSortField::Repository,
+                                                )
+                                            },
+                                            false,
+                                            move || {
+                                                repo_sort_state.toggle_local_sort(
+                                                    LocalImageSortField::Repository,
+                                                )
+                                            },
+                                        ),
+                                    ))
+                                    .child(view().w(px(108.0)).h_full().flex_shrink_0().child(
+                                        ui_table_sort_header(
+                                            move || {
+                                                SharedString::from(t(lang.get(), "local.col_id"))
+                                            },
+                                            move || {
+                                                column_sort_asc(
+                                                    sort_sig.get(),
+                                                    LocalImageSortField::Id,
+                                                )
+                                            },
+                                            false,
+                                            move || {
+                                                id_sort_state
+                                                    .toggle_local_sort(LocalImageSortField::Id)
+                                            },
+                                        ),
+                                    ))
+                                    .child(view().w(px(114.0)).h_full().flex_shrink_0().child(
+                                        ui_table_sort_header(
+                                            move || {
+                                                SharedString::from(t(
+                                                    lang.get(),
+                                                    "local.col_created",
+                                                ))
+                                            },
+                                            move || {
+                                                column_sort_asc(
+                                                    sort_sig.get(),
+                                                    LocalImageSortField::Created,
+                                                )
+                                            },
+                                            false,
+                                            move || {
+                                                created_sort_state
+                                                    .toggle_local_sort(LocalImageSortField::Created)
+                                            },
+                                        ),
+                                    ))
+                                    .child(view().w(px(78.0)).h_full().flex_shrink_0().child(
+                                        ui_table_sort_header(
+                                            move || {
+                                                SharedString::from(t(lang.get(), "local.col_size"))
+                                            },
+                                            move || {
+                                                column_sort_asc(
+                                                    sort_sig.get(),
+                                                    LocalImageSortField::Size,
+                                                )
+                                            },
+                                            true,
+                                            move || {
+                                                size_sort_state
+                                                    .toggle_local_sort(LocalImageSortField::Size)
+                                            },
+                                        ),
+                                    ))
+                                    .child(view().w(px(26.0)).flex_shrink_0()),
                             )
                             .child(
                                 virtual_list(
@@ -490,11 +601,14 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                         let click_state = row_state.clone();
                                         let focus_state = row_state.clone();
                                         let key_state = row_state.clone();
+                                        let trash_state = row_state.clone();
+                                        let ctx_analyze_state = row_state.clone();
+                                        let ctx_delete_state = row_state.clone();
 
-                                        view()
-                                            .w_full()
-                                            .h(px(32.0))
-                                            .px_3()
+                                        let row_main = view()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .h_full()
                                             .flex_row()
                                             .items_center()
                                             .gap_2()
@@ -512,27 +626,10 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                     ..AccessibilityState::default()
                                                 }
                                             })
-                                            .selected(|s| s.bg(surface_active))
                                             .focus_visible(|s| {
                                                 s.outline(px(2.0))
                                                     .outline_color(move || theme().ring)
                                             })
-                                            .border_b_1()
-                                            .border_color(move || theme().border.opacity(0.45))
-                                            .bg(move || {
-                                                let row_ref = filtered_rows.with(|r| {
-                                                    r.get(at.index())
-                                                        .map(LocalContainerImage::reference)
-                                                });
-                                                if row_ref.is_some()
-                                                    && row_ref == selected_ref.get()
-                                                {
-                                                    surface_active()
-                                                } else {
-                                                    theme().card
-                                                }
-                                            })
-                                            .hover(|s| s.bg(move || theme().accent))
                                             .on_focus(move || {
                                                 if let Some(reference) = filtered_rows
                                                     .with_untracked(|r| {
@@ -566,6 +663,26 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                             .set(Some(reference));
                                                     }
                                                     key_state.analyze_selected_local_image();
+                                                } else if matches!(
+                                                    ev.key.as_str(),
+                                                    "Backspace" | "Delete"
+                                                ) {
+                                                    if key_state
+                                                        .local_selected_ref
+                                                        .get_untracked()
+                                                        .is_none()
+                                                        && let Some(reference) =
+                                                            filtered_rows.with(|r| {
+                                                                r.get(at.index()).map(
+                                                                    LocalContainerImage::reference,
+                                                                )
+                                                            })
+                                                    {
+                                                        key_state
+                                                            .local_selected_ref
+                                                            .set(Some(reference));
+                                                    }
+                                                    key_state.request_delete_selected_local_image();
                                                 }
                                             })
                                             .on_press(move || {
@@ -583,18 +700,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                     filtered_rows.with(|r| {
                                                         r.get(at.index()).map_or_else(
                                                             String::new,
-                                                            |item| {
-                                                                if item.tag.is_empty()
-                                                                    || item.tag == "<none>"
-                                                                {
-                                                                    item.repository.clone()
-                                                                } else {
-                                                                    format!(
-                                                                        "{}:{}",
-                                                                        item.repository, item.tag
-                                                                    )
-                                                                }
-                                                            },
+                                                            LocalContainerImage::display_name,
                                                         )
                                                     })
                                                 })
@@ -605,21 +711,25 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                 .number_of_lines(1)
                                                 .text_color(move || theme().foreground),
                                             )
-                                            .child(view().w(px(108.0)).items_start().child(
-                                                ui_badge(
-                                                    move || {
-                                                        SharedString::from(filtered_rows.with(
-                                                            |r| {
-                                                                r.get(at.index()).map_or_else(
-                                                                    String::new,
-                                                                    |item| item.id.clone(),
-                                                                )
-                                                            },
-                                                        ))
-                                                    },
-                                                    BadgeTone::Neutral,
-                                                ),
-                                            ))
+                                            .child(
+                                                view()
+                                                    .w(px(108.0))
+                                                    .flex_shrink_0()
+                                                    .items_start()
+                                                    .child(ui_badge(
+                                                        move || {
+                                                            SharedString::from(filtered_rows.with(
+                                                                |r| {
+                                                                    r.get(at.index()).map_or_else(
+                                                                        String::new,
+                                                                        |item| item.id.clone(),
+                                                                    )
+                                                                },
+                                                            ))
+                                                        },
+                                                        BadgeTone::Neutral,
+                                                    )),
+                                            )
                                             .child(
                                                 text(move || {
                                                     filtered_rows.with(|r| {
@@ -629,7 +739,8 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                             })
                                                     })
                                                 })
-                                                .w(px(110.0))
+                                                .w(px(114.0))
+                                                .flex_shrink_0()
                                                 .text_xs()
                                                 .number_of_lines(1)
                                                 .text_color(move || theme().muted_foreground),
@@ -643,13 +754,152 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                             })
                                                     })
                                                 })
-                                                .w(px(76.0))
+                                                .w(px(78.0))
+                                                .flex_shrink_0()
                                                 .text_xs()
                                                 .font_family(font_mono_family())
                                                 .tabular_nums()
                                                 .text_right()
                                                 .text_color(move || theme().foreground),
-                                            )
+                                            );
+
+                                        let trailing_action = view()
+                                            .w(px(26.0))
+                                            .flex_shrink_0()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(dynamic(move || {
+                                                let row_ref = filtered_rows.with(|r| {
+                                                    r.get(at.index())
+                                                        .map(LocalContainerImage::reference)
+                                                });
+                                                let is_this_deleting = row_ref.is_some()
+                                                    && row_ref.as_deref()
+                                                        == deleting_sig.get().as_deref();
+                                                if is_this_deleting {
+                                                    ui_spinner(px(14.0), move || {
+                                                        theme().muted_foreground
+                                                    })
+                                                    .into_element()
+                                                } else {
+                                                    let row_trash_state = trash_state.clone();
+                                                    ui_icon_button(
+                                                        IconName::Trash,
+                                                        "Delete local image",
+                                                        None::<SharedString>,
+                                                        ButtonVariant::Ghost,
+                                                        UiSize::Xs,
+                                                        false,
+                                                        move || deleting_sig.get().is_some(),
+                                                        move || {
+                                                            if let Some(img) =
+                                                                filtered_rows.with(|r| {
+                                                                    r.get(at.index()).cloned()
+                                                                })
+                                                            {
+                                                                row_trash_state
+                                                                    .request_delete_local_image(
+                                                                        img,
+                                                                    );
+                                                            }
+                                                        },
+                                                    )
+                                                    .into_element()
+                                                }
+                                            }));
+
+                                        let row_view = view()
+                                            .w_full()
+                                            .h(px(32.0))
+                                            .px_3()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .border_b_1()
+                                            .border_color(move || theme().border.opacity(0.45))
+                                            .bg(move || {
+                                                let row_ref = filtered_rows.with(|r| {
+                                                    r.get(at.index())
+                                                        .map(LocalContainerImage::reference)
+                                                });
+                                                if row_ref.is_some()
+                                                    && row_ref == selected_ref.get()
+                                                {
+                                                    surface_active()
+                                                } else {
+                                                    theme().card
+                                                }
+                                            })
+                                            .hover(|s| s.bg(move || theme().accent))
+                                            .child(row_main)
+                                            .child(trailing_action);
+
+                                        ui_context_menu(row_view, |_| {})
+                                            .child(ui_menu_item(
+                                                move || {
+                                                    SharedString::from(t(
+                                                        lang.get(),
+                                                        "local.ctx_analyze",
+                                                    ))
+                                                },
+                                                Some(IconName::Search),
+                                                None,
+                                                move || deleting_sig.get().is_some(),
+                                                move || {
+                                                    if let Some(reference) =
+                                                        filtered_rows.with(|r| {
+                                                            r.get(at.index())
+                                                                .map(LocalContainerImage::reference)
+                                                        })
+                                                    {
+                                                        ctx_analyze_state
+                                                            .local_picker_open
+                                                            .set(false);
+                                                        ctx_analyze_state.analyze(reference, None);
+                                                    }
+                                                },
+                                            ))
+                                            .child(ui_menu_item(
+                                                move || {
+                                                    SharedString::from(t(
+                                                        lang.get(),
+                                                        "local.ctx_copy_ref",
+                                                    ))
+                                                },
+                                                Some(IconName::Copy),
+                                                None,
+                                                false,
+                                                move || {
+                                                    if let Some(reference) =
+                                                        filtered_rows.with(|r| {
+                                                            r.get(at.index())
+                                                                .map(LocalContainerImage::reference)
+                                                        })
+                                                    {
+                                                        drop(set_clipboard(reference));
+                                                    }
+                                                },
+                                            ))
+                                            .child(ui_menu_separator())
+                                            .child(ui_menu_item(
+                                                move || {
+                                                    SharedString::from(t(
+                                                        lang.get(),
+                                                        "local.ctx_delete",
+                                                    ))
+                                                },
+                                                Some(IconName::Trash),
+                                                None,
+                                                move || deleting_sig.get().is_some(),
+                                                move || {
+                                                    if let Some(img) = filtered_rows
+                                                        .with(|r| r.get(at.index()).cloned())
+                                                    {
+                                                        ctx_delete_state
+                                                            .request_delete_local_image(img);
+                                                    }
+                                                },
+                                            ))
                                     },
                                 )
                                 .element_ref(&list_ref)
@@ -673,8 +923,10 @@ fn picker_body(state: AppState) -> impl IntoElement {
 fn picker_footer(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let cancel_state = state.clone();
+    let delete_state = state.clone();
     let analyze_state = state.clone();
-    let no_selection = move || state.local_selected_ref.get().is_none();
+    let sel_sig = state.local_selected_ref;
+    let del_sig = state.local_deleting_ref;
 
     view()
         .w_full()
@@ -696,6 +948,15 @@ fn picker_footer(state: AppState) -> impl IntoElement {
                 .flex_shrink_0()
                 .gap_2()
                 .child(ui_button(
+                    move || SharedString::from(t(lang.get(), "local.delete_btn")),
+                    ButtonVariant::Outline,
+                    UiSize::Md,
+                    Some(IconName::Trash),
+                    move || sel_sig.get().is_none() || del_sig.get().is_some(),
+                    false,
+                    move || delete_state.request_delete_selected_local_image(),
+                ))
+                .child(ui_button(
                     move || SharedString::from(t(lang.get(), "landing.cancel")),
                     ButtonVariant::Ghost,
                     UiSize::Md,
@@ -709,7 +970,7 @@ fn picker_footer(state: AppState) -> impl IntoElement {
                     ButtonVariant::Primary,
                     UiSize::Md,
                     Some(IconName::Search),
-                    no_selection,
+                    move || sel_sig.get().is_none() || del_sig.get().is_some(),
                     false,
                     move || analyze_state.analyze_selected_local_image(),
                 )),
@@ -718,15 +979,24 @@ fn picker_footer(state: AppState) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
     use nsh_engine::{EngineConfig, Environment, Idiom, Os, Points, Size};
-    use nsh_testing::{Headless, windowed_root};
+    use nsh_testing::{DialogAnswer, Headless, Screen, windowed_root};
 
     use super::*;
     use crate::domain::DivingService;
     use crate::ui::app_tokens;
+
+    fn item_origin(screen: &Screen, selector: &str) -> Option<(Points, Points)> {
+        screen
+            .layout(selector)
+            .ok()
+            .flatten()
+            .map(|layout| (layout.bounds.origin.x, layout.bounds.origin.y))
+    }
 
     #[component]
     fn LocalPickerHarness() -> impl IntoElement {
@@ -739,6 +1009,8 @@ mod tests {
                 id: format!("abc{i:09}"),
                 created: "2 days ago".to_owned(),
                 size: format!("{} MB", i + 10),
+                size_bytes: None,
+                created_at: None,
             })
             .collect();
         state.local_images.set(images);
@@ -812,6 +1084,8 @@ mod tests {
                 id: format!("def{i:09}"),
                 created: "today".to_owned(),
                 size: "12 MB".to_owned(),
+                size_bytes: None,
+                created_at: None,
             })
             .collect();
         state.local_images.set(images);
@@ -823,6 +1097,7 @@ mod tests {
         state.local_picker_open.set(true);
 
         let pending = state.pending_image;
+        let image_input = state.image_input;
         let sel = state.local_selected_ref;
         view()
             .flex_col()
@@ -830,7 +1105,7 @@ mod tests {
                 format!(
                     "sel={};analyzed={}",
                     sel.get().unwrap_or_default(),
-                    pending.get().unwrap_or_default()
+                    pending.get().unwrap_or_else(|| image_input.get())
                 )
             }))
             .child(local_picker_dialog(state))
@@ -971,5 +1246,376 @@ mod tests {
             .expect("select Container segment option");
         app.wait_for_within("rt=Container", Duration::from_secs(3))
             .expect("runtime switched to Container from segmented control");
+    }
+
+    #[component]
+    fn LocalPickerSortHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.local_runtime_order.set([
+            LocalRuntime::Container,
+            LocalRuntime::Docker,
+            LocalRuntime::Podman,
+        ]);
+        state.local_runtime.set(LocalRuntime::Container);
+        state.local_images.set(vec![
+            LocalContainerImage {
+                runtime: LocalRuntime::Container,
+                repository: "alpha/small".to_owned(),
+                tag: "1.0".to_owned(),
+                id: "111111111111".to_owned(),
+                created: "2026-07-01 10:00".to_owned(),
+                size: "45.0 MiB".to_owned(),
+                size_bytes: None,
+                created_at: None,
+            },
+            LocalContainerImage {
+                runtime: LocalRuntime::Container,
+                repository: "zeta/big".to_owned(),
+                tag: "2.0".to_owned(),
+                id: "222222222222".to_owned(),
+                created: "2026-10-01 10:00".to_owned(),
+                size: "250.0 MiB".to_owned(),
+                size_bytes: None,
+                created_at: None,
+            },
+            LocalContainerImage {
+                runtime: LocalRuntime::Container,
+                repository: "beta/mid".to_owned(),
+                tag: "1.5".to_owned(),
+                id: "333333333333".to_owned(),
+                created: "2026-08-15 10:00".to_owned(),
+                size: "120.0 MiB".to_owned(),
+                size_bytes: None,
+                created_at: None,
+            },
+        ]);
+        state
+            .local_selected_ref
+            .set(Some("container://beta/mid:1.5".to_owned()));
+        state.local_loading.set(false);
+        state.local_error.set(None);
+        state.local_picker_open.set(true);
+
+        let reorder_state = state.clone();
+        let sel_sig = state.local_selected_ref;
+        view()
+            .flex_col()
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(text(move || {
+                        format!("sel={}", sel_sig.get().unwrap_or_default())
+                    }))
+                    .child(ui_button(
+                        "ReorderPodmanFirst",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            reorder_state.local_runtime_order.set([
+                                LocalRuntime::Podman,
+                                LocalRuntime::Container,
+                                LocalRuntime::Docker,
+                            ]);
+                        },
+                    )),
+            )
+            .child(local_picker_dialog(state))
+    }
+
+    #[test]
+    fn local_picker_sorts_columns_and_orders_installed_runtimes() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<LocalPickerSortHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start local picker sort harness");
+        app.wait_for_within("alpha/small:1.0", Duration::from_secs(3))
+            .expect("initial rows rendered");
+
+        // Verify installed-first segment horizontal order: Container -> Docker -> Podman.
+        let container_x = item_origin(app.screen(), "Container")
+            .expect("Container origin")
+            .0;
+        let docker_x = item_origin(app.screen(), "Docker")
+            .expect("Docker origin")
+            .0;
+        let podman_x = item_origin(app.screen(), "Podman")
+            .expect("Podman origin")
+            .0;
+        assert!(container_x < docker_x);
+        assert!(docker_x < podman_x);
+
+        // Verify dynamic order updates cleanly: Podman -> Container -> Docker.
+        app.press("ReorderPodmanFirst")
+            .expect("reorder Podman first");
+        app.wait_until(
+            "Podman segment moved before Container",
+            Duration::from_secs(2),
+            |s| {
+                matches!(
+                    (
+                        item_origin(s, "Podman"),
+                        item_origin(s, "Container"),
+                        item_origin(s, "Docker"),
+                    ),
+                    (Some((px, _)), Some((cx, _)), Some((dx, _))) if px < cx && cx < dx
+                )
+            },
+        )
+        .expect("segmented control updated order");
+
+        // Initial unsorted order: alpha -> zeta -> beta.
+        let alpha_y0 = item_origin(app.screen(), "alpha/small:1.0")
+            .expect("alpha y0")
+            .1;
+        let zeta_y0 = item_origin(app.screen(), "zeta/big:2.0")
+            .expect("zeta y0")
+            .1;
+        assert!(alpha_y0 < zeta_y0);
+
+        // 1st click on Size -> descending (250 MiB > 120 MiB > 45 MiB), keeping selected ref.
+        app.press("Size").expect("sort Size descending");
+        app.wait_for_within("↓", Duration::from_secs(2))
+            .expect("descending arrow visible");
+        app.wait_until("Size descending row order", Duration::from_secs(2), |s| {
+            matches!(
+                (
+                    item_origin(s, "zeta/big:2.0"),
+                    item_origin(s, "beta/mid:1.5"),
+                    item_origin(s, "alpha/small:1.0"),
+                ),
+                (Some((_, zy)), Some((_, by)), Some((_, ay))) if zy < by && by < ay
+            )
+        })
+        .expect("rows sorted largest first");
+        assert!(app.shows("sel=container://beta/mid:1.5"));
+
+        // 2nd click on Size -> ascending (45 MiB < 120 MiB < 250 MiB).
+        app.press("Size").expect("sort Size ascending");
+        app.wait_for_within("↑", Duration::from_secs(2))
+            .expect("ascending arrow visible");
+        app.wait_until("Size ascending row order", Duration::from_secs(2), |s| {
+            matches!(
+                (
+                    item_origin(s, "alpha/small:1.0"),
+                    item_origin(s, "beta/mid:1.5"),
+                    item_origin(s, "zeta/big:2.0"),
+                ),
+                (Some((_, ay)), Some((_, by)), Some((_, zy))) if ay < by && by < zy
+            )
+        })
+        .expect("rows sorted smallest first");
+        assert!(app.shows("sel=container://beta/mid:1.5"));
+
+        // 3rd click on Size -> clears sort back to original CLI order.
+        app.press("Size").expect("clear Size sort");
+        app.wait_for_gone("↑", Duration::from_secs(2))
+            .expect("sort indicator cleared");
+        app.wait_until(
+            "unsorted initial row order restored",
+            Duration::from_secs(2),
+            |s| {
+                matches!(
+                    (
+                        item_origin(s, "alpha/small:1.0"),
+                        item_origin(s, "zeta/big:2.0"),
+                        item_origin(s, "beta/mid:1.5"),
+                    ),
+                    (Some((_, ay)), Some((_, zy)), Some((_, by))) if ay < zy && zy < by
+                )
+            },
+        )
+        .expect("initial CLI order restored");
+
+        // Created column sorts newest first by parsed timestamp.
+        app.press("Created").expect("sort Created descending");
+        app.wait_for_within("↓", Duration::from_secs(2))
+            .expect("Created descending arrow visible");
+        app.wait_until(
+            "Created descending newest first",
+            Duration::from_secs(2),
+            |s| {
+                matches!(
+                    (
+                        item_origin(s, "zeta/big:2.0"),
+                        item_origin(s, "beta/mid:1.5"),
+                        item_origin(s, "alpha/small:1.0"),
+                    ),
+                    (Some((_, zy)), Some((_, by)), Some((_, ay))) if zy < by && by < ay
+                )
+            },
+        )
+        .expect("Created column sorted newest first");
+    }
+
+    #[component]
+    fn LocalPickerDeleteHarness() -> impl IntoElement {
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hook_log = Arc::clone(&log);
+        let service = DivingService::new().with_local_remove_hook(move |rt, target, id, force| {
+            if let Ok(mut entries) = hook_log.lock() {
+                entries.push(format!("{rt:?}:{target}:{id}:force={force}"));
+            }
+            if target == "in-use:2.0" && !force {
+                return Err("docker image rm in-use:2.0 failed: conflict: unable to remove repository reference \"in-use:2.0\" (must force) - container web-1 is using its referenced image".to_owned());
+            }
+            Ok(())
+        });
+
+        let state = AppState::new(service);
+        state.local_runtime_order.set([
+            LocalRuntime::Docker,
+            LocalRuntime::Podman,
+            LocalRuntime::Container,
+        ]);
+        state.local_runtime.set(LocalRuntime::Docker);
+        state.local_images.set(vec![
+            LocalContainerImage {
+                runtime: LocalRuntime::Docker,
+                repository: "unused".to_owned(),
+                tag: "1.0".to_owned(),
+                id: "111111111111".to_owned(),
+                created: "today".to_owned(),
+                size: "12 MiB".to_owned(),
+                size_bytes: Some(12_582_912),
+                created_at: None,
+            },
+            LocalContainerImage {
+                runtime: LocalRuntime::Docker,
+                repository: "in-use".to_owned(),
+                tag: "2.0".to_owned(),
+                id: "222222222222".to_owned(),
+                created: "today".to_owned(),
+                size: "34 MiB".to_owned(),
+                size_bytes: Some(35_651_584),
+                created_at: None,
+            },
+        ]);
+        state
+            .local_selected_ref
+            .set(Some("docker://unused:1.0".to_owned()));
+        state.local_loading.set(false);
+        state.local_error.set(None);
+        state.local_picker_open.set(true);
+
+        let sel_sig = state.local_selected_ref;
+        let del_sig = state.local_deleting_ref;
+        let imgs_sig = state.local_images;
+        let calls_sig = signal(String::new());
+        effect(move || {
+            let _ = del_sig.get();
+            let _ = imgs_sig.get();
+            if let Ok(entries) = log.lock() {
+                calls_sig.set(entries.join("|"));
+            }
+        });
+
+        view()
+            .flex_col()
+            .child(text(move || {
+                format!(
+                    "sel={};calls={}",
+                    sel_sig.get().unwrap_or_default(),
+                    calls_sig.get()
+                )
+            }))
+            .child(local_picker_dialog(state))
+    }
+
+    #[test]
+    fn local_picker_deletes_single_image_and_supports_force_delete_on_in_use() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(windowed_root::<LocalPickerDeleteHarness>().tokens(app_tokens()))
+        };
+        let mut app = Headless::start(config).expect("start local picker delete harness");
+        app.answer_dialogs_myself();
+        app.wait_for_within("text:unused:1.0", Duration::from_secs(3))
+            .expect("initial images rendered");
+        assert!(app.shows("sel=docker://unused:1.0;calls="));
+
+        // 1. Cancel confirmation keeps the image and runs no CLI command.
+        app.press("Delete…").expect("click footer Delete… button");
+        app.wait_until("delete confirm dialog shown", Duration::from_secs(2), |s| {
+            s.dialogs().len() == 1
+        })
+        .expect("first confirmation dialog appeared");
+        assert_eq!(
+            app.pending_dialog().and_then(|d| d.title.as_deref()),
+            Some("Delete “unused:1.0”?")
+        );
+        app.answer_dialog(DialogAnswer::Press("Cancel".to_owned()))
+            .expect("cancel image delete");
+        assert!(app.shows("unused:1.0"));
+        assert!(app.shows("sel=docker://unused:1.0;calls="));
+
+        // 2. Confirm normal delete removes unused:1.0 and advances selection to neighbor in-use:2.0.
+        app.press("Delete…").expect("click Delete… again");
+        app.wait_until(
+            "second delete confirm dialog shown",
+            Duration::from_secs(2),
+            |s| s.dialogs().len() == 2,
+        )
+        .expect("second confirmation dialog appeared");
+        app.answer_dialog(DialogAnswer::Press("Delete".to_owned()))
+            .expect("confirm normal delete");
+        app.wait_for_gone("text:unused:1.0", Duration::from_secs(3))
+            .expect("unused:1.0 deleted");
+        app.wait_for_within(
+            "sel=docker://in-use:2.0;calls=Docker:unused:1.0:111111111111:force=false",
+            Duration::from_secs(3),
+        )
+        .expect("neighbor selected and normal remove recorded");
+
+        // 3. In-use image triggers secondary Force delete confirmation and succeeds with --force.
+        app.press("Delete…")
+            .expect("click Delete… on selected in-use:2.0");
+        app.wait_until(
+            "in-use normal confirmation dialog shown",
+            Duration::from_secs(2),
+            |s| s.dialogs().len() == 3,
+        )
+        .expect("third confirmation dialog appeared");
+        assert_eq!(
+            app.pending_dialog().and_then(|d| d.title.as_deref()),
+            Some("Delete “in-use:2.0”?")
+        );
+        app.answer_dialog(DialogAnswer::Press("Delete".to_owned()))
+            .expect("attempt non-force delete on in-use:2.0");
+
+        app.wait_until(
+            "force delete confirmation dialog shown",
+            Duration::from_secs(3),
+            |s| s.dialogs().len() == 4,
+        )
+        .expect("force delete confirmation dialog appeared");
+        assert_eq!(
+            app.pending_dialog().and_then(|d| d.title.as_deref()),
+            Some("Force delete “in-use:2.0”?")
+        );
+        app.answer_dialog(DialogAnswer::Press("Force delete".to_owned()))
+            .expect("confirm force delete");
+
+        app.wait_for_gone("text:in-use:2.0", Duration::from_secs(3))
+            .expect("in-use:2.0 removed after force delete");
+        app.wait_for_within(
+            "sel=;calls=Docker:unused:1.0:111111111111:force=false|Docker:in-use:2.0:222222222222:force=false|Docker:in-use:2.0:222222222222:force=true",
+            Duration::from_secs(3),
+        )
+        .expect("force delete call recorded");
     }
 }

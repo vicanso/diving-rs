@@ -7,13 +7,15 @@ use super::oci_image::{
 use crate::error::{Error, IoSnafu, JsonSnafu, Result};
 use crate::tl_info;
 use bytesize::ByteSize;
-use chrono::DateTime;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use home::home_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use tokio::process::Command;
@@ -170,8 +172,7 @@ pub(crate) fn read_oci_layout(index: &TarIndex, arch: &str) -> Result<LocalImage
     })
 }
 
-fn local_cli_command(cli: &str) -> Command {
-    let mut cmd = Command::new(cli);
+fn local_cli_search_paths() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = env::var_os("PATH")
         .map(|raw| env::split_paths(&raw).collect())
         .unwrap_or_default();
@@ -188,6 +189,50 @@ fn local_cli_command(cli: &str) -> Command {
             paths.push(dir);
         }
     }
+    paths
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn is_executable_in_dirs(cli: &str, dirs: &[PathBuf]) -> bool {
+    let exact_hit = dirs.iter().any(|dir| is_executable_file(&dir.join(cli)));
+    #[cfg(windows)]
+    {
+        if exact_hit {
+            return true;
+        }
+        if Path::new(cli).extension().is_none() {
+            let pathext = env::var_os("PATHEXT")
+                .and_then(|v| v.into_string().ok())
+                .unwrap_or_else(|| ".EXE;.CMD;.BAT;.COM".to_owned());
+            for dir in dirs {
+                for ext in pathext.split(';').filter(|e| !e.trim().is_empty()) {
+                    let ext = ext.trim().trim_start_matches('.');
+                    if dir.join(format!("{cli}.{ext}")).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        exact_hit
+    }
+}
+
+fn local_cli_command(cli: &str) -> Command {
+    let mut cmd = Command::new(cli);
+    let paths = local_cli_search_paths();
     if let Ok(joined) = env::join_paths(&paths) {
         cmd.env("PATH", joined);
     }
@@ -277,6 +322,8 @@ pub enum LocalRuntime {
 }
 
 impl LocalRuntime {
+    pub const ALL: [Self; 3] = [Self::Docker, Self::Podman, Self::Container];
+
     pub fn cli(self) -> &'static str {
         match self {
             Self::Docker => "docker",
@@ -292,6 +339,31 @@ impl LocalRuntime {
             Self::Container => "container://",
         }
     }
+
+    /// Returns `true` when this runtime's CLI executable is present on standard search paths.
+    pub fn is_installed(self) -> bool {
+        is_executable_in_dirs(self.cli(), &local_cli_search_paths())
+    }
+
+    /// Orders runtimes with installed CLIs first while preserving `Docker, Podman, Container` order.
+    pub fn ordered_by_installed_with(mut is_installed: impl FnMut(Self) -> bool) -> [Self; 3] {
+        let mut installed = Vec::with_capacity(Self::ALL.len());
+        let mut missing = Vec::with_capacity(Self::ALL.len());
+        for rt in Self::ALL {
+            if is_installed(rt) {
+                installed.push(rt);
+            } else {
+                missing.push(rt);
+            }
+        }
+        installed.extend(missing);
+        [installed[0], installed[1], installed[2]]
+    }
+
+    /// Orders runtimes by local CLI availability on this machine.
+    pub fn ordered_by_installed() -> [Self; 3] {
+        Self::ordered_by_installed_with(Self::is_installed)
+    }
 }
 
 /// Summary of an image stored in a local Docker, Podman, or Apple Container engine.
@@ -304,9 +376,24 @@ pub struct LocalContainerImage {
     pub id: String,
     pub size: String,
     pub created: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub created_at: Option<i64>,
 }
 
 impl LocalContainerImage {
+    /// Returns the human-readable `repository:tag` label (or `id` when untagged).
+    pub fn display_name(&self) -> String {
+        if !self.repository.is_empty() && self.repository != "<none>" {
+            if !self.tag.is_empty() && self.tag != "<none>" {
+                return format!("{}:{}", self.repository, self.tag);
+            }
+            return self.repository.clone();
+        }
+        self.id.clone()
+    }
+
     /// Returns the `docker://`, `podman://`, or `container://` image reference suitable for `Analyzer::analyze`.
     pub fn reference(&self) -> String {
         let scheme = self.runtime.scheme();
@@ -320,6 +407,26 @@ impl LocalContainerImage {
             return format!("{scheme}{}", self.repository);
         }
         format!("{scheme}{}", self.id)
+    }
+
+    /// Returns the CLI argument (`repository:tag` or short `id`) without its runtime URI scheme.
+    pub fn cli_target(&self) -> String {
+        let full = self.reference();
+        full.strip_prefix(self.runtime.scheme())
+            .unwrap_or(&full)
+            .to_string()
+    }
+
+    /// Returns the exact image size in bytes when known, or parses the formatted size string.
+    pub fn effective_size_bytes(&self) -> Option<u64> {
+        self.size_bytes
+            .or_else(|| parse_human_size_bytes(&self.size))
+    }
+
+    /// Returns the Unix creation timestamp in seconds when known, or parses the display timestamp.
+    pub fn effective_created_at(&self) -> Option<i64> {
+        self.created_at
+            .or_else(|| parse_created_timestamp(&self.created))
     }
 }
 
@@ -356,6 +463,8 @@ struct PodmanImageRow {
     #[serde(default)]
     size: Option<Value>,
     #[serde(default)]
+    created: Option<i64>,
+    #[serde(default)]
     created_since: String,
     #[serde(default)]
     created_at: String,
@@ -389,15 +498,19 @@ struct ContainerVariant {
     platform: Option<OciPlatform>,
 }
 
-fn format_container_created(raw: &str) -> String {
+fn format_container_created(raw: &str) -> (String, Option<i64>) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return String::new();
+        return (String::new(), None);
     }
     if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-        return dt.format("%Y-%m-%d %H:%M").to_string();
+        return (
+            dt.format("%Y-%m-%d %H:%M").to_string(),
+            Some(dt.timestamp()),
+        );
     }
-    trimmed.to_string()
+    let ts = parse_created_timestamp(trimmed);
+    (trimmed.to_string(), ts)
 }
 
 fn normalize_container_name(raw: &str) -> &str {
@@ -408,7 +521,7 @@ fn normalize_container_name(raw: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
-fn pick_container_variant_size(variants: &[ContainerVariant]) -> String {
+fn pick_container_variant_size(variants: &[ContainerVariant]) -> (String, Option<u64>) {
     let is_real = |v: &&ContainerVariant| {
         v.platform.as_ref().is_some_and(|p| {
             !p.architecture.is_empty() && !p.architecture.eq_ignore_ascii_case("unknown")
@@ -425,10 +538,110 @@ fn pick_container_variant_size(variants: &[ContainerVariant]) -> String {
         })
         .or_else(|| variants.iter().find(is_real))
         .or_else(|| variants.first());
-    chosen
-        .and_then(|v| v.size)
+    let size_bytes = chosen.and_then(|v| v.size);
+    let formatted = size_bytes
         .map(|bytes| ByteSize::b(bytes).to_string())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    (formatted, size_bytes)
+}
+
+pub(crate) fn parse_human_size_bytes(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let split_at = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(trimmed.len());
+    let num_part = trimmed[..split_at].trim();
+    if num_part.is_empty() {
+        return None;
+    }
+    let value: f64 = num_part.parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let unit = trimmed[split_at..].trim().to_ascii_lowercase();
+    let multiplier: f64 = match unit.as_str() {
+        "" | "b" | "byte" | "bytes" => 1.0,
+        "k" | "kb" => 1_000.0,
+        "ki" | "kib" => 1024.0,
+        "m" | "mb" => 1_000_000.0,
+        "mi" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" => 1_000_000_000.0,
+        "gi" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" => 1_000_000_000_000.0,
+        "ti" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    let scaled = (value * multiplier).round();
+    if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+        return None;
+    }
+    Some(scaled as u64)
+}
+
+fn parse_relative_quantity(body: &str, now_secs: i64) -> Option<i64> {
+    let mut parts = body.split_whitespace();
+    let qty_raw = parts.next()?;
+    let unit_raw = parts.next()?;
+    let qty: i64 = match qty_raw {
+        "a" | "an" => 1,
+        other => other.parse().ok()?,
+    };
+    let unit_secs: i64 = match unit_raw.trim_end_matches('s') {
+        "second" | "sec" => 1,
+        "minute" | "min" => 60,
+        "hour" | "hr" => 3_600,
+        "day" => 86_400,
+        "week" | "wk" => 7 * 86_400,
+        "month" | "mo" => 30 * 86_400,
+        "year" | "yr" => 365 * 86_400,
+        _ => return None,
+    };
+    Some(now_secs.saturating_sub(qty.saturating_mul(unit_secs)))
+}
+
+fn parse_relative_created_ago(lower: &str, now_secs: i64) -> Option<i64> {
+    match lower {
+        "just now" | "now" | "less than a second ago" | "today" => return Some(now_secs),
+        "yesterday" => return Some(now_secs - 86_400),
+        _ => {}
+    }
+    let body = lower.strip_suffix("ago")?.trim();
+    if let Some(rest) = body.strip_prefix("about ") {
+        return parse_relative_quantity(rest.trim(), now_secs);
+    }
+    parse_relative_quantity(body, now_secs)
+}
+
+pub(crate) fn parse_created_timestamp(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.timestamp());
+    }
+    let mut tokens = trimmed.split_whitespace();
+    if let (Some(date), Some(time), Some(offset)) = (tokens.next(), tokens.next(), tokens.next()) {
+        let candidate = format!("{date} {time} {offset}");
+        if let Ok(dt) = DateTime::parse_from_str(&candidate, "%Y-%m-%d %H:%M:%S %z") {
+            return Some(dt.timestamp());
+        }
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Some(dt.and_utc().timestamp());
+        }
+    }
+    if let Some(dt) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+    {
+        return Some(dt.and_utc().timestamp());
+    }
+    parse_relative_created_ago(&trimmed.to_ascii_lowercase(), Utc::now().timestamp())
 }
 
 fn short_image_id(raw: &str) -> String {
@@ -446,14 +659,17 @@ fn split_repo_tag(name: &str) -> (String, String) {
     (trimmed.to_string(), "<none>".to_string())
 }
 
-fn format_podman_size(value: Option<&Value>) -> String {
+fn format_podman_size(value: Option<&Value>) -> (String, Option<u64>) {
     match value {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n
-            .as_u64()
-            .map(|bytes| ByteSize::b(bytes).to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
+        Some(Value::String(s)) => (s.clone(), parse_human_size_bytes(s)),
+        Some(Value::Number(n)) => {
+            let bytes = n.as_u64();
+            let text = bytes
+                .map(|b| ByteSize::b(b).to_string())
+                .unwrap_or_default();
+            (text, bytes)
+        }
+        _ => (String::new(), None),
     }
 }
 
@@ -487,10 +703,13 @@ pub fn parse_local_images_output(
                     continue;
                 }
                 let created = if row.created_since.is_empty() {
-                    row.created_at
+                    row.created_at.clone()
                 } else {
-                    row.created_since
+                    row.created_since.clone()
                 };
+                let size_bytes = parse_human_size_bytes(&row.size);
+                let created_at = parse_created_timestamp(&row.created_at)
+                    .or_else(|| parse_created_timestamp(&row.created_since));
                 images.push(LocalContainerImage {
                     runtime,
                     repository: row.repository,
@@ -498,6 +717,8 @@ pub fn parse_local_images_output(
                     id: short_image_id(&row.id),
                     size: row.size,
                     created,
+                    size_bytes,
+                    created_at,
                 });
             }
             Ok(images)
@@ -509,12 +730,16 @@ pub fn parse_local_images_output(
             let mut images = Vec::new();
             for row in rows {
                 let id = short_image_id(&row.id);
-                let size = format_podman_size(row.size.as_ref());
+                let (size, size_bytes) = format_podman_size(row.size.as_ref());
                 let created = if row.created_since.is_empty() {
-                    row.created_at
+                    row.created_at.clone()
                 } else {
-                    row.created_since
+                    row.created_since.clone()
                 };
+                let created_at = row
+                    .created
+                    .or_else(|| parse_created_timestamp(&row.created_at))
+                    .or_else(|| parse_created_timestamp(&row.created_since));
                 if !row.repository.is_empty() {
                     if is_dangling(&row.repository, &row.tag) {
                         continue;
@@ -531,6 +756,8 @@ pub fn parse_local_images_output(
                         id,
                         size,
                         created,
+                        size_bytes,
+                        created_at,
                     });
                     continue;
                 }
@@ -551,6 +778,8 @@ pub fn parse_local_images_output(
                         id: id.clone(),
                         size: size.clone(),
                         created: created.clone(),
+                        size_bytes,
+                        created_at,
                     });
                 }
             }
@@ -571,13 +800,18 @@ pub fn parse_local_images_output(
                 if is_dangling(&repository, &tag) {
                     continue;
                 }
+                let (size, size_bytes) = pick_container_variant_size(&entry.variants);
+                let (created, created_at) =
+                    format_container_created(&entry.configuration.creation_date);
                 images.push(LocalContainerImage {
                     runtime,
                     repository,
                     tag,
                     id: short_image_id(&entry.id),
-                    size: pick_container_variant_size(&entry.variants),
-                    created: format_container_created(&entry.configuration.creation_date),
+                    size,
+                    created,
+                    size_bytes,
+                    created_at,
                 });
             }
             Ok(images)
@@ -616,9 +850,167 @@ pub async fn list_local_images(runtime: LocalRuntime) -> Result<Vec<LocalContain
     parse_local_images_output(runtime, &stdout)
 }
 
+/// Returns `true` when `message` indicates an image is still used by a container or multiple tags
+/// and requires `--force` to remove.
+pub fn is_image_in_use_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "using its referenced image",
+        "image is being used by",
+        "(must force)",
+        "(must be forced)",
+        "referenced in multiple repositories",
+        "in use by a container",
+        "in use by container",
+        "currently in use",
+        "known by multiple tags",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContainerPsEntry {
+    #[serde(default)]
+    configuration: ContainerPsConfiguration,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContainerPsConfiguration {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    image: Option<ContainerPsImage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContainerPsImage {
+    #[serde(default)]
+    reference: String,
+    #[serde(default)]
+    descriptor: Option<ContainerPsDescriptor>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContainerPsDescriptor {
+    #[serde(default)]
+    digest: String,
+}
+
+fn parse_container_in_use_ids(stdout: &str, target: &str, id: &str) -> Vec<String> {
+    let Ok(entries) = serde_json::from_str::<Vec<ContainerPsEntry>>(stdout.trim()) else {
+        return Vec::new();
+    };
+    let normalized_target = normalize_container_name(target);
+    let normalized_id = short_image_id(id);
+    let mut holders = Vec::new();
+    for entry in entries {
+        let Some(img) = entry.configuration.image else {
+            continue;
+        };
+        let norm_ref = normalize_container_name(&img.reference);
+        let ref_matches = !normalized_target.is_empty() && norm_ref == normalized_target;
+        let digest_matches = !normalized_id.is_empty()
+            && img
+                .descriptor
+                .as_ref()
+                .is_some_and(|d| short_image_id(&d.digest) == normalized_id);
+        if (ref_matches || digest_matches) && !entry.configuration.id.is_empty() {
+            holders.push(entry.configuration.id);
+        }
+    }
+    holders
+}
+
+async fn ensure_container_image_unused(arg: &str, id: &str) -> Result<()> {
+    let Ok(list_out) = local_cli_command("container")
+        .args(["list", "--all", "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+    else {
+        return Ok(());
+    };
+    if !list_out.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&list_out.stdout);
+    let holders = parse_container_in_use_ids(&stdout, arg, id);
+    if holders.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Other {
+        message: format!(
+            "container image delete {arg} failed: image is in use by container {}",
+            holders.join(", ")
+        ),
+    })
+}
+
+/// Removes a local container image via the `docker`, `podman`, or `container` CLI.
+pub async fn remove_local_image(
+    runtime: LocalRuntime,
+    target: &str,
+    id: &str,
+    force: bool,
+) -> Result<()> {
+    let arg = if !target.trim().is_empty() {
+        target.trim()
+    } else {
+        id.trim()
+    };
+    if arg.is_empty() {
+        return Err(Error::Other {
+            message: "missing local image target".to_string(),
+        });
+    }
+
+    if runtime == LocalRuntime::Container && !force {
+        ensure_container_image_unused(arg, id).await?;
+    }
+
+    let cli = runtime.cli();
+    let mut cmd = local_cli_command(cli);
+    let subcmd = match runtime {
+        LocalRuntime::Docker => {
+            cmd.args(["image", "rm"]);
+            "docker image rm"
+        }
+        LocalRuntime::Podman => {
+            cmd.arg("rmi");
+            "podman rmi"
+        }
+        LocalRuntime::Container => {
+            cmd.args(["image", "delete"]);
+            "container image delete"
+        }
+    };
+    if force {
+        cmd.arg("--force");
+    }
+    let output = cmd
+        .arg(arg)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| Error::Other {
+            message: format!("failed to run `{subcmd}`: {err}"),
+        })?;
+    if !output.status.success() {
+        let detail = command_error_detail(&output);
+        return Err(Error::Other {
+            message: format!("{subcmd} {arg} failed: {detail}"),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn cache_arch_drops_the_platform_for_single_image_manifests() {
@@ -647,9 +1039,12 @@ mod tests {
         assert_eq!(images[0].id, "abcdef123456");
         assert_eq!(images[0].reference(), "docker://redis:alpine");
         assert_eq!(images[0].created, "2 weeks ago");
+        assert_eq!(images[0].size_bytes, Some(41_200_000));
         assert_eq!(images[1].id, "111122223333");
         assert_eq!(images[1].reference(), "docker://111122223333");
         assert_eq!(images[1].created, "2026-11-01");
+        assert_eq!(images[1].size_bytes, Some(88_000_000));
+        assert!(images[1].created_at.is_some());
 
         let empty = parse_local_images_output(LocalRuntime::Docker, "  \n ").unwrap();
         assert!(empty.is_empty());
@@ -662,6 +1057,7 @@ mod tests {
                 "Id": "sha256:0123456789abcdef",
                 "Names": ["localhost:5000/my/app:1.2.0"],
                 "Size": 10485760,
+                "Created": 1760000000,
                 "CreatedSince": "3 hours ago"
             },
             {
@@ -679,6 +1075,8 @@ mod tests {
             images[0].reference(),
             "podman://localhost:5000/my/app:1.2.0"
         );
+        assert_eq!(images[0].size_bytes, Some(10_485_760));
+        assert_eq!(images[0].created_at, Some(1_760_000_000));
         assert!(!images[0].size.is_empty());
     }
 
@@ -731,13 +1129,16 @@ mod tests {
         assert_eq!(images[0].tag, "8.10");
         assert_eq!(images[0].id, "718f745deb7d");
         assert_eq!(images[0].reference(), "container://redis:8.10");
+        assert_eq!(images[0].cli_target(), "redis:8.10");
         assert_eq!(images[0].created, "2026-08-26 23:03");
-        let expected_first = if host_arch() == "arm64" {
-            ByteSize::b(55350198).to_string()
+        let expected_bytes = if host_arch() == "arm64" {
+            55_350_198
         } else {
-            ByteSize::b(55565214).to_string()
+            55_565_214
         };
-        assert_eq!(images[0].size, expected_first);
+        assert_eq!(images[0].size_bytes, Some(expected_bytes));
+        assert_eq!(images[0].size, ByteSize::b(expected_bytes).to_string());
+        assert_eq!(images[0].created_at, Some(1_787_785_401));
 
         assert_eq!(images[1].repository, "ghcr.io/fun7257/xai-proxy");
         assert_eq!(images[1].tag, "v0.1.0");
@@ -745,6 +1146,141 @@ mod tests {
             images[1].reference(),
             "container://ghcr.io/fun7257/xai-proxy:v0.1.0"
         );
-        assert_eq!(images[1].size, ByteSize::b(10485760).to_string());
+        assert_eq!(images[1].size_bytes, Some(10_485_760));
+        assert_eq!(images[1].size, ByteSize::b(10_485_760).to_string());
+    }
+
+    #[test]
+    fn orders_runtimes_with_installed_first_and_detects_executables() {
+        assert_eq!(
+            LocalRuntime::ordered_by_installed_with(|rt| rt == LocalRuntime::Container),
+            [
+                LocalRuntime::Container,
+                LocalRuntime::Docker,
+                LocalRuntime::Podman
+            ]
+        );
+        assert_eq!(
+            LocalRuntime::ordered_by_installed_with(|rt| {
+                matches!(rt, LocalRuntime::Podman | LocalRuntime::Container)
+            }),
+            [
+                LocalRuntime::Podman,
+                LocalRuntime::Container,
+                LocalRuntime::Docker
+            ]
+        );
+        assert_eq!(
+            LocalRuntime::ordered_by_installed_with(|_| false),
+            [
+                LocalRuntime::Docker,
+                LocalRuntime::Podman,
+                LocalRuntime::Container
+            ]
+        );
+
+        let dir = tempdir().unwrap();
+        let bin_path = dir.path().join("my-runtime");
+        fs::write(&bin_path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&bin_path, perms.clone()).unwrap();
+            assert!(!is_executable_in_dirs(
+                "my-runtime",
+                &[dir.path().to_path_buf()]
+            ));
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin_path, perms).unwrap();
+        }
+        assert!(is_executable_in_dirs(
+            "my-runtime",
+            &[dir.path().to_path_buf()]
+        ));
+        assert!(!is_executable_in_dirs(
+            "missing-runtime",
+            &[dir.path().to_path_buf()]
+        ));
+    }
+
+    #[test]
+    fn parses_size_bytes_and_created_timestamps_for_sorting() {
+        assert_eq!(parse_human_size_bytes("0B"), Some(0));
+        assert_eq!(parse_human_size_bytes("46.4 MiB"), Some(48_653_926));
+        assert_eq!(parse_human_size_bytes("222.2 MiB"), Some(232_993_587));
+        assert_eq!(parse_human_size_bytes("41.2MB"), Some(41_200_000));
+        assert_eq!(parse_human_size_bytes("1.5 GiB"), Some(1_610_612_736));
+        assert_eq!(parse_human_size_bytes("unknown"), None);
+
+        assert_eq!(
+            parse_created_timestamp("2026-10-07T21:48:02Z"),
+            Some(1_791_409_682)
+        );
+        assert_eq!(
+            parse_created_timestamp("2026-10-07 21:48:02 +0000 UTC"),
+            Some(1_791_409_682)
+        );
+        assert_eq!(
+            parse_created_timestamp("2026-10-07 21:48"),
+            Some(1_791_409_680)
+        );
+        assert_eq!(parse_created_timestamp("2026-10-07"), Some(1_791_331_200));
+        let two_hours = parse_created_timestamp("2 hours ago").unwrap();
+        let two_days = parse_created_timestamp("2 days ago").unwrap();
+        assert!(two_hours > two_days);
+        assert_eq!(parse_created_timestamp("not a date"), None);
+    }
+
+    #[test]
+    fn detects_in_use_errors_and_apple_container_holders() {
+        assert!(is_image_in_use_error(
+            "Error response from daemon: conflict: unable to remove repository reference \"redis:7\" (must force) - container abc123 is using its referenced image 71da9275c5f3"
+        ));
+        assert!(is_image_in_use_error(
+            "Error: Image used by 1234567890ab: image is being used by a container"
+        ));
+        assert!(is_image_in_use_error(
+            "container image delete mysql:8.4 failed: image is in use by container cyberapi-mysql"
+        ));
+        assert!(!is_image_in_use_error("No such image: missing:latest"));
+
+        let ps_json = r#"[
+            {
+                "configuration": {
+                    "id": "cyberapi-mysql",
+                    "image": {
+                        "reference": "docker.io/library/mysql:8.4",
+                        "descriptor": {
+                            "digest": "sha256:24989179f58856db763f418010c1169fecc944e3ec1ea7e921572d83eb070f70"
+                        }
+                    }
+                }
+            },
+            {
+                "configuration": {
+                    "id": "etcd",
+                    "image": {
+                        "reference": "gcr.io/etcd-development/etcd:v3.6.5",
+                        "descriptor": {
+                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }
+            }
+        ]"#;
+        assert_eq!(
+            parse_container_in_use_ids(ps_json, "mysql:8.4", "24989179f588"),
+            vec!["cyberapi-mysql".to_string()]
+        );
+        assert_eq!(
+            parse_container_in_use_ids(
+                ps_json,
+                "gcr.io/etcd-development/etcd:v3.6.5",
+                "bbbbbbbbbbbb"
+            ),
+            vec!["etcd".to_string()]
+        );
+        assert!(parse_container_in_use_ids(ps_json, "redis:7", "71da9275c5f3").is_empty());
     }
 }
