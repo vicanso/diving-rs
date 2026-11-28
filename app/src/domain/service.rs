@@ -834,6 +834,14 @@ mod tests {
             format_image_target("podman://redis:alpine", Some("arm64")),
             "podman://redis:alpine"
         );
+        assert_eq!(
+            format_image_target("container://redis:alpine", Some("arm64")),
+            "container://redis:alpine?arch=arm64"
+        );
+        assert_eq!(
+            format_image_target("container://redis:alpine", None),
+            "container://redis:alpine"
+        );
     }
 
     #[test]

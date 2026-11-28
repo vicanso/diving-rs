@@ -779,6 +779,14 @@ mod tests {
             with_arch("podman://app:dev", Some("arm64")),
             "podman://app:dev"
         );
+        assert_eq!(
+            with_arch("container://app:dev", Some("arm64")),
+            "container://app:dev?arch=arm64"
+        );
+        assert_eq!(
+            with_arch("container://app:dev?arch=amd64", Some("arm64")),
+            "container://app:dev?arch=amd64"
+        );
     }
 
     #[test]

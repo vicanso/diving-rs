@@ -47,6 +47,7 @@ const KEY_APPEARANCE: &str = "diving.appearance";
 const KEY_SIDEBAR_WIDTH: &str = "diving.layers_pane_width";
 const KEY_APP_SIDEBAR_OPEN: &str = "diving.app_sidebar_open";
 const KEY_RECENT_IMAGES: &str = "diving.recent_images";
+const KEY_LOCAL_RUNTIME: &str = "diving.local_runtime";
 const KEY_LAYER_SORT_ORDER: &str = "diving.layer_sort_order";
 const KEY_COMMAND_WRAP: &str = "diving.command_wrap";
 const KEY_COMMAND_RAW: &str = "diving.command_raw";
@@ -351,6 +352,14 @@ impl AppState {
             .and_then(|raw| serde_json::from_str::<Vec<RecentImageEntry>>(&raw).ok())
             .unwrap_or_default();
 
+        let saved_local_runtime = Storage::get_item(KEY_LOCAL_RUNTIME)
+            .map(|raw| match raw.as_str() {
+                "podman" => LocalRuntime::Podman,
+                "container" => LocalRuntime::Container,
+                _ => LocalRuntime::Docker,
+            })
+            .unwrap_or(LocalRuntime::Docker);
+
         let compact_viewport = untracked(|| window().width) < px(1080.0);
         let wide_sidebar_pref = Storage::get_item(KEY_APP_SIDEBAR_OPEN)
             .map(|raw| raw != "false")
@@ -468,7 +477,7 @@ impl AppState {
             diff_file_tab: signal(DiffFileTab::Added),
             diff_request_id: signal(0),
             local_picker_open: signal(false),
-            local_runtime: signal(LocalRuntime::Docker),
+            local_runtime: signal(saved_local_runtime),
             local_images: signal(Vec::new()),
             local_loading: signal(false),
             local_error: signal(None),
@@ -1865,6 +1874,7 @@ impl AppState {
 
     pub fn set_local_runtime(&self, runtime: LocalRuntime) {
         if self.local_runtime.get_untracked() != runtime {
+            let _ = Storage::set_item(KEY_LOCAL_RUNTIME, runtime.cli());
             self.local_runtime.set(runtime);
             self.local_selected_ref.set(None);
             self.refresh_local_images();
@@ -2630,6 +2640,10 @@ mod tests {
         assert_eq!(
             parse_explicit_arch_query("docker://redis:alpine?arch=arm64"),
             None
+        );
+        assert_eq!(
+            parse_explicit_arch_query("container://redis:alpine?arch=arm64"),
+            Some("arm64".to_owned())
         );
     }
 

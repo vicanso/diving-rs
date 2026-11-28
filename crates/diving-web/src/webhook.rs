@@ -504,6 +504,7 @@ fn apply_registry_host(image_ref: &str, host: Option<&str>) -> String {
     if stripped.starts_with("file://")
         || stripped.starts_with("docker://")
         || stripped.starts_with("podman://")
+        || stripped.starts_with("container://")
     {
         return stripped.to_string();
     }

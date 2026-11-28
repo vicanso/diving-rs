@@ -1,7 +1,7 @@
 //! Pure Rust core library for analyzing Docker / OCI container image layers.
 //!
 //! Create an [`Analyzer`] via [`Analyzer::builder()`] to inspect images from
-//! registries, local `file://` archives/layouts, or `docker://` / `podman://`
+//! registries, local `file://` archives/layouts, or `docker://` / `podman://` / `container://`
 //! clients with isolated disk caches and configurable security policies.
 
 mod analyzer;
@@ -41,7 +41,8 @@ pub use image::{
     FileTreeItem, FinalFile, ImageFileInfo, ImageFileSummary, ImageFileWastedSummary, ImageInfo,
     ImageLayer, ImagePreview, LocalContainerImage, LocalRuntime, Op, RegistryCredentials,
     RegistryRule, RuntimeCompat, SensitiveFileInfo, UnstrippedBinary, WasteChange,
-    REGISTRY_DOCKER_HUB, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    REGISTRY_DOCKER_HUB, REGISTRY_LOCAL_CONTAINER, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    REGISTRY_LOCAL_PODMAN,
 };
 pub use markdown::{to_markdown, to_summary_markdown};
 pub use preview::{

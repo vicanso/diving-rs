@@ -11,10 +11,11 @@ pub use diving_core::{
 };
 use diving_core::{
     DockerAnalyzeResult, DockerAnalyzeSummary, FileTreeItem, ImageDiff, ImageLayer,
-    InspectedPreview, Op, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
-    Recommendation, RuntimeCompat, detect_code_language as core_detect_code_language,
-    encode_data_uri, format_archive_text, format_media_text, format_structured_text,
-    inspect_file_preview, parse_image_info, registry_host,
+    InspectedPreview, Op, REGISTRY_LOCAL_CONTAINER, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE,
+    REGISTRY_LOCAL_PODMAN, Recommendation, RuntimeCompat,
+    detect_code_language as core_detect_code_language, encode_data_uri, format_archive_text,
+    format_media_text, format_structured_text, inspect_file_preview, parse_image_info,
+    registry_host,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,6 +203,7 @@ pub enum ImageSourceKind {
     LocalFile,
     LocalDocker,
     LocalPodman,
+    LocalContainer,
 }
 
 impl ImageSourceKind {
@@ -211,6 +213,7 @@ impl ImageSourceKind {
             Self::LocalFile => "status.source_file",
             Self::LocalDocker => "status.source_docker",
             Self::LocalPodman => "status.source_podman",
+            Self::LocalContainer => "status.source_container",
         }
     }
 }
@@ -222,6 +225,7 @@ pub fn image_source_kind(image_ref: &str) -> ImageSourceKind {
         r if r == REGISTRY_LOCAL_FILE => ImageSourceKind::LocalFile,
         r if r == REGISTRY_LOCAL_DOCKER => ImageSourceKind::LocalDocker,
         r if r == REGISTRY_LOCAL_PODMAN => ImageSourceKind::LocalPodman,
+        r if r == REGISTRY_LOCAL_CONTAINER => ImageSourceKind::LocalContainer,
         _ => ImageSourceKind::Registry,
     }
 }
@@ -1782,6 +1786,14 @@ mod tests {
         assert_eq!(
             extract_registry_host_from_image("docker://redis:alpine"),
             None
+        );
+        assert_eq!(
+            extract_registry_host_from_image("container://redis:8.10"),
+            None
+        );
+        assert_eq!(
+            image_source_kind("container://redis:8.10"),
+            ImageSourceKind::LocalContainer
         );
         assert_eq!(extract_registry_host_from_image(""), None);
 

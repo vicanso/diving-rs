@@ -43,8 +43,8 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("menu.open_local_file", "Open local file…", "打开本地文件…"),
     (
         "menu.browse_local_images",
-        "Browse Docker / Podman…",
-        "浏览 Docker / Podman…",
+        "Browse local images…",
+        "浏览本地镜像…",
     ),
     (
         "menu.export_markdown",
@@ -596,6 +596,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("status.source_docker", "Local Docker", "本地 Docker"),
     ("status.source_podman", "Local Podman", "本地 Podman"),
     (
+        "status.source_container",
+        "Local Container",
+        "本地 Container",
+    ),
+    (
         "notice.cache_cleaned",
         "Cleaned {0} expired files ({1}).",
         "已清理 {0} 个过期缓存文件（释放 {1}）。",
@@ -816,10 +821,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "基准镜像与目标镜像均分析失败。",
     ),
     ("diff.quick_arch", "Compare {0} with {1}", "对比 {0} 与 {1}"),
-    // Local Docker / Podman Image Picker
+    // Local Docker / Podman / Container Image Picker
     ("local.title", "Local Images", "本地镜像"),
     ("local.docker", "Docker", "Docker"),
     ("local.podman", "Podman", "Podman"),
+    ("local.container", "Container", "Container"),
     (
         "local.filter_placeholder",
         "Filter repository, tag, or ID…",
@@ -853,6 +859,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ),
     ("local.switch_docker", "Switch to Docker", "切换 Docker"),
     ("local.switch_podman", "Switch to Podman", "切换 Podman"),
+    (
+        "local.switch_container",
+        "Switch to Container",
+        "切换 Container",
+    ),
     // Command Palette & Application Menu
     (
         "cmd.placeholder",
@@ -1193,7 +1204,7 @@ pub fn format_user_error(lang: UiLang, raw: &str) -> String {
         let clean_cmd = cmd.trim().trim_matches('`');
         if matches!(
             clean_cmd.split_whitespace().next(),
-            Some("docker" | "podman")
+            Some("docker" | "podman" | "container")
         ) {
             let clean_status = status.trim_end_matches(')').trim();
             return tf(

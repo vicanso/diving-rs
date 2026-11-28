@@ -1,4 +1,4 @@
-//! Local Docker / Podman container image picker dialog with daemon failure recovery.
+//! Local Docker / Podman / Apple Container image picker dialog with daemon failure recovery.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +17,22 @@ use crate::ui::{
     ui_icon_button, ui_search_input_with_escape, ui_segmented, ui_skeleton,
 };
 
+fn switch_runtime_label_key(runtime: LocalRuntime) -> &'static str {
+    match runtime {
+        LocalRuntime::Docker => "local.switch_docker",
+        LocalRuntime::Podman => "local.switch_podman",
+        LocalRuntime::Container => "local.switch_container",
+    }
+}
+
+fn other_runtimes(current: LocalRuntime) -> [LocalRuntime; 2] {
+    match current {
+        LocalRuntime::Docker => [LocalRuntime::Container, LocalRuntime::Podman],
+        LocalRuntime::Podman => [LocalRuntime::Docker, LocalRuntime::Container],
+        LocalRuntime::Container => [LocalRuntime::Docker, LocalRuntime::Podman],
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerViewState {
     Loading,
@@ -25,7 +41,7 @@ enum PickerViewState {
     List,
 }
 
-/// Modal centered dialog listing images stored in local Docker or Podman daemons.
+/// Modal centered dialog listing images stored in local Docker, Podman, or Apple Container engines.
 pub fn local_picker_dialog(state: AppState) -> impl IntoElement {
     let lang = state.lang;
     let body_state = state.clone();
@@ -202,6 +218,9 @@ fn picker_body(state: AppState) -> impl IntoElement {
                         SegmentOption::new(LocalRuntime::Podman, move || {
                             SharedString::from(t(lang.get(), "local.podman"))
                         }),
+                        SegmentOption::new(LocalRuntime::Container, move || {
+                            SharedString::from(t(lang.get(), "local.container"))
+                        }),
                     ],
                     list_state.local_runtime,
                     UiSize::Sm,
@@ -262,7 +281,7 @@ fn picker_body(state: AppState) -> impl IntoElement {
                         .child(ui_skeleton(px(450.0), px(22.0)))
                         .into_element(),
                     PickerViewState::Error => {
-                        let switch_state = list_state.clone();
+                        let current_rt = list_state.local_runtime.get();
                         let file_state = list_state.clone();
                         let folder_state = list_state.clone();
 
@@ -295,39 +314,31 @@ fn picker_body(state: AppState) -> impl IntoElement {
                                                 .justify_center()
                                                 .items_center()
                                                 .gap_2()
-                                                .child(ui_button(
-                                                    move || {
-                                                        let alt_key =
-                                                            match list_state.local_runtime.get() {
-                                                                LocalRuntime::Docker => {
-                                                                    "local.switch_podman"
-                                                                }
-                                                                LocalRuntime::Podman => {
-                                                                    "local.switch_docker"
-                                                                }
-                                                            };
-                                                        SharedString::from(t(lang.get(), alt_key))
-                                                    },
-                                                    ButtonVariant::Outline,
-                                                    UiSize::Sm,
-                                                    None,
-                                                    false,
-                                                    false,
-                                                    move || {
-                                                        let alt = match switch_state
-                                                            .local_runtime
-                                                            .get_untracked()
-                                                        {
-                                                            LocalRuntime::Docker => {
-                                                                LocalRuntime::Podman
-                                                            }
-                                                            LocalRuntime::Podman => {
-                                                                LocalRuntime::Docker
-                                                            }
-                                                        };
-                                                        switch_state.set_local_runtime(alt);
-                                                    },
-                                                ))
+                                                .children(
+                                                    other_runtimes(current_rt).into_iter().map(
+                                                        |alt| {
+                                                            let switch_state = list_state.clone();
+                                                            let key = switch_runtime_label_key(alt);
+                                                            ui_button(
+                                                                move || {
+                                                                    SharedString::from(t(
+                                                                        lang.get(),
+                                                                        key,
+                                                                    ))
+                                                                },
+                                                                ButtonVariant::Outline,
+                                                                UiSize::Sm,
+                                                                None,
+                                                                false,
+                                                                false,
+                                                                move || {
+                                                                    switch_state
+                                                                        .set_local_runtime(alt)
+                                                                },
+                                                            )
+                                                        },
+                                                    ),
+                                                )
                                                 .child(ui_button(
                                                     move || {
                                                         SharedString::from(t(
@@ -886,5 +897,79 @@ mod tests {
             Duration::from_secs(2),
         )
         .expect("Space analyzed active item-01");
+    }
+
+    #[component]
+    fn LocalPickerContainerSwitchHarness() -> impl IntoElement {
+        let state = AppState::new(DivingService::new());
+        state.local_runtime.set(LocalRuntime::Docker);
+        state.local_images.set(Vec::new());
+        state.local_loading.set(false);
+        state
+            .local_error
+            .set(Some("docker images failed: daemon not running".to_owned()));
+        state.local_picker_open.set(true);
+
+        let reset_state = state.clone();
+        let rt_sig = state.local_runtime;
+        view()
+            .flex_col()
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(text(move || format!("rt={:?}", rt_sig.get())))
+                    .child(ui_button(
+                        "ResetDockerError",
+                        ButtonVariant::Ghost,
+                        UiSize::Xs,
+                        None,
+                        false,
+                        false,
+                        move || {
+                            reset_state.local_request_id.set(99);
+                            reset_state.local_runtime.set(LocalRuntime::Docker);
+                            reset_state.local_loading.set(false);
+                            reset_state
+                                .local_error
+                                .set(Some("docker images failed: daemon not running".to_owned()));
+                        },
+                    )),
+            )
+            .child(local_picker_dialog(state))
+    }
+
+    #[test]
+    fn local_picker_supports_container_segment_and_error_recovery_switch() {
+        let config = EngineConfig {
+            environment: Environment {
+                os: Os::MacOs,
+                idiom: Idiom::Desktop,
+                ..Default::default()
+            },
+            viewport: Size::new(Points(1280.0), Points(820.0)),
+            ..EngineConfig::new(
+                windowed_root::<LocalPickerContainerSwitchHarness>().tokens(app_tokens()),
+            )
+        };
+        let mut app = Headless::start(config).expect("start container switch harness");
+        app.wait_for_within("Switch to Container", Duration::from_secs(3))
+            .expect("Switch to Container recovery button visible");
+        assert!(app.shows("Switch to Podman"));
+        assert!(app.shows("rt=Docker"));
+
+        app.press("Switch to Container")
+            .expect("switch runtime via error recovery button");
+        app.wait_for_within("rt=Container", Duration::from_secs(3))
+            .expect("runtime switched to Container from recovery button");
+
+        app.press("ResetDockerError")
+            .expect("reset back to Docker error");
+        app.wait_for_within("rt=Docker", Duration::from_secs(3))
+            .expect("reset to Docker");
+        app.press("Container")
+            .expect("select Container segment option");
+        app.wait_for_within("rt=Container", Duration::from_secs(3))
+            .expect("runtime switched to Container from segmented control");
     }
 }

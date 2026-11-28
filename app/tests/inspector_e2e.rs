@@ -354,12 +354,13 @@ fn command_palette_opens_with_mod_k_and_switches_language() {
 #[test]
 fn local_picker_dialog_opens_and_closes_on_escape() {
     let mut app = start_desktop_app();
-    app.press("Browse Docker / Podman…")
+    app.press("Browse local images…")
         .expect("open Local Images picker");
     app.wait_for_within("Local Images", Duration::from_secs(3))
         .expect("render Local Images dialog");
     assert!(app.shows("Docker"));
     assert!(app.shows("Podman"));
+    assert!(app.shows("Container"));
 
     app.wait_until(
         "local images loaded or recovery shown",

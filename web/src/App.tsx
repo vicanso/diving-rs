@@ -189,9 +189,9 @@ const setLocation = (search: string, mode: HistoryMode) => {
   }
 };
 
-// `docker://` / `podman://` name one local image; a registry image or an
-// OCI archive / layout may hold several platforms. A `?arch=` already in
-// the reference wins.
+// `docker://` / `podman://` name one local image; a registry image,
+// `file://` OCI archive / layout, or `container://` may hold several
+// platforms. A `?arch=` already in the reference wins.
 const withArch = (image: string, arch: string) =>
   /^(docker|podman):\/\//.test(image) || image.includes("?arch=") || !arch
     ? image
@@ -371,7 +371,7 @@ const App = () => {
     let analyzeDone = false;
     const manifestController = new AbortController();
     // Registry images only: a local source has no cheap manifest to read.
-    const previewTimer = /^(file|docker|podman):\/\//.test(image)
+    const previewTimer = /^(file|docker|podman|container):\/\//.test(image)
       ? undefined
       : window.setTimeout(() => {
           if (analyzeDone || current !== ticket.current) {

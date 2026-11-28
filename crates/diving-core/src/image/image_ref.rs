@@ -2,17 +2,19 @@
 //!
 //! Accepts the same forms as the CLI: `name:tag`, `user/name:tag`,
 //! `registry:port/user/name:tag`, nested namespaces (`ghcr.io/a/b/c:tag`),
-//! `file://` / `docker://` / `podman://` protocols, and `?arch=` query params.
+//! `file://` / `docker://` / `podman://` / `container://` protocols, and `?arch=` query params.
 
 /// Default Docker Hub registry (v2 API base).
 pub const REGISTRY_DOCKER_HUB: &str = "https://index.docker.io/v2";
 pub const REGISTRY_LOCAL_FILE: &str = "local-file";
 pub const REGISTRY_LOCAL_DOCKER: &str = "local-docker";
 pub const REGISTRY_LOCAL_PODMAN: &str = "local-podman";
+pub const REGISTRY_LOCAL_CONTAINER: &str = "local-container";
 
 static FILE_PROTOCOL: &str = "file://";
 static LOCAL_DOCKER_PROTOCOL: &str = "docker://";
 static LOCAL_PODMAN_PROTOCOL: &str = "podman://";
+static LOCAL_CONTAINER_PROTOCOL: &str = "container://";
 
 /// The platform an image is analyzed for when the reference names none:
 /// the host's, as `docker pull` would pick.
@@ -67,11 +69,14 @@ pub fn platform_matches(wanted: &str, architecture: &str, variant: Option<&str>)
 }
 
 /// Whether `registry` is one of the local-source markers (`file://`,
-/// `docker://`, `podman://`) rather than a registry URL.
+/// `docker://`, `podman://`, `container://`) rather than a registry URL.
 pub fn is_local_registry(registry: &str) -> bool {
     matches!(
         registry,
-        REGISTRY_LOCAL_FILE | REGISTRY_LOCAL_DOCKER | REGISTRY_LOCAL_PODMAN
+        REGISTRY_LOCAL_FILE
+            | REGISTRY_LOCAL_DOCKER
+            | REGISTRY_LOCAL_PODMAN
+            | REGISTRY_LOCAL_CONTAINER
     )
 }
 
@@ -139,29 +144,38 @@ fn strip_windows_drive_leading_slash(path: &str) -> &str {
     }
 }
 
+fn split_arch_query(raw: &str) -> (&str, &str) {
+    let Some((head, query)) = raw.rsplit_once('?') else {
+        return (raw, "");
+    };
+    for kv in query.split('&') {
+        if let Some((k, v)) = kv.split_once('=') {
+            if k == "arch" {
+                return (head, v);
+            }
+        }
+    }
+    (raw, "")
+}
+
 pub fn parse_image_info(image: &str) -> ImageInfo {
     let mut value = image.to_string();
     if let Some(path) = value.strip_prefix(FILE_PROTOCOL) {
         // `?arch=` (with optional `&other=...` params) picks a platform out of a multi-arch OCI archive.
-        let (path, arch) = match path.rsplit_once('?') {
-            Some((head, query)) => {
-                if let Some(found) = query
-                    .split('&')
-                    .filter_map(|kv| kv.split_once('='))
-                    .find(|(k, _)| *k == "arch")
-                    .map(|(_, v)| v)
-                {
-                    (head, found)
-                } else {
-                    (path, "")
-                }
-            }
-            None => (path, ""),
-        };
+        let (path, arch) = split_arch_query(path);
         let path = strip_windows_drive_leading_slash(path);
         return ImageInfo {
             registry: REGISTRY_LOCAL_FILE.to_string(),
             name: path.to_string(),
+            arch: normalize_arch(arch),
+            ..Default::default()
+        };
+    }
+    if let Some(name) = value.strip_prefix(LOCAL_CONTAINER_PROTOCOL) {
+        let (name, arch) = split_arch_query(name);
+        return ImageInfo {
+            registry: REGISTRY_LOCAL_CONTAINER.to_string(),
+            name: name.to_string(),
             arch: normalize_arch(arch),
             ..Default::default()
         };
@@ -377,6 +391,15 @@ mod tests {
         let info = parse_image_info("docker://redis:alpine");
         assert_eq!(info.registry, REGISTRY_LOCAL_DOCKER);
         assert_eq!(info.name, "redis:alpine");
+        let info = parse_image_info("container://redis:8.10");
+        assert_eq!(info.registry, REGISTRY_LOCAL_CONTAINER);
+        assert_eq!(info.name, "redis:8.10");
+        assert_eq!(info.arch, "");
+        assert!(is_local_registry(&info.registry));
+        let info = parse_image_info("container://ghcr.io/org/app:v1?arch=aarch64");
+        assert_eq!(info.registry, REGISTRY_LOCAL_CONTAINER);
+        assert_eq!(info.name, "ghcr.io/org/app:v1");
+        assert_eq!(info.arch, "arm64");
     }
 
     #[test]

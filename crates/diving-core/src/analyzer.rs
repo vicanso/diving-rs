@@ -7,7 +7,7 @@ use crate::image::{
     match_host_specificity, parse_image_info, preview_image, registry_host, stream_file_from_layer,
     DockerAnalyzeResult, DockerConfig, ImageInfo, ImagePreview, LocalManifest, PipelineContext,
     PipelineOptions, RegistryCaches, RegistryCredentials, RegistryRule, RegistryRuleSet, TarIndex,
-    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    REGISTRY_LOCAL_CONTAINER, REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 use crate::progress::ProgressCallback;
 use crate::recommend::build_recommendations;
@@ -173,7 +173,7 @@ impl PreviewOptions {
 ///
 /// Defaults follow a secure-by-default server posture:
 /// - Ephemeral `TempDir` cache (no implicit `~/.diving` I/O)
-/// - Local sources (`file://`, `docker://`, `podman://`) disabled
+/// - Local sources (`file://`, `docker://`, `podman://`, `container://`) disabled
 /// - `~/.docker/config.json` / credential helpers disabled
 /// - Singleflight deduplication enabled
 #[derive(Clone)]
@@ -185,6 +185,7 @@ pub struct AnalyzerBuilder {
     allow_local_file: Option<bool>,
     allow_local_docker: Option<bool>,
     allow_local_podman: Option<bool>,
+    allow_local_container: Option<bool>,
     use_docker_config: bool,
     docker_config_path: Option<PathBuf>,
     registry_allowlist: Vec<String>,
@@ -206,6 +207,7 @@ impl Default for AnalyzerBuilder {
             allow_local_file: None,
             allow_local_docker: None,
             allow_local_podman: None,
+            allow_local_container: None,
             use_docker_config: false,
             docker_config_path: None,
             registry_allowlist: vec![],
@@ -240,11 +242,12 @@ impl AnalyzerBuilder {
         self
     }
 
-    /// Enable or disable all local image sources (`file://`, `docker://`, `podman://`).
+    /// Enable or disable all local image sources (`file://`, `docker://`, `podman://`, `container://`).
     pub fn allow_local_sources(mut self, allow: bool) -> Self {
         self.allow_local_file = Some(allow);
         self.allow_local_docker = Some(allow);
         self.allow_local_podman = Some(allow);
+        self.allow_local_container = Some(allow);
         self
     }
 
@@ -263,6 +266,11 @@ impl AnalyzerBuilder {
         self
     }
 
+    pub fn allow_local_container(mut self, allow: bool) -> Self {
+        self.allow_local_container = Some(allow);
+        self
+    }
+
     /// Enable reading `~/.docker/config.json` (or `$DOCKER_CONFIG/config.json`)
     /// and Docker credential helpers when explicit credentials are not provided.
     pub fn use_docker_config(mut self, use_cfg: bool) -> Self {
@@ -278,7 +286,7 @@ impl AnalyzerBuilder {
     }
 
     /// Restrict permitted registry hosts (and optionally `local-file`,
-    /// `local-docker`, `local-podman`). Empty means unrestricted for remote registries.
+    /// `local-docker`, `local-podman`, `local-container`). Empty means unrestricted for remote registries.
     pub fn registry_allowlist<I, S>(mut self, hosts: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -366,6 +374,9 @@ impl AnalyzerBuilder {
         let allow_local_podman = self
             .allow_local_podman
             .unwrap_or_else(|| has_in_allowlist(REGISTRY_LOCAL_PODMAN));
+        let allow_local_container = self
+            .allow_local_container
+            .unwrap_or_else(|| has_in_allowlist(REGISTRY_LOCAL_CONTAINER));
 
         let analysis_slots = self.max_concurrent_analyses.map(Semaphore::new);
 
@@ -382,6 +393,7 @@ impl AnalyzerBuilder {
                 allow_local_file,
                 allow_local_docker,
                 allow_local_podman,
+                allow_local_container,
                 use_docker_config: self.use_docker_config,
                 docker_config_path: self.docker_config_path,
                 docker_config: OnceLock::new(),
@@ -409,6 +421,7 @@ struct AnalyzerInner {
     allow_local_file: bool,
     allow_local_docker: bool,
     allow_local_podman: bool,
+    allow_local_container: bool,
     use_docker_config: bool,
     docker_config_path: Option<PathBuf>,
     docker_config: OnceLock<Option<Arc<DockerConfig>>>,
@@ -506,6 +519,7 @@ impl Analyzer {
                 REGISTRY_LOCAL_FILE => self.inner.allow_local_file,
                 REGISTRY_LOCAL_DOCKER => self.inner.allow_local_docker,
                 REGISTRY_LOCAL_PODMAN => self.inner.allow_local_podman,
+                REGISTRY_LOCAL_CONTAINER => self.inner.allow_local_container,
                 _ => false,
             };
             if !local_enabled {
@@ -1073,6 +1087,10 @@ mod tests {
             .unwrap_err()
             .is_forbidden());
         assert!(analyzer
+            .check_allowed(&parse_image_info("container://redis:8.10"))
+            .unwrap_err()
+            .is_forbidden());
+        assert!(analyzer
             .check_allowed(&parse_image_info("redis:alpine"))
             .is_ok());
     }
@@ -1080,7 +1098,7 @@ mod tests {
     #[test]
     fn allowlist_and_local_source_policies_compose() {
         let analyzer = Analyzer::builder()
-            .registry_allowlist(["ghcr.io", "local-file"])
+            .registry_allowlist(["ghcr.io", "local-file", "local-container"])
             .build()
             .unwrap();
         assert!(analyzer
@@ -1088,6 +1106,9 @@ mod tests {
             .is_ok());
         assert!(analyzer
             .check_allowed(&parse_image_info("file:///tmp/a.tar"))
+            .is_ok());
+        assert!(analyzer
+            .check_allowed(&parse_image_info("container://redis:8.10"))
             .is_ok());
         assert!(matches!(
             analyzer.check_allowed(&parse_image_info("redis:alpine")),
@@ -1097,6 +1118,20 @@ mod tests {
             analyzer.check_allowed(&parse_image_info("docker://redis:alpine")),
             Err(Error::LocalSourceDisabled { .. })
         ));
+        let container_only = Analyzer::builder()
+            .allow_local_container(true)
+            .build()
+            .unwrap();
+        assert!(container_only
+            .check_allowed(&parse_image_info("container://redis:8.10"))
+            .is_ok());
+        let all_local = Analyzer::builder()
+            .allow_local_sources(true)
+            .build()
+            .unwrap();
+        assert!(all_local
+            .check_allowed(&parse_image_info("container://redis:8.10"))
+            .is_ok());
     }
 
     #[test]

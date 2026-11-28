@@ -3,11 +3,11 @@ use super::elf::{
     unstripped_candidates, UnstrippedBinary, MAX_STRIP_CANDIDATE_BYTES,
 };
 use super::image_ref::{
-    is_local_registry, normalize_arch, repository_path, ImageInfo, REGISTRY_LOCAL_DOCKER,
-    REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
+    is_local_registry, normalize_arch, repository_path, ImageInfo, REGISTRY_LOCAL_CONTAINER,
+    REGISTRY_LOCAL_DOCKER, REGISTRY_LOCAL_FILE, REGISTRY_LOCAL_PODMAN,
 };
 use super::layer::{is_os_release_entry, scan_blob_targets};
-use super::local::save_local_image_to_file;
+use super::local::{save_container_image_to_file, save_local_image_to_file};
 use super::model::{DockerAnalyzeResult, ImagePreview};
 use super::oci_image::{plan_cross_layer_duplicates, DuplicateGroup, FileTreeItem, ImageLayer};
 use super::registry::{
@@ -432,12 +432,14 @@ pub(crate) async fn preview_image(
 async fn analyze_saved_tar(
     ctx: &PipelineContext,
     tmpfile: NamedTempFile,
+    arch: &str,
     opts: PipelineOptions,
 ) -> Result<Arc<DockerAnalyzeResult>> {
     let filename = tmpfile.path().to_string_lossy().to_string();
     let client = new_client_with_local_cache(ctx, REGISTRY_LOCAL_FILE, true);
     let mut params = DockerImageParams {
         img: filename,
+        arch: arch.to_string(),
         verify_dup: opts.verify_dup,
         credentials: opts.credentials,
         on_progress: opts.on_progress,
@@ -453,6 +455,11 @@ pub(crate) async fn analyze_once(
     image_info: ImageInfo,
     opts: PipelineOptions,
 ) -> Result<Arc<DockerAnalyzeResult>> {
+    if image_info.registry == REGISTRY_LOCAL_CONTAINER {
+        let tmpfile = TempBuilder::new().tempfile().context(IoSnafu {})?;
+        save_container_image_to_file(&image_info.name, &image_info.arch, tmpfile.path()).await?;
+        return analyze_saved_tar(ctx, tmpfile, &image_info.arch, opts).await;
+    }
     let save_cli = match image_info.registry.as_str() {
         REGISTRY_LOCAL_DOCKER => Some("docker"),
         REGISTRY_LOCAL_PODMAN => Some("podman"),
@@ -461,7 +468,7 @@ pub(crate) async fn analyze_once(
     if let Some(cli) = save_cli {
         let tmpfile = TempBuilder::new().tempfile().context(IoSnafu {})?;
         save_local_image_to_file(cli, &image_info.name, tmpfile.path()).await?;
-        analyze_saved_tar(ctx, tmpfile, opts).await
+        analyze_saved_tar(ctx, tmpfile, &image_info.arch, opts).await
     } else {
         let cache_local = image_info.registry == REGISTRY_LOCAL_FILE;
         let client = new_client_with_local_cache(ctx, &image_info.registry, cache_local);
@@ -618,6 +625,7 @@ mod tests {
         let base_res = analyze_saved_tar(
             &ctx,
             base_tmp,
+            "",
             PipelineOptions {
                 lang: Lang::En,
                 verify_dup: true,
@@ -640,6 +648,7 @@ mod tests {
         let target_res = analyze_saved_tar(
             &ctx,
             target_tmp,
+            "",
             PipelineOptions {
                 lang: Lang::En,
                 verify_dup: true,
@@ -800,6 +809,7 @@ mod tests {
         let res = analyze_saved_tar(
             &ctx,
             tmp,
+            "",
             PipelineOptions {
                 lang: Lang::En,
                 verify_dup: false,
